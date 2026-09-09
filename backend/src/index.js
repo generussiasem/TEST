@@ -201,15 +201,28 @@ app.post("/api/contacts", async (c) => {
 //   curl "<PRICE_LIST_URL>" | head
 // lalu sesuaikan pemetaan field di bawah.
 app.post("/api/products/sync", async (c) => {
-  const res = await fetch(c.env.PRICE_LIST_URL);
-  const data = await res.json();
-  const list = Array.isArray(data) ? data : data.data || data.result || [];
+  if (!c.env.PRICE_LIST_URL) {
+    return c.json({ ok: false, error: "Secret PRICE_LIST_URL belum diisi di Worker Settings → Variables and Secrets" }, 400);
+  }
+
+  let list;
+  try {
+    const res = await fetch(c.env.PRICE_LIST_URL);
+    if (!res.ok) {
+      return c.json({ ok: false, error: `Gagal ambil daftar harga, server balas status ${res.status}` }, 502);
+    }
+    const data = await res.json();
+    list = Array.isArray(data) ? data : data.data || data.result || [];
+  } catch (err) {
+    return c.json({ ok: false, error: "Gagal ambil/baca daftar harga: " + err.message }, 502);
+  }
 
   // Markup flat per transaksi di atas harga modal OkeConnect. Sesuaikan sendiri
   // di sini, atau nanti ubah manual per produk lewat halaman "Produk" -> "Ubah".
   const MARKUP = 500;
 
   let count = 0;
+  let lastError = null;
   for (const item of list) {
     const code = item.kode || item.code || item.product_code;
     // Field asli daftar harga OkeConnect: "keterangan" (deskripsi detail) dan
@@ -223,20 +236,25 @@ app.post("/api/products/sync", async (c) => {
     if (!code || !name) continue;
     if (item.status === "0" || item.status === 0) continue; // produk nonaktif/kosong di OkeConnect
 
-    await c.env.DB.prepare(
-      `INSERT INTO products (code, name, category, cost_price, sell_price)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(code) DO UPDATE SET
-         name = excluded.name,
-         category = excluded.category,
-         cost_price = excluded.cost_price,
-         sell_price = excluded.sell_price`
-    )
-      .bind(code, name, category, cost, sell)
-      .run();
-    count++;
+    try {
+      await c.env.DB.prepare(
+        `INSERT INTO products (code, name, category, cost_price, sell_price)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(code) DO UPDATE SET
+           name = excluded.name,
+           category = excluded.category,
+           cost_price = excluded.cost_price,
+           sell_price = excluded.sell_price`
+      )
+        .bind(code, name, category, cost, sell)
+        .run();
+      count++;
+    } catch (err) {
+      lastError = `${code}: ${err.message}`;
+    }
   }
-  return c.json({ ok: true, synced: count });
+
+  return c.json({ ok: true, synced: count, total: list.length, lastError });
 });
 
 app.get("/api/transactions", async (c) => {
