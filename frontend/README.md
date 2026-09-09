@@ -9,7 +9,7 @@ Backend (`wrangler dev`) harus jalan dulu di port default `8787`, lalu:
 
 ```
 npm install
-npm run dev
+npm run dev 
 ```
 
 Buka `http://localhost:5173`. Request ke `/api/*` otomatis diteruskan ke backend lewat
