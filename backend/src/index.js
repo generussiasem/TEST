@@ -1,10 +1,25 @@
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { sendJabberCommand } from "./jabber.js";
 import { sendTelegramMessage } from "./telegram.js";
 import { placePpobOrder, recordPpobSale } from "./ppob.js";
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
 
 const app = new Hono();
+
+// Backend (Worker) dan frontend (Cloudflare Pages) sengaja jadi dua domain
+// berbeda, jadi browser butuh izin CORS eksplisit sebelum mau memanggil /api/*.
+// Login pakai Bearer token di header (bukan cookie), jadi origin "*" di sini aman
+// tidak perlu credentials: true. Kalau mau lebih ketat, ganti "*" dengan URL
+// frontend Pages Anda persis, mis. "https://kasir-ppob-frontend.pages.dev".
+app.use(
+  "/api/*",
+  cors({
+    origin: "*",
+    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowHeaders: ["Content-Type", "Authorization"],
+  })
+);
 
 // Semua /api/* wajib login, KECUALI /api/auth/login sendiri.
 app.use("/api/*", async (c, next) => {
