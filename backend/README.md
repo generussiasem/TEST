@@ -2,7 +2,7 @@
 
 Semua jalan di Cloudflare Worker + D1 — tidak ada server yang perlu Anda nyalakan sendiri.
 
-## 1. Buat resource Cloudflare
+## 1. Buat resource Cloudflare 
 
 ```
 npm install
