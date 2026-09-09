@@ -1,4 +1,4 @@
-name = "test"
+name = "kasir-ppob"
 main = "src/index.js"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
@@ -10,7 +10,7 @@ crons = ["*/5 * * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "kasir-ppob-db"
-database_id = "22e31388-c654-4bc4-8b3b-21e2fba11dcb"
+database_id = "GANTI_DENGAN_ID_D1_ANDA"
 
 # Secrets (isi lewat: wrangler secret put NAMA)
 #   TELEGRAM_BOT_TOKEN   -> token bot dari @BotFather

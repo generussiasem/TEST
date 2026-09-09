@@ -85,37 +85,6 @@ misalnya "Saldo OkeConnect".
 npm run deploy
 ```
 
-## 6. Deploy dashboard web (Cloudflare Pages)
-
-Frontend-nya satu file HTML di folder `web/index.html` — tidak perlu proses build.
-
-1. Buka `web/index.html`, cari baris:
-   ```js
-   const API_BASE = "https://kasir-ppob.WORKER-ANDA.workers.dev";
-   ```
-   Ganti dengan URL Worker hasil deploy Anda (langkah 8 di atas).
-2. Buka dashboard Cloudflare → **Workers & Pages** → **Create** → **Pages** → **Upload assets**.
-3. Upload folder `web` (atau drag file `index.html`-nya).
-4. Setelah selesai, Anda dapat URL seperti `https://kasir-ppob-web.pages.dev` — buka di HP, login pakai akun admin yang dibuat di langkah 3b.
-
-Halaman ini sudah termasuk: kasir dengan scan barcode kamera, keranjang & cetak/share struk,
-form beli PPOB, riwayat transaksi, laporan laba rugi & arus kas, hutang-piutang dengan tombol
-share tagihan, serta pengaturan toko & karyawan (khusus admin).
-
-## 7. Pasang Telegram Mini App (untuk pelanggan)
-
-1. Upload `web/miniapp.html` ke Cloudflare Pages yang sama (satu situs bisa berisi
-   beberapa halaman) — pastikan sudah ganti `API_BASE` di dalamnya juga.
-   URL-nya jadi seperti `https://kasir-ppob-web.pages.dev/miniapp.html`.
-2. Chat **@BotFather** → `/mybots` → pilih bot Anda → **Bot Settings** → **Menu Button**
-   → **Configure Menu Button** → tempel URL Mini App tadi, beri label misal "🛒 Order".
-3. Selesai — pelanggan tinggal buka chat bot Anda, tekan tombol menu di pojok kiri
-   bawah, muncul halaman cari & beli produk tanpa perlu ketik perintah.
-
-Otentikasinya otomatis — Mini App memverifikasi `initData` dari Telegram di sisi
-server (`src/telegram-miniapp-auth.js`), jadi tidak perlu form login terpisah untuk
-pelanggan.
-
 ## Yang masih perlu Anda sesuaikan
 
 - **Format perintah "cek status"** di `checkPendingOrders` (src/index.js) masih placeholder
@@ -128,6 +97,5 @@ pelanggan.
   penuh — sudah mencakup alur STARTTLS + SASL PLAIN standar, tapi tetap uji langsung ke
   `gojabber.com` sebelum dipakai produksi, karena setiap server XMPP bisa punya sedikit
   perbedaan perilaku.
-- **Mini App** memakai desain terpisah dari dashboard admin (`web/miniapp.html`) supaya
-  ringan dan cepat dibuka pelanggan — kalau mau tampilannya disamakan gaya dengan
-  dashboard utama, tinggal sesuaikan CSS-nya.
+- Frontend kasir (Vue) belum disertakan di scaffold ini — endpoint `/api/*` sudah siap
+  dikonsumsi kalau Anda mau lanjutkan frontend seperti "Kasir Warung" sebelumnya.

@@ -56,23 +56,7 @@ export async function placePpobOrder(env, { productCode, target }) {
   return { refId, status, reply, product };
 }
 
-/**
- * Cek saldo ASLI di server OkeConnect (bukan saldo catatan internal di database kita).
- * Format ini mengikuti konvensi umum provider H2H sejenis: "S.{PIN}".
- * CATATAN: kalau balasannya aneh/tidak dikenali, konfirmasi ke CS OkeConnect apakah
- * format cek saldo mereka persis ini atau ada variasi lain.
- */
-export async function checkRealBalance(env) {
-  const reply = await sendJabberCommand({
-    jid: env.JABBER_JID,
-    password: env.JABBER_PASSWORD,
-    to: "okeconnect@gojabber.com",
-    body: `S.${env.JABBER_PIN}`,
-  });
-  const match = reply.match(/(?:saldo|sisa saldo)[:=\s]*rp?\.?\s*([\d.,]+)/i);
-  const amount = match ? Number(match[1].replace(/[.,]/g, "")) : null;
-  return { raw: reply, amount };
-}
+/** Catat penjualan PPOB yang sukses sebagai transaksi & potong saldo distributor. */
 export async function recordPpobSale(env, { product, wallet, refId, target }) {
   await env.DB.prepare(
     `INSERT INTO transactions (type, category, wallet_id, amount, cost_total, note)
