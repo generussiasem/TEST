@@ -1,20 +1,19 @@
-name = "kasir-ppob"
+name = "mesinworker"
 main = "src/index.js"
-compatibility_date = "2025-01-01"
+compatibility_date = "2024-09-01"
 compatibility_flags = ["nodejs_compat"]
-
-# Cron untuk cek ulang transaksi PPOB yang masih "pending" (misal balasan Jabber telat)
-[triggers]
-crons = ["*/5 * * * *"]
 
 [[d1_databases]]
 binding = "DB"
-database_name = "kasir-ppob-db"
-database_id = "GANTI_DENGAN_ID_D1_ANDA"
+database_name = "mesinv2_db"
+database_id = "287d8c2f-413b-4c2d-967c-083cfcd82835"
 
-# Secrets (isi lewat: wrangler secret put NAMA)
-#   TELEGRAM_BOT_TOKEN   -> token bot dari @BotFather
-#   TELEGRAM_SECRET      -> token rahasia untuk validasi webhook Telegram
-#   JABBER_JID           -> User ID OrderKuota Anda, mis. OK310547@gojabber.com
-#   JABBER_PASSWORD      -> password akun OrderKuota Anda
-#   JABBER_PIN           -> PIN transaksi PPOB Anda
+# Cron: jalan tiap hari jam 02:00 UTC untuk hapus data transaksi > 2 tahun
+[triggers]
+crons = ["0 2 * * *"]
+
+# --------------------------------------------------------------
+# JANGAN taruh secret di sini. Set via CLI:
+#   wrangler secret put JWT_SECRET
+#   wrangler secret put TURNSTILE_SECRET
+# --------------------------------------------------------------
