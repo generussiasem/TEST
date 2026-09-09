@@ -81,8 +81,13 @@ export async function placePpobOrder(env, { productCode, target }) {
     if (/sukses|berhasil/i.test(reply)) status = "sukses";
     else if (/gagal|error/i.test(reply)) status = "gagal";
   } catch (err) {
-    // Tidak sempat balas cepat — biarkan "pending", nanti ditangkap cron checkPendingOrders
-    status = "pending";
+    // Sebelumnya error ini "ditelan" begitu saja jadi tidak kelihatan di mana pun.
+    // Sekarang dicatat ke console (muncul di Observability -> Logs, buka Events
+    // pada invocation POST /api/ppob/order) DAN disimpan ke raw_reply supaya
+    // kelihatan juga langsung di tabel ppob_orders / halaman PPOB.
+    console.error("Jabber gagal untuk order", refId, ":", err.message, err.stack);
+    reply = "ERROR: " + err.message;
+    status = "pending"; // nanti ditangkap cron checkPendingOrders
   }
 
   await env.DB.prepare(
