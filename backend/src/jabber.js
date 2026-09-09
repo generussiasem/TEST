@@ -50,7 +50,10 @@ export async function sendJabberCommand({ jid, password, to, body }) {
   // Login ke server tempat akun Jabber Anda sendiri terdaftar (mis. jabbim.com),
   // BUKAN ke server tujuan pesan (okeconnect@gojabber.com) — dua server ini beda,
   // pesan dikirim lintas-server (federasi XMPP) via stanza <message> biasa.
-  const socket = connect({ hostname: jabberHost, port: JABBER_PORT });
+  // secureTransport: "starttls" WAJIB disebut di sini kalau nanti mau panggil
+  // socket.startTls() — API TCP Socket Cloudflare menolak startTls() kalau socket
+  // dibuat tanpa opsi ini dari awal (persis error yang bikin order selalu pending).
+  const socket = connect({ hostname: jabberHost, port: JABBER_PORT }, { secureTransport: "starttls" });
   let writer = socket.writable.getWriter();
   let reader = socket.readable.getReader();
 
