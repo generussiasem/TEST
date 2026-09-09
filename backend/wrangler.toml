@@ -1,0 +1,20 @@
+name = "kasir-ppob"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Cron untuk cek ulang transaksi PPOB yang masih "pending" (misal balasan Jabber telat)
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "kasir-ppob-db"
+database_id = "GANTI_DENGAN_ID_D1_ANDA"
+
+# Secrets (isi lewat: wrangler secret put NAMA)
+#   TELEGRAM_BOT_TOKEN   -> token bot dari @BotFather
+#   TELEGRAM_SECRET      -> token rahasia untuk validasi webhook Telegram
+#   JABBER_JID           -> User ID OrderKuota Anda, mis. OK310547@gojabber.com
+#   JABBER_PASSWORD      -> password akun OrderKuota Anda
+#   JABBER_PIN           -> PIN transaksi PPOB Anda
