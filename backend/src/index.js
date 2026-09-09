@@ -1,25 +1,27 @@
 import { Hono } from "hono";
-import { cors } from "hono/cors";
 import { sendJabberCommand } from "./jabber.js";
 import { sendTelegramMessage } from "./telegram.js";
-import { placePpobOrder, recordPpobSale } from "./ppob.js";
+import { placePpobOrder, recordPpobSale, checkRealBalance } from "./ppob.js";
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
+import { requireTelegramInitData } from "./telegram-miniapp-auth.js";
 
 const app = new Hono();
 
-// Backend (Worker) dan frontend (Cloudflare Pages) sengaja jadi dua domain
-// berbeda, jadi browser butuh izin CORS eksplisit sebelum mau memanggil /api/*.
-// Login pakai Bearer token di header (bukan cookie), jadi origin "*" di sini aman
-// tidak perlu credentials: true. Kalau mau lebih ketat, ganti "*" dengan URL
-// frontend Pages Anda persis, mis. "https://kasir-ppob-frontend.pages.dev".
-app.use(
-  "/api/*",
-  cors({
-    origin: "*",
-    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization"],
-  })
-);
+// Izinkan dashboard web & Telegram Mini App (domain Cloudflare Pages) memanggil API ini dari browser.
+app.use("/api/*", async (c, next) => {
+  c.header("Access-Control-Allow-Origin", "*");
+  c.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  c.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  if (c.req.method === "OPTIONS") return c.text("", 204);
+  await next();
+});
+app.use("/miniapp/*", async (c, next) => {
+  c.header("Access-Control-Allow-Origin", "*");
+  c.header("Access-Control-Allow-Headers", "Content-Type, X-Telegram-Init-Data");
+  c.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  if (c.req.method === "OPTIONS") return c.text("", 204);
+  await next();
+});
 
 // Semua /api/* wajib login, KECUALI /api/auth/login sendiri.
 app.use("/api/*", async (c, next) => {
@@ -135,6 +137,30 @@ app.post("/api/wallets", async (c) => {
     .bind(name, type, balance)
     .run();
   return c.json({ ok: true });
+});
+
+// Top up (atau koreksi, kalau amount negatif) saldo satu akun/dompet.
+// Tercatat sebagai transaksi type "mutation" supaya kelihatan di riwayat & tidak
+// memengaruhi laporan laba (bukan penjualan/pembelian).
+app.post("/api/wallets/:id/topup", async (c) => {
+  const walletId = c.req.param("id");
+  const employee = c.get("employee");
+  const { amount, note } = await c.req.json();
+  if (!amount) return c.json({ ok: false, error: "amount wajib diisi" }, 400);
+
+  await c.env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?")
+    .bind(amount, walletId)
+    .run();
+
+  await c.env.DB.prepare(
+    `INSERT INTO transactions (type, category, wallet_id, amount, note, employee_id)
+     VALUES ('mutation', 'Top Up Saldo', ?, ?, ?, ?)`
+  )
+    .bind(walletId, amount, note || null, employee ? employee.employeeId : null)
+    .run();
+
+  const wallet = await c.env.DB.prepare("SELECT * FROM wallets WHERE id = ?").bind(walletId).first();
+  return c.json({ ok: true, wallet });
 });
 
 app.get("/api/products", async (c) => {
@@ -418,6 +444,15 @@ app.post("/api/ppob/order", async (c) => {
   }
 });
 
+app.get("/api/ppob/saldo-asli", async (c) => {
+  try {
+    const result = await checkRealBalance(c.env);
+    return c.json({ ok: true, ...result });
+  } catch (err) {
+    return c.json({ ok: false, error: err.message }, 400);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // WEBHOOK TELEGRAM — bot jualan PPOB
 //
@@ -508,6 +543,21 @@ app.post("/telegram/webhook", async (c) => {
     return c.text("ok");
   }
 
+  if (text.startsWith("/saldoasli")) {
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, "Mengecek saldo langsung ke OkeConnect...");
+    try {
+      const { raw, amount } = await checkRealBalance(env);
+      await sendTelegramMessage(
+        env.TELEGRAM_BOT_TOKEN,
+        chatId,
+        amount ? `Saldo asli di OkeConnect: Rp${amount.toLocaleString("id-ID")}\n\n${raw}` : raw
+      );
+    } catch (err) {
+      await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `Gagal cek saldo: ${err.message}`);
+    }
+    return c.text("ok");
+  }
+
   if (text.startsWith("/saldo")) {
     const wallets = await env.DB.prepare(
       "SELECT name, balance FROM wallets WHERE type = 'distributor_ppob'"
@@ -524,7 +574,7 @@ app.post("/telegram/webhook", async (c) => {
   await sendTelegramMessage(
     env.TELEGRAM_BOT_TOKEN,
     chatId,
-    "Perintah: /beli KODE NOMOR, /cari kata-kunci, /cek REF_ID, /saldo"
+    "Perintah: /beli KODE NOMOR, /cari kata-kunci, /cek REF_ID, /saldo, /saldoasli"
   );
   return c.text("ok");
 });
@@ -584,6 +634,57 @@ async function checkPendingOrders(env) {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// TELEGRAM MINI APP — dipanggil dari web/miniapp.html yang dibuka di dalam
+// Telegram. Otentikasinya beda dari dashboard (bukan login karyawan), tapi
+// pakai signature initData yang cuma valid kalau dibuka lewat bot Telegram.
+// ---------------------------------------------------------------------------
+
+app.use("/miniapp/*", requireTelegramInitData);
+
+app.get("/miniapp/store", async (c) => {
+  const row = await c.env.DB.prepare("SELECT store_name, address FROM store_settings WHERE id = 1").first();
+  return c.json(row);
+});
+
+app.get("/miniapp/products", async (c) => {
+  const keyword = c.req.query("keyword") || "";
+  const { results } = await c.env.DB.prepare(
+    `SELECT code, name, sell_price FROM products
+     WHERE code IS NOT NULL AND (name LIKE ? OR code LIKE ?)
+     ORDER BY name LIMIT 15`
+  )
+    .bind(`%${keyword}%`, `%${keyword}%`)
+    .all();
+  return c.json(results);
+});
+
+app.post("/miniapp/order", async (c) => {
+  const tgUser = c.get("tgUser");
+  const { productCode, target } = await c.req.json();
+  if (!productCode || !target) {
+    return c.json({ ok: false, error: "productCode dan target wajib diisi" }, 400);
+  }
+  try {
+    const result = await placePpobOrder(c.env, { productCode, target });
+    if (tgUser?.id) {
+      await c.env.DB.prepare("UPDATE ppob_orders SET telegram_chat_id = ? WHERE ref_id = ?")
+        .bind(String(tgUser.id), result.refId)
+        .run();
+      if (result.status !== "sukses") {
+        await sendTelegramMessage(
+          c.env.TELEGRAM_BOT_TOKEN,
+          String(tgUser.id),
+          `Order ${result.refId} sedang diproses, saya kabari lagi begitu ada update.`
+        );
+      }
+    }
+    return c.json({ ok: true, ...result });
+  } catch (err) {
+    return c.json({ ok: false, error: err.message }, 400);
+  }
+});
 
 export default {
   fetch: app.fetch,
