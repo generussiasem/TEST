@@ -5,7 +5,7 @@ Semua jalan di Cloudflare Worker + D1 — tidak ada server yang perlu Anda nyala
 ## 1. Buat resource Cloudflare
 
 ```
-npm install
+npm install 
 wrangler d1 create kasir-ppob-db
 ```
 
