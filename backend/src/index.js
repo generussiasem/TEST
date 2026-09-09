@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { sendJabberCommand } from "./jabber.js";
 import { sendTelegramMessage } from "./telegram.js";
-import { placePpobOrder, recordPpobSale } from "./ppob.js";
+import { placePpobOrder, recordPpobSale, cekTagihan } from "./ppob.js";
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
 
 const app = new Hono();
@@ -205,19 +205,34 @@ app.post("/api/products/sync", async (c) => {
   const data = await res.json();
   const list = Array.isArray(data) ? data : data.data || data.result || [];
 
+  // Markup flat per transaksi di atas harga modal OkeConnect. Sesuaikan sendiri
+  // di sini, atau nanti ubah manual per produk lewat halaman "Produk" -> "Ubah".
+  const MARKUP = 500;
+
   let count = 0;
   for (const item of list) {
     const code = item.kode || item.code || item.product_code;
-    const name = item.nama || item.name || item.product_name || item.deskripsi;
-    const price = item.harga || item.price || item.sell_price;
+    // Field asli daftar harga OkeConnect: "keterangan" (deskripsi detail) dan
+    // "produk" (nama grup produk) — bukan "nama"/"deskripsi" seperti sebelumnya.
+    const name = item.keterangan || item.produk || item.nama || item.name;
+    const category = item.kategori || item.category || null;
+    // "harga" di JSON OkeConnect adalah harga MODAL (yang Anda bayar ke mereka),
+    // bukan harga jual ke pelanggan — sebelumnya salah ditaruh di sell_price.
+    const cost = Number(item.harga || item.price || 0);
+    const sell = cost + MARKUP;
     if (!code || !name) continue;
+    if (item.status === "0" || item.status === 0) continue; // produk nonaktif/kosong di OkeConnect
 
     await c.env.DB.prepare(
-      `INSERT INTO products (code, name, sell_price)
-       VALUES (?, ?, ?)
-       ON CONFLICT(code) DO UPDATE SET name = excluded.name, sell_price = excluded.sell_price`
+      `INSERT INTO products (code, name, category, cost_price, sell_price)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(code) DO UPDATE SET
+         name = excluded.name,
+         category = excluded.category,
+         cost_price = excluded.cost_price,
+         sell_price = excluded.sell_price`
     )
-      .bind(code, name, price || 0)
+      .bind(code, name, category, cost, sell)
       .run();
     count++;
   }
@@ -416,6 +431,56 @@ app.post("/api/ppob/order", async (c) => {
   } catch (err) {
     return c.json({ ok: false, error: err.message }, 400);
   }
+});
+
+// Cek tagihan/nama pelanggan (PDAM, listrik, BPJS) SEBELUM bayar — tidak
+// memotong saldo, tidak dicatat sebagai order, cuma menampilkan balasan
+// mentah dari OkeConnect (berisi nominal tagihan asli & nama pelanggan)
+// supaya kasir bisa konfirmasi dulu ke pelanggan sebelum benar-benar bayar.
+app.post("/api/ppob/cek", async (c) => {
+  const { productCode, target } = await c.req.json();
+  if (!productCode || !target) {
+    return c.json({ ok: false, error: "productCode dan target wajib diisi" }, 400);
+  }
+  try {
+    const result = await cekTagihan(c.env, { productCode, target });
+    return c.json({ ok: true, ...result });
+  } catch (err) {
+    return c.json({ ok: false, error: err.message }, 400);
+  }
+});
+
+// Setelah order postpaid (tagihan/PDAM) sukses, kasir input manual nominal
+// asli yang diterima dari pelanggan & yang terpotong dari saldo distributor
+// (dibaca dari balasan Cek/Bayar OkeConnect) — baru di sini dicatat sebagai
+// transaksi & saldo dipotong, supaya laporan keuangan akurat.
+app.post("/api/ppob-orders/:refId/catat", async (c) => {
+  const refId = c.req.param("refId");
+  const { amount, cost_total } = await c.req.json();
+  if (amount === undefined || cost_total === undefined) {
+    return c.json({ ok: false, error: "amount dan cost_total wajib diisi" }, 400);
+  }
+  const order = await c.env.DB.prepare("SELECT * FROM ppob_orders WHERE ref_id = ?").bind(refId).first();
+  if (!order) return c.json({ ok: false, error: "Order tidak ditemukan" }, 404);
+  if (order.status !== "sukses") return c.json({ ok: false, error: "Order belum sukses, tidak bisa dicatat" }, 400);
+  if (order.finalized) return c.json({ ok: false, error: "Order ini sudah pernah dicatat" }, 400);
+
+  await c.env.DB.prepare(
+    `INSERT INTO transactions (type, category, wallet_id, amount, cost_total, note)
+     VALUES ('sale', 'Tagihan/PDAM', ?, ?, ?, ?)`
+  )
+    .bind(order.wallet_id, amount, cost_total, `${order.product_code} ke ${order.target} (ref ${refId})`)
+    .run();
+
+  if (order.wallet_id) {
+    await c.env.DB.prepare("UPDATE wallets SET balance = balance - ? WHERE id = ?")
+      .bind(cost_total, order.wallet_id)
+      .run();
+  }
+
+  await c.env.DB.prepare("UPDATE ppob_orders SET finalized = 1 WHERE ref_id = ?").bind(refId).run();
+
+  return c.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------

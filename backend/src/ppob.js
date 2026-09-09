@@ -1,8 +1,45 @@
 import { sendJabberCommand } from "./jabber.js";
 
+// Kategori yang dianggap "tagihan pascabayar" — nominalnya beda-beda per
+// pelanggan/bulan, BUKAN harga tetap seperti pulsa. Untuk kategori ini:
+//   - ref ID wajib pakai suffix "A" (format dari OkeConnect)
+//   - order TIDAK otomatis dicatat sebagai transaksi (karena sell_price di
+//     tabel products untuk kategori ini cuma fee, bukan total tagihan asli).
+//     Kasir harus konfirmasi manual nominal aslinya lewat endpoint
+//     /api/ppob-orders/:ref_id/catat setelah baca balasan OkeConnect.
+const POSTPAID_CATEGORIES = ["TAGIHAN", "AIR PDAM"];
+
+function isPostpaid(product) {
+  return POSTPAID_CATEGORIES.includes(product.category);
+}
+
+/** Kirim command "Cek" (cek tagihan/cek nama pelanggan) — TIDAK memotong saldo,
+ * TIDAK dicatat sebagai order — murni menampilkan balasan mentah dari OkeConnect
+ * supaya kasir bisa baca nominal tagihan & nama pelanggan sebelum bayar. */
+export async function cekTagihan(env, { productCode, target }) {
+  const product = await env.DB.prepare("SELECT * FROM products WHERE code = ?")
+    .bind(productCode)
+    .first();
+  if (!product) {
+    throw new Error(`Kode produk "${productCode}" tidak ditemukan.`);
+  }
+  const refId = "CEK" + Date.now();
+  const suffix = isPostpaid(product) ? "A" : "";
+  const body = `${productCode}.${target}.${env.JABBER_PIN}.R#${refId}${suffix}`;
+  const reply = await sendJabberCommand({
+    jid: env.JABBER_JID,
+    password: env.JABBER_PASSWORD,
+    to: "okeconnect@gojabber.com",
+    body,
+  });
+  return { refId, reply, product };
+}
+
 /**
  * Proses satu order PPOB: simpan ke ppob_orders, kirim ke OkeConnect via Jabber,
- * lalu kalau sukses catat juga sebagai transaksi penjualan & potong saldo distributor.
+ * lalu kalau sukses catat juga sebagai transaksi penjualan & potong saldo distributor
+ * — KECUALI untuk kategori postpaid (tagihan/PDAM), yang harus dikonfirmasi manual
+ * dulu lewat /api/ppob-orders/:ref_id/catat karena nominalnya tidak tetap.
  * Dipakai baik dari webhook Telegram (/beli) maupun dari halaman kasir web (/api/ppob/order).
  */
 export async function placePpobOrder(env, { productCode, target }) {
@@ -25,7 +62,12 @@ export async function placePpobOrder(env, { productCode, target }) {
     .bind(refId, productCode, target, product.cost_price, product.sell_price, wallet ? wallet.id : null)
     .run();
 
-  const body = `${productCode}.${target}.${env.JABBER_PIN}.R#${refId}`;
+  // OkeConnect punya 2 format ref ID: pulsa/kuota/token prabayar pakai
+  // R#{ID} biasa, sedangkan tagihan pascabayar (listrik, PDAM, BPJS) pakai
+  // R#{ID}A (ada suffix "A"). CATATAN: ini asumsi berdasarkan pola kategori,
+  // BELUM dikonfirmasi CS OkeConnect — wajib dites dulu dengan transaksi kecil.
+  const suffix = isPostpaid(product) ? "A" : "";
+  const body = `${productCode}.${target}.${env.JABBER_PIN}.R#${refId}${suffix}`;
   let status = "pending";
   let reply = null;
 
@@ -49,11 +91,11 @@ export async function placePpobOrder(env, { productCode, target }) {
     .bind(status, reply, refId)
     .run();
 
-  if (status === "sukses") {
+  if (status === "sukses" && !isPostpaid(product)) {
     await recordPpobSale(env, { product, wallet, refId, target });
   }
 
-  return { refId, status, reply, product };
+  return { refId, status, reply, product, needsManualRecord: status === "sukses" && isPostpaid(product) };
 }
 
 /** Catat penjualan PPOB yang sukses sebagai transaksi & potong saldo distributor. */

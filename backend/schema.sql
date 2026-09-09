@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS ppob_orders (
   wallet_id INTEGER REFERENCES wallets(id), -- akun "Saldo Distributor" yang dipotong
   status TEXT NOT NULL DEFAULT 'pending', -- pending | sukses | gagal
   raw_reply TEXT,
+  finalized INTEGER NOT NULL DEFAULT 0, -- 1 = sudah dicatat manual sebagai transaksi (khusus order postpaid/tagihan)
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
