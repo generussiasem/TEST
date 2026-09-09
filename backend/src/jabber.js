@@ -69,10 +69,13 @@ export async function sendJabberCommand({ jid, password, to, body }) {
     await send(`<starttls xmlns="urn:ietf:params:xml:ns:xmpp-tls"/>`);
     await readUntil(reader, (buf) => buf.includes("<proceed"));
 
-    // 2. Upgrade koneksi ke TLS (didukung TCP Socket API Cloudflare Workers)
-    const tlsSocket = socket.startTls();
+    // 2. Upgrade koneksi ke TLS (didukung TCP Socket API Cloudflare Workers).
+    // PENTING: lock writer/reader lama WAJIB dilepas SEBELUM memanggil startTls(),
+    // bukan sesudahnya — urutan terbalik inilah yang tadinya menyebabkan error
+    // "This WritableStream is currently locked to a writer".
     writer.releaseLock();
     reader.releaseLock();
+    const tlsSocket = socket.startTls();
     writer = tlsSocket.writable.getWriter();
     reader = tlsSocket.readable.getReader();
 
