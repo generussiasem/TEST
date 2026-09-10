@@ -3,6 +3,16 @@ name = "test"
 main = "src/index.js"
 compatibility_date = "2026-09-09"
 
+# PENTING: coba redam masalah "vars/secret ke-reset tiap deploy dari GitHub
+# integration Cloudflare" (bug resmi: github.com/cloudflare/workers-sdk/issues/8871).
+# keep_vars=true bilang ke Cloudflare "jangan hapus vars/secret yang sudah ada di
+# dashboard walau tidak disebut di [vars] file ini". TIDAK 100% dijamin work di semua
+# kasus (ada laporan komunitas yang masih kena walau sudah pakai ini) — kalau secret
+# tetap hilang setelah ini, solusi paling pasti adalah pindah dari "GitHub integration"
+# bawaan Cloudflare ke GitHub Actions + wrangler-action (secret disimpan di GitHub,
+# di-inject ulang tiap deploy, bukan disimpan manual di dashboard Cloudflare).
+keep_vars = true
+
 # Cron untuk cek ulang transaksi PPOB yang masih "pending" (misal balasan Jabber telat)
 [triggers]
 crons = ["*/5 * * * *"]
@@ -19,9 +29,11 @@ database_id = "22e31388-c654-4bc4-8b3b-21e2fba11dcb"
 # Ganti nilainya di sini lalu `wrangler deploy` untuk tes cepat tanpa ubah kode.
 JABBER_TARGET = "center@mitra.orderkuota.com"
 
-# Secrets (isi lewat: wrangler secret put NAMA)
+# Secrets (isi lewat: wrangler secret put NAMA, ATAU dashboard Cloudflare
+# Settings -> Variables and Secrets -> tipe "Secret")
 #   TELEGRAM_BOT_TOKEN   -> token bot dari @BotFather
 #   TELEGRAM_SECRET      -> token rahasia untuk validasi webhook Telegram
-#   JABBER_JID           -> User ID OrderKuota Anda, mis. OK310547@gojabber.com
-#   JABBER_PASSWORD      -> password akun OrderKuota Anda
+#   JABBER_JID           -> akun Jabber yang Anda daftarkan SENDIRI (bukan ID OrderKuota OK310547),
+#                            harus sama dengan yang diisi di kolom "Jabber 1" Pengaturan OkeConnect
+#   JABBER_PASSWORD      -> password akun Jabber tersebut (bukan password OrderKuota)
 #   JABBER_PIN           -> PIN transaksi PPOB Anda
