@@ -103,9 +103,14 @@ export async function sendJabberCommand({ jid, password, to, body }) {
         `xmlns:stream="http://etherx.jabber.org/streams" version="1.0">`
     );
     await readUntil(reader, (buf) => buf.includes("</stream:features>"));
+    // Resource unik per koneksi — kalau dihardcode sama terus (mis. selalu
+    // "kasir-worker"), dua percobaan yang tumpang tindih (retry manual, cron,
+    // atau sisa koneksi yang belum bersih ditutup) akan saling tendang dengan
+    // error "Replaced by new connection" dari server XMPP.
+    const resourceId = "kasir-worker-" + Math.random().toString(36).slice(2, 8);
     await send(
       `<iq type="set" id="bind1"><bind xmlns="urn:ietf:params:xml:ns:xmpp-bind">` +
-        `<resource>kasir-worker</resource></bind></iq>`
+        `<resource>${resourceId}</resource></bind></iq>`
     );
     await readUntil(reader, (buf) => buf.includes('id="bind1"'));
 
