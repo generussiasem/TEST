@@ -12,6 +12,13 @@ binding = "DB"
 database_name = "kasir-ppob-db"
 database_id = "22e31388-c654-4bc4-8b3b-21e2fba11dcb"
 
+[vars]
+# Alamat Jabber tujuan transaksi. OkeConnect kasih 2 opsi:
+#   okeconnect@gojabber.com        -> dapat bounce "service-unavailable" saat dites
+#   center@mitra.orderkuota.com    -> dicoba sebagai alternatif
+# Ganti nilainya di sini lalu `wrangler deploy` untuk tes cepat tanpa ubah kode.
+JABBER_TARGET = "center@mitra.orderkuota.com"
+
 # Secrets (isi lewat: wrangler secret put NAMA)
 #   TELEGRAM_BOT_TOKEN   -> token bot dari @BotFather
 #   TELEGRAM_SECRET      -> token rahasia untuk validasi webhook Telegram
