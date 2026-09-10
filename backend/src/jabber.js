@@ -112,7 +112,7 @@ export async function sendJabberCommand({ jid, password, to, body }) {
       `<iq type="set" id="bind1"><bind xmlns="urn:ietf:params:xml:ns:xmpp-bind">` +
         `<resource>${resourceId}</resource></bind></iq>`
     );
-    await readUntil(reader, (buf) => buf.includes('id="bind1"'));
+    await readUntil(reader, (buf) => buf.includes("bind1"));
 
     // 4b. Buka sesi (beberapa server XMPP lama/ejabberd masih mengharuskan ini)
     // dan umumkan status online lewat <presence/> — TANPA ini, beberapa bot
@@ -122,7 +122,7 @@ export async function sendJabberCommand({ jid, password, to, body }) {
       `<iq type="set" id="sess1"><session xmlns="urn:ietf:params:xml:ns:xmpp-session"/></iq>`
     );
     try {
-      await readUntil(reader, (buf) => buf.includes('id="sess1"'), 5000);
+      await readUntil(reader, (buf) => buf.includes("sess1"), 5000);
     } catch (_) {
       // Server modern (RFC 6120) sudah tidak mewajibkan session, boleh diabaikan.
     }
