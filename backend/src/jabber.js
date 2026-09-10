@@ -24,6 +24,14 @@ function xmlEscape(str) {
 // menyalin balik pesan yang KITA kirim sendiri ke resource kita sendiri,
 // yang kalau tidak difilter akan salah dikira "balasan" (isinya = perintah
 // kita sendiri, mis. "S50.0852...1256.R#TX...", identik dengan yang dikirim).
+//
+// PENTING: fungsi ini mengembalikan { isError, text } — bukan cuma teks —
+// karena selain carbon-copy, ada kemungkinan LAIN yang tampilannya mirip:
+// server Jabber memantulkan balik (bounce) pesan kita sendiri sebagai stanza
+// <message type="error">, biasanya kalau JID tujuan tidak valid/tidak bisa
+// dihubungi. Isi bounce ini SAMA PERSIS dengan pesan yang kita kirim (echo),
+// dan "from"-nya pun tetap JID tujuan — jadi lolos filter "from" di atas —
+// padahal itu tandanya pesan GAGAL terkirim ke OkeConnect, bukan balasan sukses.
 function extractReplyFrom(buffer, targetBareJid) {
   const regex = /<message\b([^>]*)>([\s\S]*?)<\/message>/g;
   let m;
@@ -34,8 +42,20 @@ function extractReplyFrom(buffer, targetBareJid) {
     if (!fromMatch) continue;
     const fromBare = fromMatch[1].split("/")[0];
     if (fromBare.toLowerCase() !== targetBareJid.toLowerCase()) continue; // bukan dari OkeConnect — kemungkinan carbon-copy diri sendiri, abaikan
+    const isError = /type=["']error["']/.test(attrs);
+    if (isError) {
+      const errCondMatch = inner.match(/<error[^>]*>[\s\S]*?<([a-z0-9-]+)\s+xmlns=["']urn:ietf:params:xml:ns:xmpp-stanzas["']/i);
+      const bodyMatch = inner.match(/<body[^>]*>([\s\S]*?)<\/body>/);
+      return {
+        isError: true,
+        text:
+          "Pesan DITOLAK/DIPANTULKAN server (bukan balasan asli OkeConnect)" +
+          (errCondMatch ? ` — kondisi: ${errCondMatch[1]}` : "") +
+          (bodyMatch ? ` — isi pesan yang dipantulkan: ${bodyMatch[1]}` : ""),
+      };
+    }
     const bodyMatch = inner.match(/<body[^>]*>([\s\S]*?)<\/body>/);
-    return bodyMatch ? bodyMatch[1] : inner;
+    return { isError: false, text: bodyMatch ? bodyMatch[1] : inner };
   }
   return null;
 }
@@ -169,15 +189,18 @@ export async function sendJabberCommand({ jid, password, to, body }) {
     );
 
     // 6. Tunggu balasan <message> yang BENAR datang dari OkeConnect (bukan
-    // echo/carbon-copy dari pesan kita sendiri)
+    // echo/carbon-copy dari pesan kita sendiri, dan bukan stanza error/bounce)
     const targetBareJid = to.split("/")[0];
     const reply = await readUntil(
       reader,
       (buf) => extractReplyFrom(buf, targetBareJid) !== null,
       20000
     );
-    const replyBody = extractReplyFrom(reply, targetBareJid);
-    return replyBody !== null ? replyBody : reply;
+    const parsed = extractReplyFrom(reply, targetBareJid);
+    if (parsed.isError) {
+      throw new Error(parsed.text);
+    }
+    return parsed.text;
   } finally {
     try {
       await send("</stream:stream>");
