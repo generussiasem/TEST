@@ -114,6 +114,20 @@ export async function sendJabberCommand({ jid, password, to, body }) {
     );
     await readUntil(reader, (buf) => buf.includes('id="bind1"'));
 
+    // 4b. Buka sesi (beberapa server XMPP lama/ejabberd masih mengharuskan ini)
+    // dan umumkan status online lewat <presence/> — TANPA ini, beberapa bot
+    // Jabber (termasuk kemungkinan OkeConnect) diam saja dan tidak membalas
+    // pesan dari JID yang belum "online", walau pesan diterima secara teknis.
+    await send(
+      `<iq type="set" id="sess1"><session xmlns="urn:ietf:params:xml:ns:xmpp-session"/></iq>`
+    );
+    try {
+      await readUntil(reader, (buf) => buf.includes('id="sess1"'), 5000);
+    } catch (_) {
+      // Server modern (RFC 6120) sudah tidak mewajibkan session, boleh diabaikan.
+    }
+    await send(`<presence/>`);
+
     // 5. Kirim perintah transaksi sebagai stanza <message>
     const msgId = "trx-" + Date.now();
     await send(
