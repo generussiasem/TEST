@@ -322,6 +322,10 @@ tr:last-child td {
   background: var(--red-soft);
   color: var(--red);
 }
+.badge.cek {
+  background: #e4e0d6;
+  color: var(--ink-soft);
+}
 
 .field {
   display: flex;

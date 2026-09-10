@@ -1,6 +1,9 @@
 <script setup>
 import { ref, computed, onMounted } from "vue";
+import { useRoute } from "vue-router";
 import { api } from "../api.js";
+
+const route = useRoute();
 
 const products = ref([]);
 const orders = ref([]);
@@ -49,6 +52,17 @@ const belumDicatat = computed(() =>
   orders.value.filter((o) => o.status === "sukses" && !o.finalized && isPostpaidCode(o.product_code))
 );
 
+// Semua riwayat (cek maupun bayar) untuk produk kategori TAGIHAN/AIR PDAM,
+// termasuk yang statusnya 'cek' (pengecekan doang, bukan transaksi).
+const riwayatTagihan = computed(() =>
+  orders.value.filter((o) => isPostpaidCode(o.product_code)).sort((a, b) => b.id - a.id)
+);
+
+const openedId = ref(null);
+function toggleDetail(o) {
+  openedId.value = openedId.value === o.id ? null : o.id;
+}
+
 function isPostpaidCode(code) {
   const p = products.value.find((x) => x.code === code);
   return p && (p.category === "TAGIHAN" || p.category === "AIR PDAM");
@@ -58,6 +72,10 @@ async function load() {
   const [p, o] = await Promise.all([api.get("/api/products"), api.get("/api/ppob-orders")]);
   products.value = p;
   orders.value = o;
+  if (route.query.code) {
+    const match = products.value.find((x) => x.code === route.query.code);
+    if (match) pickCek(match);
+  }
 }
 
 function pickCek(p) {
@@ -220,6 +238,52 @@ onMounted(load);
           <button class="btn" :disabled="finalizing" @click="finalize(bayarResult.refId)">{{ finalizing ? "Menyimpan…" : "Simpan Transaksi" }}</button>
         </div>
       </div>
+    </div>
+
+    <div class="card" style="margin-top: 22px">
+      <h3 style="margin-bottom: 12px">Riwayat Cek &amp; Bayar Tagihan</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Ref</th>
+            <th>Kode</th>
+            <th>Target</th>
+            <th>Status</th>
+            <th>Waktu</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template v-for="o in riwayatTagihan" :key="o.id">
+            <tr @click="toggleDetail(o)" style="cursor: pointer">
+              <td class="num">{{ o.ref_id }}</td>
+              <td>{{ o.product_code }}</td>
+              <td class="num">{{ o.target }}</td>
+              <td><span class="badge" :class="o.status">{{ o.status }}</span></td>
+              <td class="muted" style="font-size: 12.5px">{{ new Date(o.created_at).toLocaleString("id-ID") }}</td>
+            </tr>
+            <tr v-if="openedId === o.id">
+              <td colspan="5" style="background: var(--paper); padding: 14px 16px">
+                <div class="grid cols-2" style="gap: 6px 24px; font-size: 13.5px">
+                  <div><span class="muted">Ref ID</span><br /><span class="num">{{ o.ref_id }}</span></div>
+                  <div><span class="muted">Status</span><br /><span class="badge" :class="o.status">{{ o.status }}</span></div>
+                  <div><span class="muted">Kode</span><br />{{ o.product_code }}</div>
+                  <div><span class="muted">Target (ID Pelanggan/No. Meter)</span><br /><span class="num">{{ o.target }}</span></div>
+                  <div><span class="muted">Dibuat</span><br />{{ new Date(o.created_at).toLocaleString("id-ID") }}</div>
+                  <div><span class="muted">Diperbarui</span><br />{{ new Date(o.updated_at).toLocaleString("id-ID") }}</div>
+                  <div v-if="o.status === 'sukses'"><span class="muted">Sudah dicatat sebagai transaksi?</span><br />{{ o.finalized ? "Ya" : "Belum" }}</div>
+                </div>
+                <div style="margin-top: 10px">
+                  <span class="muted" style="font-size: 13px">Balasan mentah dari OkeConnect</span>
+                  <div class="num" style="white-space: pre-wrap; background: var(--paper-raised); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; margin-top: 4px; font-size: 13px">{{ o.raw_reply || "(kosong)" }}</div>
+                </div>
+              </td>
+            </tr>
+          </template>
+          <tr v-if="!riwayatTagihan.length">
+            <td colspan="5" class="muted">Belum ada riwayat cek/bayar tagihan.</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   </div>
 </template>

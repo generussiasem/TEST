@@ -20,6 +20,7 @@ function doLogout() {
       <nav>
         <RouterLink to="/" exact-active-class="active">Ringkasan</RouterLink>
         <RouterLink to="/kasir" active-class="active">Kasir</RouterLink>
+        <RouterLink to="/katalog" active-class="active">Katalog PPOB</RouterLink>
         <RouterLink to="/ppob" active-class="active">Pulsa &amp; PPOB</RouterLink>
         <RouterLink to="/tagihan" active-class="active">Cek &amp; Bayar Tagihan</RouterLink>
         <RouterLink to="/produk" active-class="active">Produk &amp; Stok</RouterLink>

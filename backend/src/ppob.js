@@ -13,9 +13,10 @@ function isPostpaid(product) {
   return POSTPAID_CATEGORIES.includes(product.category);
 }
 
-/** Kirim command "Cek" (cek tagihan/cek nama pelanggan) — TIDAK memotong saldo,
- * TIDAK dicatat sebagai order — murni menampilkan balasan mentah dari OkeConnect
- * supaya kasir bisa baca nominal tagihan & nama pelanggan sebelum bayar. */
+/** Kirim command "Cek" (cek tagihan/cek nama pelanggan) — TIDAK memotong saldo
+ * dan TIDAK memengaruhi laporan keuangan, tapi tetap DISIMPAN ke ppob_orders
+ * (status 'cek') supaya balasannya bisa dilihat lagi lain waktu, mis. lewat
+ * D1 Console atau halaman riwayat PPOB. */
 export async function cekTagihan(env, { productCode, target }) {
   const product = await env.DB.prepare("SELECT * FROM products WHERE code = ?")
     .bind(productCode)
@@ -26,12 +27,29 @@ export async function cekTagihan(env, { productCode, target }) {
   const refId = "CEK" + Date.now();
   const suffix = isPostpaid(product) ? "A" : "";
   const body = `${productCode}.${target}.${env.JABBER_PIN}.R#${refId}${suffix}`;
-  const reply = await sendJabberCommand({
-    jid: env.JABBER_JID,
-    password: env.JABBER_PASSWORD,
-    to: env.JABBER_TARGET || "okeconnect@gojabber.com",
-    body,
-  });
+
+  let reply = null;
+  try {
+    reply = await sendJabberCommand({
+      jid: env.JABBER_JID,
+      password: env.JABBER_PASSWORD,
+      to: env.JABBER_TARGET || "okeconnect@gojabber.com",
+      body,
+    });
+  } catch (err) {
+    console.error("Jabber gagal untuk cek", refId, ":", err.message, err.stack);
+    reply = "ERROR: " + err.message;
+  }
+
+  // cost_price/sell_price sengaja 0 dan wallet_id NULL — ini cuma pengecekan,
+  // bukan transaksi, jadi tidak boleh ikut kehitung di laporan mana pun.
+  await env.DB.prepare(
+    `INSERT INTO ppob_orders (ref_id, telegram_chat_id, product_code, target, cost_price, sell_price, wallet_id, status, raw_reply)
+     VALUES (?, '', ?, ?, 0, 0, NULL, 'cek', ?)`
+  )
+    .bind(refId, productCode, target, reply)
+    .run();
+
   return { refId, reply, product };
 }
 

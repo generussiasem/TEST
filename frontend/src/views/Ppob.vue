@@ -1,6 +1,9 @@
 <script setup>
 import { ref, computed, onMounted } from "vue";
+import { useRoute } from "vue-router";
 import { api } from "../api.js";
+
+const route = useRoute();
 
 const orders = ref([]);
 const products = ref([]);
@@ -10,9 +13,14 @@ const error = ref("");
 const result = ref(null);
 const submitting = ref(false);
 const search = ref("");
+const openedId = ref(null);
 
 function rupiah(n) {
   return "Rp" + Number(n || 0).toLocaleString("id-ID");
+}
+
+function toggleDetail(o) {
+  openedId.value = openedId.value === o.id ? null : o.id;
 }
 
 const ppobProducts = computed(() => products.value.filter((p) => p.code));
@@ -26,6 +34,10 @@ async function load() {
   const [o, p] = await Promise.all([api.get("/api/ppob-orders"), api.get("/api/products")]);
   orders.value = o;
   products.value = p;
+  if (route.query.code) {
+    const match = products.value.find((x) => x.code === route.query.code);
+    if (match) pick(match);
+  }
 }
 
 function pick(p) {
@@ -120,13 +132,34 @@ onMounted(load);
           </tr>
         </thead>
         <tbody>
-          <tr v-for="o in orders" :key="o.id">
-            <td class="num">{{ o.ref_id }}</td>
-            <td>{{ o.product_code }}</td>
-            <td class="num">{{ o.target }}</td>
-            <td><span class="badge" :class="o.status">{{ o.status }}</span></td>
-            <td class="muted" style="font-size: 12.5px">{{ new Date(o.created_at).toLocaleString("id-ID") }}</td>
-          </tr>
+          <template v-for="o in orders" :key="o.id">
+            <tr @click="toggleDetail(o)" style="cursor: pointer">
+              <td class="num">{{ o.ref_id }}</td>
+              <td>{{ o.product_code }}</td>
+              <td class="num">{{ o.target }}</td>
+              <td><span class="badge" :class="o.status">{{ o.status }}</span></td>
+              <td class="muted" style="font-size: 12.5px">{{ new Date(o.created_at).toLocaleString("id-ID") }}</td>
+            </tr>
+            <tr v-if="openedId === o.id">
+              <td colspan="5" style="background: var(--paper); padding: 14px 16px">
+                <div class="grid cols-2" style="gap: 6px 24px; font-size: 13.5px">
+                  <div><span class="muted">Ref ID</span><br /><span class="num">{{ o.ref_id }}</span></div>
+                  <div><span class="muted">Status</span><br /><span class="badge" :class="o.status">{{ o.status }}</span></div>
+                  <div><span class="muted">Kode Produk</span><br />{{ o.product_code }}</div>
+                  <div><span class="muted">Tujuan (No. HP / ID Pelanggan)</span><br /><span class="num">{{ o.target }}</span></div>
+                  <div><span class="muted">Modal (cost_price)</span><br /><span class="num">{{ rupiah(o.cost_price) }}</span></div>
+                  <div><span class="muted">Harga Jual (sell_price)</span><br /><span class="num">{{ rupiah(o.sell_price) }}</span></div>
+                  <div><span class="muted">Dibuat</span><br />{{ new Date(o.created_at).toLocaleString("id-ID") }}</div>
+                  <div><span class="muted">Diperbarui</span><br />{{ new Date(o.updated_at).toLocaleString("id-ID") }}</div>
+                  <div v-if="o.status === 'sukses'"><span class="muted">Sudah dicatat sebagai transaksi?</span><br />{{ o.finalized ? "Ya" : "Belum" }}</div>
+                </div>
+                <div style="margin-top: 10px">
+                  <span class="muted" style="font-size: 13px">Balasan mentah dari OkeConnect</span>
+                  <div class="num" style="white-space: pre-wrap; background: var(--paper-raised); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; margin-top: 4px; font-size: 13px">{{ o.raw_reply || "(kosong)" }}</div>
+                </div>
+              </td>
+            </tr>
+          </template>
           <tr v-if="!orders.length">
             <td colspan="5" class="muted">Belum ada order PPOB.</td>
           </tr>

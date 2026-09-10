@@ -7,6 +7,7 @@ const routes = [
   { path: "/", name: "dashboard", component: () => import("./views/Dashboard.vue") },
   { path: "/kasir", name: "kasir", component: () => import("./views/Kasir.vue") },
   { path: "/produk", name: "produk", component: () => import("./views/Produk.vue") },
+  { path: "/katalog", name: "katalog", component: () => import("./views/Katalog.vue") },
   { path: "/ppob", name: "ppob", component: () => import("./views/Ppob.vue") },
   { path: "/tagihan", name: "tagihan", component: () => import("./views/PpobTagihan.vue") },
   { path: "/kontak", name: "kontak", component: () => import("./views/Kontak.vue") },

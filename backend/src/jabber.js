@@ -19,21 +19,26 @@ function xmlEscape(str) {
     .replace(/"/g, "&quot;");
 }
 
-// Cari stanza <message> di buffer yang BENAR datang dari targetBareJid.
+// Ambil SEMUA stanza <message> di buffer yang BENAR datang dari targetBareJid.
 // Ini untuk menghindari kasus "Message Carbons" (XEP-0280): server Jabber
 // menyalin balik pesan yang KITA kirim sendiri ke resource kita sendiri,
 // yang kalau tidak difilter akan salah dikira "balasan" (isinya = perintah
 // kita sendiri, mis. "S50.0852...1256.R#TX...", identik dengan yang dikirim).
 //
-// PENTING: fungsi ini mengembalikan { isError, text } — bukan cuma teks —
-// karena selain carbon-copy, ada kemungkinan LAIN yang tampilannya mirip:
-// server Jabber memantulkan balik (bounce) pesan kita sendiri sebagai stanza
+// Mengembalikan array { isError, text } (bisa lebih dari satu pesan) — karena
+// OkeConnect kadang kirim BERTAHAP: pesan pertama "akan diproses" (ack), lalu
+// pesan kedua menyusul berisi hasil final. Kalau cuma ambil pesan pertama,
+// hasil final yang menyusul tidak akan pernah tertangkap.
+//
+// Selain carbon-copy, ada kemungkinan lain yang tampilannya mirip: server
+// Jabber memantulkan balik (bounce) pesan kita sendiri sebagai stanza
 // <message type="error">, biasanya kalau JID tujuan tidak valid/tidak bisa
 // dihubungi. Isi bounce ini SAMA PERSIS dengan pesan yang kita kirim (echo),
 // dan "from"-nya pun tetap JID tujuan — jadi lolos filter "from" di atas —
 // padahal itu tandanya pesan GAGAL terkirim ke OkeConnect, bukan balasan sukses.
-function extractReplyFrom(buffer, targetBareJid) {
+function extractAllReplies(buffer, targetBareJid) {
   const regex = /<message\b([^>]*)>([\s\S]*?)<\/message>/g;
+  const out = [];
   let m;
   while ((m = regex.exec(buffer))) {
     const attrs = m[1];
@@ -43,22 +48,27 @@ function extractReplyFrom(buffer, targetBareJid) {
     const fromBare = fromMatch[1].split("/")[0];
     if (fromBare.toLowerCase() !== targetBareJid.toLowerCase()) continue; // bukan dari OkeConnect — kemungkinan carbon-copy diri sendiri, abaikan
     const isError = /type=["']error["']/.test(attrs);
+    const bodyMatch = inner.match(/<body[^>]*>([\s\S]*?)<\/body>/);
     if (isError) {
       const errCondMatch = inner.match(/<error[^>]*>[\s\S]*?<([a-z0-9-]+)\s+xmlns=["']urn:ietf:params:xml:ns:xmpp-stanzas["']/i);
-      const bodyMatch = inner.match(/<body[^>]*>([\s\S]*?)<\/body>/);
-      return {
+      out.push({
         isError: true,
         text:
           "Pesan DITOLAK/DIPANTULKAN server (bukan balasan asli OkeConnect)" +
           (errCondMatch ? ` — kondisi: ${errCondMatch[1]}` : "") +
           (bodyMatch ? ` — isi pesan yang dipantulkan: ${bodyMatch[1]}` : ""),
-      };
+      });
+    } else {
+      out.push({ isError: false, text: bodyMatch ? bodyMatch[1] : inner });
     }
-    const bodyMatch = inner.match(/<body[^>]*>([\s\S]*?)<\/body>/);
-    return { isError: false, text: bodyMatch ? bodyMatch[1] : inner };
   }
-  return null;
+  return out;
 }
+
+// Kata kunci yang menandakan balasan FINAL (bukan sekadar tanda terima
+// "akan diproses"/"sedang diproses"). Kalau balasan yang masuk cuma ack,
+// kita TERUS mendengarkan sampai dapat salah satu kata kunci ini atau waktu habis.
+const FINAL_REPLY_KEYWORDS = /sukses|berhasil|gagal|\berror\b|ditolak|dibatalkan|invalid|salah pin|saldo tidak cukup/i;
 
 async function readUntil(reader, predicate, timeoutMs = 15000) {
   let buffer = "";
@@ -76,6 +86,39 @@ async function readUntil(reader, predicate, timeoutMs = 15000) {
     if (predicate(buffer)) return buffer;
   }
   throw new Error("Timeout menunggu balasan XMPP: " + buffer.slice(-300));
+}
+
+// Sama seperti readUntil, tapi khusus menunggu balasan transaksi: kalau pesan
+// yang masuk baru berupa ack ("akan diproses"), JANGAN berhenti — terus dengar
+// sampai ada pesan yang mengandung kata kunci final, atau waktu benar-benar habis.
+// Kalau waktu habis dan yang ada cuma ack, tetap kembalikan ack itu (lebih baik
+// daripada tidak ada informasi apa pun) sambil biarkan cron checkPendingOrders
+// menyusuri hasil aslinya nanti.
+async function waitForFinalReply(reader, targetBareJid, timeoutMs = 25000) {
+  let buffer = "";
+  const decoder = new TextDecoder();
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  while (Date.now() < deadline) {
+    const remaining = deadline - Date.now();
+    const { value, done } = await Promise.race([
+      reader.read(),
+      new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), remaining)),
+    ]);
+    if (done) break;
+    if (value === undefined) continue;
+    buffer += decoder.decode(value, { stream: true });
+    const replies = extractAllReplies(buffer, targetBareJid);
+    if (replies.length) {
+      latest = replies[replies.length - 1];
+      if (latest.isError || FINAL_REPLY_KEYWORDS.test(latest.text)) {
+        return latest; // ini sudah hasil final (atau bounce/error), berhenti sekarang
+      }
+      // else: baru ack "akan diproses" — lanjut dengar, mungkin ada balasan susulan
+    }
+  }
+  if (latest) return latest; // waktu habis, tapi setidaknya ada balasan (walau cuma ack)
+  throw new Error(`Timeout menunggu balasan XMPP dari ${targetBareJid}, tidak ada pesan apa pun diterima`);
 }
 
 /**
@@ -188,15 +231,11 @@ export async function sendJabberCommand({ jid, password, to, body }) {
         `<body>${xmlEscape(body)}</body></message>`
     );
 
-    // 6. Tunggu balasan <message> yang BENAR datang dari OkeConnect (bukan
-    // echo/carbon-copy dari pesan kita sendiri, dan bukan stanza error/bounce)
+    // 6. Tunggu balasan <message> yang BENAR datang dari OkeConnect DAN benar-benar
+    // final (bukan cuma ack "akan diproses") — bukan echo/carbon-copy dari pesan
+    // kita sendiri, dan bukan stanza error/bounce.
     const targetBareJid = to.split("/")[0];
-    const reply = await readUntil(
-      reader,
-      (buf) => extractReplyFrom(buf, targetBareJid) !== null,
-      20000
-    );
-    const parsed = extractReplyFrom(reply, targetBareJid);
+    const parsed = await waitForFinalReply(reader, targetBareJid, 25000);
     if (parsed.isError) {
       throw new Error(parsed.text);
     }
