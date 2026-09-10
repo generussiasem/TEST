@@ -19,6 +19,27 @@ function xmlEscape(str) {
     .replace(/"/g, "&quot;");
 }
 
+// Cari stanza <message> di buffer yang BENAR datang dari targetBareJid.
+// Ini untuk menghindari kasus "Message Carbons" (XEP-0280): server Jabber
+// menyalin balik pesan yang KITA kirim sendiri ke resource kita sendiri,
+// yang kalau tidak difilter akan salah dikira "balasan" (isinya = perintah
+// kita sendiri, mis. "S50.0852...1256.R#TX...", identik dengan yang dikirim).
+function extractReplyFrom(buffer, targetBareJid) {
+  const regex = /<message\b([^>]*)>([\s\S]*?)<\/message>/g;
+  let m;
+  while ((m = regex.exec(buffer))) {
+    const attrs = m[1];
+    const inner = m[2];
+    const fromMatch = attrs.match(/from=["']([^"']+)["']/);
+    if (!fromMatch) continue;
+    const fromBare = fromMatch[1].split("/")[0];
+    if (fromBare.toLowerCase() !== targetBareJid.toLowerCase()) continue; // bukan dari OkeConnect — kemungkinan carbon-copy diri sendiri, abaikan
+    const bodyMatch = inner.match(/<body[^>]*>([\s\S]*?)<\/body>/);
+    return bodyMatch ? bodyMatch[1] : inner;
+  }
+  return null;
+}
+
 async function readUntil(reader, predicate, timeoutMs = 15000) {
   let buffer = "";
   const decoder = new TextDecoder();
@@ -128,6 +149,18 @@ export async function sendJabberCommand({ jid, password, to, body }) {
     }
     await send(`<presence/>`);
 
+    // 4c. Matikan Message Carbons (XEP-0280) kalau server mendukungnya — supaya
+    // server tidak mengirim balik salinan pesan kita sendiri ke resource ini,
+    // yang tadinya salah dikira "balasan" dari OkeConnect.
+    await send(
+      `<iq type="set" id="carboff1"><disable xmlns="urn:xmpp:carbons:2"/></iq>`
+    );
+    try {
+      await readUntil(reader, (buf) => buf.includes("carboff1"), 3000);
+    } catch (_) {
+      // Server tidak dukung Carbons — tidak masalah, filter "from" di bawah tetap jaga-jaga.
+    }
+
     // 5. Kirim perintah transaksi sebagai stanza <message>
     const msgId = "trx-" + Date.now();
     await send(
@@ -135,14 +168,16 @@ export async function sendJabberCommand({ jid, password, to, body }) {
         `<body>${xmlEscape(body)}</body></message>`
     );
 
-    // 6. Tunggu balasan <message> apa pun dari lawan bicara
+    // 6. Tunggu balasan <message> yang BENAR datang dari OkeConnect (bukan
+    // echo/carbon-copy dari pesan kita sendiri)
+    const targetBareJid = to.split("/")[0];
     const reply = await readUntil(
       reader,
-      (buf) => buf.includes("<message") && buf.includes("</message>"),
+      (buf) => extractReplyFrom(buf, targetBareJid) !== null,
       20000
     );
-    const match = reply.match(/<body[^>]*>([\s\S]*?)<\/body>/);
-    return match ? match[1] : reply;
+    const body = extractReplyFrom(reply, targetBareJid);
+    return body !== null ? body : reply;
   } finally {
     try {
       await send("</stream:stream>");
