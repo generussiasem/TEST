@@ -176,8 +176,8 @@ export async function sendJabberCommand({ jid, password, to, body }) {
       (buf) => extractReplyFrom(buf, targetBareJid) !== null,
       20000
     );
-    const body = extractReplyFrom(reply, targetBareJid);
-    return body !== null ? body : reply;
+    const replyBody = extractReplyFrom(reply, targetBareJid);
+    return replyBody !== null ? replyBody : reply;
   } finally {
     try {
       await send("</stream:stream>");
