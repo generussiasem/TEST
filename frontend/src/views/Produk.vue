@@ -62,7 +62,7 @@ async function syncPrices() {
   syncing.value = true;
   try {
     const res = await api.post("/api/products/sync", {});
-    okMsg.value = `Sinkron selesai — ${res.synced} produk PPOB diperbarui.`;
+    okMsg.value = `Sinkron selesai — ${res.synced} dari ${res.total} produk berhasil diperbarui${res.skipped ? ` (${res.skipped} dilewati karena nonaktif/data tidak lengkap)` : ""}.`;
     await load();
   } catch (err) {
     error.value = err.message;

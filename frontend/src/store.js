@@ -27,3 +27,22 @@ export function logout() {
 export function isAdmin() {
   return auth.employee?.role === "admin";
 }
+
+// Preferensi tampilan (web / hp / auto) — ini pengaturan perangkat, bukan data
+// sesi, jadi sengaja localStorage supaya diingat terus meski browser ditutup.
+const savedViewMode = localStorage.getItem("kasir_view_mode") || "auto";
+
+export const display = reactive({
+  mode: savedViewMode, // "web" | "hp" | "auto"
+});
+
+export function setViewMode(mode) {
+  display.mode = mode;
+  localStorage.setItem("kasir_view_mode", mode);
+}
+
+export function isMobileView() {
+  if (display.mode === "hp") return true;
+  if (display.mode === "web") return false;
+  return window.innerWidth < 720; // "auto"
+}

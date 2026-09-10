@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS products (
   code TEXT UNIQUE,        -- kode produk PPOB, mis. "TSEL5" (kosong utk barang warung biasa)
   barcode TEXT UNIQUE,     -- barcode fisik barang warung (kosong utk produk PPOB)
   name TEXT NOT NULL,
-  category TEXT,           -- mis. "Pulsa Telkomsel", "Sembako"
+  category TEXT,           -- kasar: "PULSA", "TAGIHAN", dst (field "kategori" OkeConnect)
+  product_group TEXT,      -- lebih spesifik: "Telkomsel", "Masa Aktif Axis", "SMS Telepon Indosat" (field "produk" OkeConnect)
   cost_price INTEGER NOT NULL DEFAULT 0,
   sell_price INTEGER NOT NULL DEFAULT 0,
   stock INTEGER NOT NULL DEFAULT 0,
@@ -42,6 +43,7 @@ CREATE TABLE IF NOT EXISTS products (
 );
 CREATE INDEX IF NOT EXISTS idx_products_code ON products(code);
 CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode);
+CREATE INDEX IF NOT EXISTS idx_products_group ON products(product_group);
 
 CREATE TABLE IF NOT EXISTS contacts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

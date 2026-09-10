@@ -221,40 +221,60 @@ app.post("/api/products/sync", async (c) => {
   // di sini, atau nanti ubah manual per produk lewat halaman "Produk" -> "Ubah".
   const MARKUP = 500;
 
-  let count = 0;
-  let lastError = null;
+  const stmt = c.env.DB.prepare(
+    `INSERT INTO products (code, name, category, product_group, cost_price, sell_price)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(code) DO UPDATE SET
+       name = excluded.name,
+       category = excluded.category,
+       product_group = excluded.product_group,
+       cost_price = excluded.cost_price,
+       sell_price = excluded.sell_price`
+  );
+
+  const batchItems = [];
+  let skipped = 0;
   for (const item of list) {
     const code = item.kode || item.code || item.product_code;
     // Field asli daftar harga OkeConnect: "keterangan" (deskripsi detail) dan
     // "produk" (nama grup produk) — bukan "nama"/"deskripsi" seperti sebelumnya.
     const name = item.keterangan || item.produk || item.nama || item.name;
     const category = item.kategori || item.category || null;
+    // "produk" jauh lebih spesifik dari "kategori" — mis. "Telkomsel", "Masa
+    // Aktif Axis", "SMS Telepon Indosat" — dipakai buat Katalog PPOB bertingkat.
+    const productGroup = item.produk || null;
     // "harga" di JSON OkeConnect adalah harga MODAL (yang Anda bayar ke mereka),
     // bukan harga jual ke pelanggan — sebelumnya salah ditaruh di sell_price.
     const cost = Number(item.harga || item.price || 0);
     const sell = cost + MARKUP;
-    if (!code || !name) continue;
-    if (item.status === "0" || item.status === 0) continue; // produk nonaktif/kosong di OkeConnect
+    if (!code || !name) {
+      skipped++;
+      continue;
+    }
+    if (item.status === "0" || item.status === 0) {
+      skipped++;
+      continue; // produk nonaktif/kosong di OkeConnect
+    }
+    batchItems.push(stmt.bind(code, name, category, productGroup, cost, sell));
+  }
 
+  // Kirim per-batch (bukan satu-satu berurutan) supaya jauh lebih cepat dan
+  // tidak kena limit waktu eksekusi Worker untuk daftar harga yang isinya
+  // ribuan produk. D1 batasi ukuran satu batch, jadi dipecah per 100 statement.
+  const BATCH_SIZE = 100;
+  let count = 0;
+  let lastError = null;
+  for (let i = 0; i < batchItems.length; i += BATCH_SIZE) {
+    const chunk = batchItems.slice(i, i + BATCH_SIZE);
     try {
-      await c.env.DB.prepare(
-        `INSERT INTO products (code, name, category, cost_price, sell_price)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(code) DO UPDATE SET
-           name = excluded.name,
-           category = excluded.category,
-           cost_price = excluded.cost_price,
-           sell_price = excluded.sell_price`
-      )
-        .bind(code, name, category, cost, sell)
-        .run();
-      count++;
+      await c.env.DB.batch(chunk);
+      count += chunk.length;
     } catch (err) {
-      lastError = `${code}: ${err.message}`;
+      lastError = `batch mulai index ${i}: ${err.message}`;
     }
   }
 
-  return c.json({ ok: true, synced: count, total: list.length, lastError });
+  return c.json({ ok: true, synced: count, total: list.length, skipped, lastError });
 });
 
 app.get("/api/transactions", async (c) => {
