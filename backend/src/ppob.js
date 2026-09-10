@@ -29,7 +29,7 @@ export async function cekTagihan(env, { productCode, target }) {
   const reply = await sendJabberCommand({
     jid: env.JABBER_JID,
     password: env.JABBER_PASSWORD,
-    to: "okeconnect@gojabber.com",
+    to: env.JABBER_TARGET || "okeconnect@gojabber.com",
     body,
   });
   return { refId, reply, product };
@@ -75,7 +75,7 @@ export async function placePpobOrder(env, { productCode, target }) {
     reply = await sendJabberCommand({
       jid: env.JABBER_JID,
       password: env.JABBER_PASSWORD,
-      to: "okeconnect@gojabber.com",
+      to: env.JABBER_TARGET || "okeconnect@gojabber.com",
       body,
     });
     if (/sukses|berhasil/i.test(reply)) status = "sukses";
