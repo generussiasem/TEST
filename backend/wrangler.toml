@@ -13,9 +13,11 @@ compatibility_date = "2026-09-09"
 # di-inject ulang tiap deploy, bukan disimpan manual di dashboard Cloudflare).
 keep_vars = true
 
-# Cron untuk cek ulang transaksi PPOB yang masih "pending" (misal balasan Jabber telat)
+# Cron untuk cek ulang transaksi PPOB yang masih "pending" (misal balasan Jabber telat),
+# ditambah jadwal harian jam 03:00 UTC untuk pembersihan riwayat >1 tahun (lihat
+# fungsi cleanupOldData di index.js — event.cron dipakai untuk membedakan keduanya).
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["*/5 * * * *", "0 3 * * *"]
 
 [[d1_databases]]
 binding = "DB"

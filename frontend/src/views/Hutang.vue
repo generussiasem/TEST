@@ -7,6 +7,7 @@ const contacts = ref([]);
 const form = ref({ contact_id: "", type: "piutang", amount: 0, note: "" });
 const error = ref("");
 const showAdd = ref(false);
+const editing = ref(null);
 
 function rupiah(n) {
   return "Rp" + Number(n || 0).toLocaleString("id-ID");
@@ -30,6 +31,36 @@ async function submitAdd() {
     await api.post("/api/debts", form.value);
     form.value = { contact_id: "", type: "piutang", amount: 0, note: "" };
     showAdd.value = false;
+    await load();
+  } catch (err) {
+    error.value = err.message;
+  }
+}
+
+function startEdit(d) {
+  editing.value = { ...d };
+}
+
+async function saveEdit() {
+  error.value = "";
+  try {
+    await api.put(`/api/debts/${editing.value.id}`, {
+      type: editing.value.type,
+      amount: editing.value.amount,
+      note: editing.value.note,
+    });
+    editing.value = null;
+    await load();
+  } catch (err) {
+    error.value = err.message;
+  }
+}
+
+async function hapus(d) {
+  if (!confirm(`Hapus catatan "${typeLabel[d.type] || d.type}" untuk ${d.contact_name}?`)) return;
+  error.value = "";
+  try {
+    await api.delete(`/api/debts/${d.id}`);
     await load();
   } catch (err) {
     error.value = err.message;
@@ -85,20 +116,44 @@ onMounted(load);
             <th>Jenis</th>
             <th>Nominal</th>
             <th>Catatan</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="d in debts" :key="d.id">
-            <td class="muted" style="font-size: 12.5px">{{ new Date(d.date).toLocaleDateString("id-ID") }}</td>
-            <td>{{ d.contact_name }}</td>
-            <td>{{ typeLabel[d.type] || d.type }}</td>
-            <td class="num" :style="{ color: d.type === 'cicilan' ? 'var(--till-deep)' : 'var(--red)' }">
-              {{ d.type === "cicilan" ? "-" : "+" }}{{ rupiah(d.amount) }}
-            </td>
-            <td class="muted">{{ d.note || "—" }}</td>
+            <template v-if="editing && editing.id === d.id">
+              <td class="muted" style="font-size: 12.5px">{{ new Date(d.date).toLocaleDateString("id-ID") }}</td>
+              <td>{{ d.contact_name }}</td>
+              <td>
+                <select v-model="editing.type">
+                  <option value="piutang">Piutang</option>
+                  <option value="utang">Utang</option>
+                  <option value="cicilan">Cicilan</option>
+                </select>
+              </td>
+              <td><input v-model.number="editing.amount" type="number" style="width: 100px" /></td>
+              <td><input v-model="editing.note" style="width: 140px" /></td>
+              <td style="white-space: nowrap">
+                <button class="btn" style="padding: 4px 10px" @click="saveEdit">Simpan</button>
+                <button class="btn ghost" style="padding: 4px 10px" @click="editing = null">Batal</button>
+              </td>
+            </template>
+            <template v-else>
+              <td class="muted" style="font-size: 12.5px">{{ new Date(d.date).toLocaleDateString("id-ID") }}</td>
+              <td>{{ d.contact_name }}</td>
+              <td>{{ typeLabel[d.type] || d.type }}</td>
+              <td class="num" :style="{ color: d.type === 'cicilan' ? 'var(--till-deep)' : 'var(--red)' }">
+                {{ d.type === "cicilan" ? "-" : "+" }}{{ rupiah(d.amount) }}
+              </td>
+              <td class="muted">{{ d.note || "—" }}</td>
+              <td style="white-space: nowrap">
+                <button class="btn ghost" style="padding: 4px 10px; margin-right: 6px" @click="startEdit(d)">Ubah</button>
+                <button class="btn ghost" style="padding: 4px 10px; color: #b3392c" @click="hapus(d)">Hapus</button>
+              </td>
+            </template>
           </tr>
           <tr v-if="!debts.length">
-            <td colspan="5" class="muted">Belum ada catatan hutang piutang.</td>
+            <td colspan="6" class="muted">Belum ada catatan hutang piutang.</td>
           </tr>
         </tbody>
       </table>

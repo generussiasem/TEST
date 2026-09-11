@@ -20,6 +20,10 @@ const loading = ref(false);
 const expenseForm = ref({ type: "expense", category: "", amount: 0, wallet_id: "", note: "" });
 const wallets = ref([]);
 const expenseMsg = ref("");
+const transactions = ref([]);
+const editing = ref(null);
+
+const typeLabel = { sale: "Penjualan", purchase: "Pembelian Stok", expense: "Biaya", mutation: "Mutasi Akun" };
 
 function rupiah(n) {
   return "Rp" + Number(n || 0).toLocaleString("id-ID");
@@ -29,16 +33,48 @@ async function load() {
   loading.value = true;
   error.value = "";
   try {
-    const [p, c] = await Promise.all([
+    const [p, c, t] = await Promise.all([
       api.get(`/api/reports/profit?start=${start.value}&end=${end.value}`),
       api.get(`/api/reports/cashflow?start=${start.value}&end=${end.value}`),
+      api.get("/api/transactions"),
     ]);
     profit.value = p;
     cashflow.value = c;
+    transactions.value = t;
   } catch (err) {
     error.value = err.message;
   } finally {
     loading.value = false;
+  }
+}
+
+function startEdit(t) {
+  editing.value = { ...t };
+}
+
+async function saveEdit() {
+  error.value = "";
+  try {
+    await api.put(`/api/transactions/${editing.value.id}`, {
+      category: editing.value.category,
+      note: editing.value.note,
+      contact_id: editing.value.contact_id,
+    });
+    editing.value = null;
+    await load();
+  } catch (err) {
+    error.value = err.message;
+  }
+}
+
+async function hapusTransaksi(t) {
+  if (!confirm(`Hapus transaksi "${typeLabel[t.type] || t.type}" senilai ${rupiah(t.amount)}? Saldo dompet & stok terkait akan dikembalikan otomatis.`)) return;
+  error.value = "";
+  try {
+    await api.delete(`/api/transactions/${t.id}`);
+    await load();
+  } catch (err) {
+    error.value = err.message;
   }
 }
 
@@ -143,6 +179,51 @@ onMounted(async () => {
           <button class="btn" type="submit">Simpan Biaya</button>
         </form>
       </div>
+    </div>
+
+    <div class="card" style="margin-top: 22px">
+      <h3 style="margin-bottom: 12px">Riwayat Transaksi (200 terbaru)</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Tanggal</th>
+            <th>Jenis</th>
+            <th>Kategori</th>
+            <th>Nominal</th>
+            <th>Catatan</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="t in transactions" :key="t.id">
+            <template v-if="editing && editing.id === t.id">
+              <td class="muted" style="font-size: 12.5px">{{ new Date(t.date).toLocaleString("id-ID") }}</td>
+              <td>{{ typeLabel[t.type] || t.type }}</td>
+              <td><input v-model="editing.category" style="width: 120px" /></td>
+              <td class="num">{{ rupiah(t.amount) }}</td>
+              <td><input v-model="editing.note" style="width: 140px" /></td>
+              <td style="white-space: nowrap">
+                <button class="btn" style="padding: 4px 10px" @click="saveEdit">Simpan</button>
+                <button class="btn ghost" style="padding: 4px 10px" @click="editing = null">Batal</button>
+              </td>
+            </template>
+            <template v-else>
+              <td class="muted" style="font-size: 12.5px">{{ new Date(t.date).toLocaleString("id-ID") }}</td>
+              <td>{{ typeLabel[t.type] || t.type }}</td>
+              <td>{{ t.category || "—" }}</td>
+              <td class="num" :style="{ color: t.type === 'sale' ? 'var(--till-deep)' : 'var(--red)' }">{{ rupiah(t.amount) }}</td>
+              <td class="muted">{{ t.note || "—" }}</td>
+              <td style="white-space: nowrap">
+                <button class="btn ghost" style="padding: 4px 10px; margin-right: 6px" @click="startEdit(t)">Ubah</button>
+                <button class="btn ghost" style="padding: 4px 10px; color: #b3392c" @click="hapusTransaksi(t)">Hapus</button>
+              </td>
+            </template>
+          </tr>
+          <tr v-if="!transactions.length">
+            <td colspan="6" class="muted">Belum ada transaksi.</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   </div>
 </template>

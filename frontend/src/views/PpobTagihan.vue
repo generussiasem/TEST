@@ -30,7 +30,9 @@ function rupiah(n) {
   return "Rp" + Number(n || 0).toLocaleString("id-ID");
 }
 
-const postpaidProducts = computed(() => products.value.filter((p) => p.category === "TAGIHAN" || p.category === "AIR PDAM"));
+const postpaidProducts = computed(() =>
+  products.value.filter((p) => (p.category === "TAGIHAN" || p.category === "AIR PDAM") && p.active !== 0)
+);
 const cekOptions = computed(() => {
   const q = cekSearch.value.toLowerCase();
   return postpaidProducts.value
@@ -61,6 +63,48 @@ const riwayatTagihan = computed(() =>
 const openedId = ref(null);
 function toggleDetail(o) {
   openedId.value = openedId.value === o.id ? null : o.id;
+}
+
+const editingStatus = ref(null); // { ref_id, status, raw_reply }
+function startEditStatus(o) {
+  editingStatus.value = { ref_id: o.ref_id, status: o.status, raw_reply: o.raw_reply || "" };
+}
+async function saveEditStatus() {
+  error.value = "";
+  try {
+    await api.put(`/api/ppob-orders/${editingStatus.value.ref_id}`, {
+      status: editingStatus.value.status,
+      raw_reply: editingStatus.value.raw_reply,
+    });
+    editingStatus.value = null;
+    await load();
+  } catch (err) {
+    error.value = err.message;
+  }
+}
+async function hapusOrder(o) {
+  if (!confirm(`Hapus order ${o.ref_id}? Kalau order ini sempat tercatat "sukses", transaksi & saldo terkait akan dibalikkan otomatis.`)) return;
+  error.value = "";
+  try {
+    await api.delete(`/api/ppob-orders/${o.ref_id}`);
+    await load();
+  } catch (err) {
+    error.value = err.message;
+  }
+}
+
+const checkingRef = ref(null);
+async function cekUlang(o) {
+  error.value = "";
+  checkingRef.value = o.ref_id;
+  try {
+    await api.post(`/api/ppob-orders/${o.ref_id}/cek-ulang`, {});
+    await load();
+  } catch (err) {
+    error.value = err.message;
+  } finally {
+    checkingRef.value = null;
+  }
 }
 
 function isPostpaidCode(code) {
@@ -275,6 +319,39 @@ onMounted(load);
                 <div style="margin-top: 10px">
                   <span class="muted" style="font-size: 13px">Balasan mentah dari OkeConnect</span>
                   <div class="num" style="white-space: pre-wrap; background: var(--paper-raised); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; margin-top: 4px; font-size: 13px">{{ o.raw_reply || "(kosong)" }}</div>
+                </div>
+
+                <div v-if="editingStatus && editingStatus.ref_id === o.ref_id" style="margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px">
+                  <div class="form-row">
+                    <div class="field">
+                      <label>Status (koreksi manual)</label>
+                      <select v-model="editingStatus.status">
+                        <option value="pending">Pending</option>
+                        <option value="sukses">Sukses</option>
+                        <option value="gagal">Gagal</option>
+                        <option value="cek">Cek (bukan transaksi)</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="field"><label>Balasan (opsional, boleh dikosongkan)</label><input v-model="editingStatus.raw_reply" /></div>
+                  <p class="muted" style="font-size: 12px; margin-bottom: 8px">
+                    Kalau status diubah KELUAR dari "Sukses", transaksi &amp; saldo dompet yang sempat tercatat untuk order ini akan otomatis dibalikkan.
+                  </p>
+                  <button class="btn" style="padding: 4px 10px" @click.stop="saveEditStatus">Simpan Koreksi</button>
+                  <button class="btn ghost" style="padding: 4px 10px" @click.stop="editingStatus = null">Batal</button>
+                </div>
+                <div v-else style="margin-top: 12px">
+                  <button
+                    v-if="o.status === 'pending'"
+                    class="btn ghost"
+                    style="padding: 4px 10px; margin-right: 6px"
+                    :disabled="checkingRef === o.ref_id"
+                    @click.stop="cekUlang(o)"
+                  >
+                    {{ checkingRef === o.ref_id ? "Mengecek…" : "Cek Ulang Status" }}
+                  </button>
+                  <button class="btn ghost" style="padding: 4px 10px; margin-right: 6px" @click.stop="startEditStatus(o)">Koreksi Status</button>
+                  <button class="btn ghost" style="padding: 4px 10px; color: #b3392c" @click.stop="hapusOrder(o)">Hapus Order</button>
                 </div>
               </td>
             </tr>

@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { sendJabberCommand } from "./jabber.js";
 import { sendTelegramMessage } from "./telegram.js";
-import { placePpobOrder, recordPpobSale, cekTagihan } from "./ppob.js";
+import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus } from "./ppob.js";
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
 
 const app = new Hono();
@@ -120,6 +120,23 @@ app.put("/api/employees/:id", requireAdmin, async (c) => {
   return c.json({ ok: true });
 });
 
+app.delete("/api/employees/:id", requireAdmin, async (c) => {
+  const id = c.req.param("id");
+  const employee = c.get("employee");
+  if (String(employee.employeeId) === String(id)) {
+    return c.json({ ok: false, error: "Tidak bisa menghapus akun Anda sendiri yang sedang login." }, 400);
+  }
+  const target = await c.env.DB.prepare("SELECT role FROM employees WHERE id = ?").bind(id).first();
+  if (target && target.role === "admin") {
+    const admins = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM employees WHERE role = 'admin' AND active = 1").first();
+    if (admins.n <= 1) {
+      return c.json({ ok: false, error: "Tidak bisa menghapus admin terakhir." }, 400);
+    }
+  }
+  await c.env.DB.prepare("DELETE FROM employees WHERE id = ?").bind(id).run();
+  return c.json({ ok: true });
+});
+
 // ---------------------------------------------------------------------------
 // API KASIR (dipakai frontend Vue Anda, sama pola dengan Kasir Warung lama)
 // ---------------------------------------------------------------------------
@@ -137,8 +154,64 @@ app.post("/api/wallets", async (c) => {
   return c.json({ ok: true });
 });
 
+app.put("/api/wallets/:id", requireAdmin, async (c) => {
+  const id = c.req.param("id");
+  const { name, type, balance } = await c.req.json();
+  await c.env.DB.prepare("UPDATE wallets SET name = ?, type = ?, balance = ? WHERE id = ?")
+    .bind(name, type, balance, id)
+    .run();
+  return c.json({ ok: true });
+});
+
+app.delete("/api/wallets/:id", requireAdmin, async (c) => {
+  const id = c.req.param("id");
+  const used = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM transactions WHERE wallet_id = ?").bind(id).first();
+  if (used.n > 0) {
+    return c.json({ ok: false, error: `Tidak bisa hapus — dompet ini masih dipakai di ${used.n} transaksi.` }, 400);
+  }
+  await c.env.DB.prepare("DELETE FROM wallets WHERE id = ?").bind(id).run();
+  return c.json({ ok: true });
+});
+
+// Kompatibel mundur: tanpa parameter apa pun, tetap balas array polos semua
+// produk (dipakai Kasir/Katalog/Ppob yang sudah ada). Kalau type=ppob dikirim,
+// balas objek berpaginasi { items, total, page, pageSize } — dipakai tab
+// "Produk PPOB" yang baru, karena daftarnya bisa ribuan baris.
 app.get("/api/products", async (c) => {
-  const { results } = await c.env.DB.prepare("SELECT * FROM products ORDER BY id").all();
+  const type = c.req.query("type"); // "fisik" | "ppob" (opsional)
+  const q = (c.req.query("q") || "").trim();
+  const activeOnly = c.req.query("active") === "1";
+
+  const where = [];
+  const params = [];
+  if (type === "fisik") where.push("code IS NULL");
+  if (type === "ppob") where.push("code IS NOT NULL");
+  if (activeOnly) where.push("active = 1");
+  if (q) {
+    where.push("(name LIKE ? OR code LIKE ? OR barcode LIKE ?)");
+    params.push(`%${q}%`, `%${q}%`, `%${q}%`);
+  }
+  const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
+
+  if (type === "ppob") {
+    const page = Math.max(1, parseInt(c.req.query("page") || "1", 10) || 1);
+    const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query("pageSize") || "50", 10) || 50));
+    const offset = (page - 1) * pageSize;
+
+    const totalRow = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM products ${whereSql}`)
+      .bind(...params)
+      .first();
+    const { results } = await c.env.DB.prepare(
+      `SELECT * FROM products ${whereSql} ORDER BY active DESC, name ASC LIMIT ? OFFSET ?`
+    )
+      .bind(...params, pageSize, offset)
+      .all();
+    return c.json({ items: results, total: totalRow.n, page, pageSize });
+  }
+
+  const { results } = await c.env.DB.prepare(`SELECT * FROM products ${whereSql} ORDER BY id`)
+    .bind(...params)
+    .all();
   return c.json(results);
 });
 
@@ -172,6 +245,29 @@ app.put("/api/products/:id", async (c) => {
   return c.json({ ok: true });
 });
 
+app.delete("/api/products/:id", async (c) => {
+  const id = c.req.param("id");
+  const used = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM transaction_items WHERE product_id = ?").bind(id).first();
+  if (used.n > 0) {
+    return c.json({ ok: false, error: `Tidak bisa hapus — produk ini sudah tercatat di ${used.n} transaksi. Nonaktifkan saja lewat tombol "Nonaktifkan" kalau sudah tidak dijual.` }, 400);
+  }
+  await c.env.DB.prepare("DELETE FROM products WHERE id = ?").bind(id).run();
+  return c.json({ ok: true });
+});
+
+// Nonaktifkan/aktifkan manual produk PPOB (di luar sinkron otomatis) — mis.
+// kalau ingin sembunyikan satu produk tanpa menunggu hilang dari OkeConnect.
+app.put("/api/products/:id/active", async (c) => {
+  const id = c.req.param("id");
+  const { active } = await c.req.json();
+  await c.env.DB.prepare(
+    "UPDATE products SET active = ?, deactivated_at = ? WHERE id = ?"
+  )
+    .bind(active ? 1 : 0, active ? null : new Date().toISOString(), id)
+    .run();
+  return c.json({ ok: true });
+});
+
 // ---------------------------------------------------------------------------
 // KONTAK (pelanggan & supplier)
 // ---------------------------------------------------------------------------
@@ -189,6 +285,25 @@ app.post("/api/contacts", async (c) => {
   await c.env.DB.prepare("INSERT INTO contacts (name, phone, type) VALUES (?, ?, ?)")
     .bind(name, phone || null, type)
     .run();
+  return c.json({ ok: true });
+});
+
+app.put("/api/contacts/:id", async (c) => {
+  const id = c.req.param("id");
+  const { name, phone, type } = await c.req.json();
+  await c.env.DB.prepare("UPDATE contacts SET name = ?, phone = ?, type = ? WHERE id = ?")
+    .bind(name, phone || null, type, id)
+    .run();
+  return c.json({ ok: true });
+});
+
+app.delete("/api/contacts/:id", async (c) => {
+  const id = c.req.param("id");
+  const contact = await c.env.DB.prepare("SELECT total_debt FROM contacts WHERE id = ?").bind(id).first();
+  if (contact && contact.total_debt) {
+    return c.json({ ok: false, error: "Tidak bisa hapus — kontak ini masih punya sisa hutang/piutang. Selesaikan dulu di menu Hutang Piutang." }, 400);
+  }
+  await c.env.DB.prepare("DELETE FROM contacts WHERE id = ?").bind(id).run();
   return c.json({ ok: true });
 });
 
@@ -221,15 +336,23 @@ app.post("/api/products/sync", async (c) => {
   // di sini, atau nanti ubah manual per produk lewat halaman "Produk" -> "Ubah".
   const MARKUP = 500;
 
+  // Ditandai di setiap baris yang "terlihat" pada sinkron kali ini — dipakai
+  // setelah upsert selesai untuk menandai kode yang TIDAK terlihat lagi
+  // (berarti sudah hilang dari daftar OkeConnect) sebagai nonaktif otomatis.
+  const runStartedAt = new Date().toISOString();
+
   const stmt = c.env.DB.prepare(
-    `INSERT INTO products (code, name, category, product_group, cost_price, sell_price)
-     VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO products (code, name, category, product_group, cost_price, sell_price, active, deactivated_at, last_synced_at)
+     VALUES (?, ?, ?, ?, ?, ?, 1, NULL, ?)
      ON CONFLICT(code) DO UPDATE SET
        name = excluded.name,
        category = excluded.category,
        product_group = excluded.product_group,
        cost_price = excluded.cost_price,
-       sell_price = excluded.sell_price`
+       sell_price = excluded.sell_price,
+       active = 1,
+       deactivated_at = NULL,
+       last_synced_at = excluded.last_synced_at`
   );
 
   const batchItems = [];
@@ -253,9 +376,9 @@ app.post("/api/products/sync", async (c) => {
     }
     if (item.status === "0" || item.status === 0) {
       skipped++;
-      continue; // produk nonaktif/kosong di OkeConnect
+      continue; // produk nonaktif/kosong di OkeConnect — biarkan tertangkap sbg "tidak terlihat" di bawah
     }
-    batchItems.push(stmt.bind(code, name, category, productGroup, cost, sell));
+    batchItems.push(stmt.bind(code, name, category, productGroup, cost, sell, runStartedAt));
   }
 
   // Kirim per-batch (bukan satu-satu berurutan) supaya jauh lebih cepat dan
@@ -274,7 +397,24 @@ app.post("/api/products/sync", async (c) => {
     }
   }
 
-  return c.json({ ok: true, synced: count, total: list.length, skipped, lastError });
+  // Kode yang sebelumnya aktif tapi TIDAK terlihat di sinkron kali ini (baik
+  // karena hilang total dari sumber, atau statusnya 0) → tandai nonaktif.
+  // Soft-delete, bukan DELETE — riwayat transaksi lama & nama produk tetap aman.
+  const deactivateRes = await c.env.DB.prepare(
+    `UPDATE products SET active = 0, deactivated_at = datetime('now')
+     WHERE code IS NOT NULL AND active = 1 AND (last_synced_at IS NULL OR last_synced_at < ?)`
+  )
+    .bind(runStartedAt)
+    .run();
+
+  return c.json({
+    ok: true,
+    synced: count,
+    total: list.length,
+    skipped,
+    deactivated: deactivateRes.meta?.changes ?? 0,
+    lastError,
+  });
 });
 
 app.get("/api/transactions", async (c) => {
@@ -365,6 +505,52 @@ app.post("/api/transactions", async (c) => {
   return c.json({ ok: true, transactionId, total, costTotal });
 });
 
+// Edit transaksi (cuma field ringan: kategori, catatan, kontak — TIDAK mengubah
+// nominal/jenis/dompet, karena itu butuh hitung ulang stok+saldo yang rawan
+// salah kalau dilakukan lewat form edit sederhana. Untuk salah nominal/dompet,
+// hapus transaksinya lalu catat ulang yang benar.)
+app.put("/api/transactions/:id", requireAdmin, async (c) => {
+  const id = c.req.param("id");
+  const existing = await c.env.DB.prepare("SELECT * FROM transactions WHERE id = ?").bind(id).first();
+  if (!existing) return c.json({ ok: false, error: "Transaksi tidak ditemukan" }, 404);
+  const { category, note, contact_id } = await c.req.json();
+  await c.env.DB.prepare("UPDATE transactions SET category = ?, note = ?, contact_id = ? WHERE id = ?")
+    .bind(category || null, note || null, contact_id || null, id)
+    .run();
+  return c.json({ ok: true });
+});
+
+// Hapus transaksi — otomatis balikkan efek saldo dompet & stok produk yang
+// sempat berubah karena transaksi ini, supaya laporan tetap akurat.
+app.delete("/api/transactions/:id", requireAdmin, async (c) => {
+  const id = c.req.param("id");
+  const t = await c.env.DB.prepare("SELECT * FROM transactions WHERE id = ?").bind(id).first();
+  if (!t) return c.json({ ok: false, error: "Transaksi tidak ditemukan" }, 404);
+
+  if (t.wallet_id) {
+    const delta = t.type === "sale" ? t.amount : -t.amount; // balikkan: kebalikan dari efek saat dibuat
+    await c.env.DB.prepare("UPDATE wallets SET balance = balance - ? WHERE id = ?")
+      .bind(delta, t.wallet_id)
+      .run();
+  }
+
+  const { results: items } = await c.env.DB.prepare(
+    "SELECT * FROM transaction_items WHERE transaction_id = ?"
+  )
+    .bind(id)
+    .all();
+  for (const it of items) {
+    if (t.type === "sale") {
+      await c.env.DB.prepare("UPDATE products SET stock = stock + ? WHERE id = ?").bind(it.qty, it.product_id).run();
+    } else if (t.type === "purchase") {
+      await c.env.DB.prepare("UPDATE products SET stock = stock - ? WHERE id = ?").bind(it.qty, it.product_id).run();
+    }
+  }
+  await c.env.DB.prepare("DELETE FROM transaction_items WHERE transaction_id = ?").bind(id).run();
+  await c.env.DB.prepare("DELETE FROM transactions WHERE id = ?").bind(id).run();
+  return c.json({ ok: true });
+});
+
 // ---------------------------------------------------------------------------
 // HUTANG PIUTANG (pelanggan & supplier)
 // ---------------------------------------------------------------------------
@@ -394,6 +580,42 @@ app.post("/api/debts", async (c) => {
     .bind(delta, contact_id)
     .run();
 
+  return c.json({ ok: true });
+});
+
+// Edit catatan hutang/piutang — otomatis balikkan efek lama ke total_debt
+// kontak, lalu terapkan efek baru (mis. salah ketik nominal/jenis).
+app.put("/api/debts/:id", async (c) => {
+  const id = c.req.param("id");
+  const old = await c.env.DB.prepare("SELECT * FROM debts WHERE id = ?").bind(id).first();
+  if (!old) return c.json({ ok: false, error: "Data tidak ditemukan" }, 404);
+  const { type, amount, note } = await c.req.json();
+
+  const oldDelta = old.type === "cicilan" ? -old.amount : old.amount;
+  await c.env.DB.prepare("UPDATE contacts SET total_debt = total_debt - ? WHERE id = ?")
+    .bind(oldDelta, old.contact_id)
+    .run();
+  const newDelta = type === "cicilan" ? -amount : amount;
+  await c.env.DB.prepare("UPDATE contacts SET total_debt = total_debt + ? WHERE id = ?")
+    .bind(newDelta, old.contact_id)
+    .run();
+
+  await c.env.DB.prepare("UPDATE debts SET type = ?, amount = ?, note = ? WHERE id = ?")
+    .bind(type, amount, note || null, id)
+    .run();
+  return c.json({ ok: true });
+});
+
+// Hapus catatan hutang/piutang — otomatis balikkan efeknya ke total_debt kontak.
+app.delete("/api/debts/:id", async (c) => {
+  const id = c.req.param("id");
+  const d = await c.env.DB.prepare("SELECT * FROM debts WHERE id = ?").bind(id).first();
+  if (!d) return c.json({ ok: false, error: "Data tidak ditemukan" }, 404);
+  const delta = d.type === "cicilan" ? -d.amount : d.amount;
+  await c.env.DB.prepare("UPDATE contacts SET total_debt = total_debt - ? WHERE id = ?")
+    .bind(delta, d.contact_id)
+    .run();
+  await c.env.DB.prepare("DELETE FROM debts WHERE id = ?").bind(id).run();
   return c.json({ ok: true });
 });
 
@@ -454,6 +676,76 @@ app.get("/api/ppob-orders", async (c) => {
     "SELECT * FROM ppob_orders ORDER BY created_at DESC LIMIT 200"
   ).all();
   return c.json(results);
+});
+
+// Koreksi manual satu order PPOB (mis. status ternyata salah tercatat, seperti
+// kasus balasan transaksi lain yang nyasar). Kalau status DIUBAH KELUAR dari
+// "sukses", otomatis balikkan transaksi/pemasukan & saldo dompet yang sempat
+// tercatat untuk order ini — supaya tidak perlu jalankan SQL manual lagi.
+app.put("/api/ppob-orders/:refId", requireAdmin, async (c) => {
+  const refId = c.req.param("refId");
+  const order = await c.env.DB.prepare("SELECT * FROM ppob_orders WHERE ref_id = ?").bind(refId).first();
+  if (!order) return c.json({ ok: false, error: "Order tidak ditemukan" }, 404);
+  const { status, raw_reply, target } = await c.req.json();
+
+  if (order.status === "sukses" && status !== "sukses") {
+    const { results: txs } = await c.env.DB.prepare("SELECT * FROM transactions WHERE note LIKE ?")
+      .bind(`%${refId}%`)
+      .all();
+    for (const t of txs) {
+      if (t.wallet_id) {
+        await c.env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?")
+          .bind(t.cost_total, t.wallet_id)
+          .run();
+      }
+      await c.env.DB.prepare("DELETE FROM transactions WHERE id = ?").bind(t.id).run();
+    }
+  }
+
+  await c.env.DB.prepare(
+    "UPDATE ppob_orders SET status = ?, raw_reply = ?, target = ?, updated_at = datetime('now') WHERE ref_id = ?"
+  )
+    .bind(status || order.status, raw_reply ?? order.raw_reply, target || order.target, refId)
+    .run();
+
+  return c.json({ ok: true });
+});
+
+// Tombol manual "Cek Ulang Status" di menu detail transaksi — kirim CEK.R#
+// ke OkeConnect kapan saja, tidak terikat jadwal cron otomatis.
+app.post("/api/ppob-orders/:refId/cek-ulang", async (c) => {
+  const refId = c.req.param("refId");
+  const order = await c.env.DB.prepare("SELECT * FROM ppob_orders WHERE ref_id = ?").bind(refId).first();
+  if (!order) return c.json({ ok: false, error: "Order tidak ditemukan" }, 404);
+  try {
+    const { status, reply } = await recheckOrder(c.env, order);
+    return c.json({ ok: true, status, reply });
+  } catch (err) {
+    return c.json({ ok: false, error: "Gagal cek ke OkeConnect: " + err.message }, 502);
+  }
+});
+
+// Hapus order PPOB — otomatis balikkan transaksi & saldo terkait kalau order
+// ini sempat tercatat "sukses" (menghindari saldo/pemasukan palsu tertinggal).
+app.delete("/api/ppob-orders/:refId", requireAdmin, async (c) => {
+  const refId = c.req.param("refId");
+  const order = await c.env.DB.prepare("SELECT * FROM ppob_orders WHERE ref_id = ?").bind(refId).first();
+  if (!order) return c.json({ ok: false, error: "Order tidak ditemukan" }, 404);
+
+  const { results: txs } = await c.env.DB.prepare("SELECT * FROM transactions WHERE note LIKE ?")
+    .bind(`%${refId}%`)
+    .all();
+  for (const t of txs) {
+    if (t.wallet_id) {
+      await c.env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?")
+        .bind(t.cost_total, t.wallet_id)
+        .run();
+    }
+    await c.env.DB.prepare("DELETE FROM transactions WHERE id = ?").bind(t.id).run();
+  }
+
+  await c.env.DB.prepare("DELETE FROM ppob_orders WHERE ref_id = ?").bind(refId).run();
+  return c.json({ ok: true });
 });
 
 // Order PPOB langsung dari halaman kasir web (pola sama dengan /beli di Telegram,
@@ -637,60 +929,136 @@ app.post("/telegram/webhook", async (c) => {
 // (menghindari kebutuhan koneksi Jabber yang nyala 24 jam terus-menerus)
 // ---------------------------------------------------------------------------
 
+// Cek ulang SATU order ke OkeConnect (via CEK.R#) dan update status/raw_reply +
+// catat transaksi kalau ternyata sukses. Dipakai baik oleh cron (otomatis,
+// sekali saja per order) maupun endpoint manual (tombol "Cek Ulang Status").
+async function recheckOrder(env, order) {
+  // TODO: sesuaikan format perintah "cek status" sesuai dokumentasi OkeConnect
+  // (di screenshot CS Anda ada varian format berakhiran huruf 'A' untuk ID pelanggan —
+  // konfirmasi ke OkeConnect apakah itu juga dipakai untuk query status).
+  const reply = await sendJabberCommand({
+    jid: env.JABBER_JID,
+    password: env.JABBER_PASSWORD,
+    to: env.JABBER_TARGET || "okeconnect@gojabber.com",
+    body: `CEK.R#${order.ref_id}`,
+  });
+  const status = detectPpobStatus(reply);
+
+  await env.DB.prepare(
+    "UPDATE ppob_orders SET status = ?, raw_reply = ?, updated_at = datetime('now'), auto_checked = 1 WHERE id = ?"
+  )
+    .bind(status, reply, order.id)
+    .run();
+
+  if (status === "sukses") {
+    const product = await env.DB.prepare("SELECT * FROM products WHERE code = ?")
+      .bind(order.product_code)
+      .first();
+    const wallet = order.wallet_id
+      ? await env.DB.prepare("SELECT * FROM wallets WHERE id = ?").bind(order.wallet_id).first()
+      : null;
+    if (product) {
+      await recordPpobSale(env, { product, wallet, refId: order.ref_id, target: order.target });
+    }
+  }
+
+  if (status !== "pending" && order.telegram_chat_id) {
+    await sendTelegramMessage(
+      env.TELEGRAM_BOT_TOKEN,
+      order.telegram_chat_id,
+      `Update ${order.ref_id}: ${status}\n${reply}`
+    );
+  }
+
+  return { status, reply };
+}
+
+// Cron: cek ulang SEKALI SAJA tiap order, 5 menit setelah dibuat — bukan
+// diulang tiap 5 menit selamanya. Kalau setelah cek sekali ini masih
+// "pending" juga, itu ranah tombol manual "Cek Ulang Status" di menu detail
+// transaksi (lihat endpoint /api/ppob-orders/:refId/cek-ulang), bukan cron lagi.
 async function checkPendingOrders(env) {
   const { results } = await env.DB.prepare(
-    "SELECT * FROM ppob_orders WHERE status = 'pending' AND created_at < datetime('now', '-3 minutes') LIMIT 20"
+    `SELECT * FROM ppob_orders
+     WHERE status = 'pending' AND auto_checked = 0 AND created_at <= datetime('now', '-5 minutes')
+     LIMIT 20`
   ).all();
 
   for (const order of results) {
     try {
-      // TODO: sesuaikan format perintah "cek status" sesuai dokumentasi OkeConnect
-      // (di screenshot CS Anda ada varian format berakhiran huruf 'A' untuk ID pelanggan —
-      // konfirmasi ke OkeConnect apakah itu juga dipakai untuk query status).
-      const reply = await sendJabberCommand({
-        jid: env.JABBER_JID,
-        password: env.JABBER_PASSWORD,
-        to: env.JABBER_TARGET || "okeconnect@gojabber.com",
-        body: `CEK.R#${order.ref_id}`,
-      });
-      const success = /sukses|berhasil/i.test(reply);
-      const failed = /gagal|error/i.test(reply);
-      const status = success ? "sukses" : failed ? "gagal" : "pending";
-
-      await env.DB.prepare(
-        "UPDATE ppob_orders SET status = ?, raw_reply = ?, updated_at = datetime('now') WHERE id = ?"
-      )
-        .bind(status, reply, order.id)
-        .run();
-
-      if (status === "sukses") {
-        const product = await env.DB.prepare("SELECT * FROM products WHERE code = ?")
-          .bind(order.product_code)
-          .first();
-        const wallet = order.wallet_id
-          ? await env.DB.prepare("SELECT * FROM wallets WHERE id = ?").bind(order.wallet_id).first()
-          : null;
-        if (product) {
-          await recordPpobSale(env, { product, wallet, refId: order.ref_id, target: order.target });
-        }
-      }
-
-      if (status !== "pending" && order.telegram_chat_id) {
-        await sendTelegramMessage(
-          env.TELEGRAM_BOT_TOKEN,
-          order.telegram_chat_id,
-          `Update ${order.ref_id}: ${status}\n${reply}`
-        );
-      }
+      await recheckOrder(env, order);
     } catch (err) {
-      // biarkan, dicoba lagi di jadwal cron berikutnya
+      // Tetap tandai auto_checked supaya tidak dicoba otomatis lagi tiap
+      // 5 menit selamanya — kalau gagal, biarkan tombol manual yang urus.
+      await env.DB.prepare("UPDATE ppob_orders SET auto_checked = 1 WHERE id = ?").bind(order.id).run();
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// CRON — pembersihan riwayat rolling 1 tahun (jalan harian, jadwal terpisah
+// dari cek order pending). MURNI hapus riwayat lama — TIDAK membalikkan
+// saldo dompet/stok/hutang, karena efeknya sudah lama "menyatu" jadi saldo
+// berjalan saat ini; membalikkannya justru akan merusak saldo yang sudah benar.
+// ---------------------------------------------------------------------------
+
+async function cleanupOldData(env) {
+  const result = { transactions: 0, transaction_items: 0, debts: 0, ppob_orders: 0, products: 0 };
+
+  // 1. Transaksi kas lebih tua dari 1 tahun (+ item-item di dalamnya)
+  const oldTx = await env.DB.prepare(
+    "SELECT id FROM transactions WHERE date < datetime('now', '-1 year')"
+  ).all();
+  if (oldTx.results.length) {
+    const ids = oldTx.results.map((t) => t.id);
+    const placeholders = ids.map(() => "?").join(",");
+    const delItems = await env.DB.prepare(
+      `DELETE FROM transaction_items WHERE transaction_id IN (${placeholders})`
+    )
+      .bind(...ids)
+      .run();
+    const delTx = await env.DB.prepare(
+      `DELETE FROM transactions WHERE id IN (${placeholders})`
+    )
+      .bind(...ids)
+      .run();
+    result.transaction_items = delItems.meta?.changes ?? 0;
+    result.transactions = delTx.meta?.changes ?? 0;
+  }
+
+  // 2. Hutang piutang lebih tua dari 1 tahun DAN kontaknya sudah lunas
+  //    (total_debt = 0) — yang masih ada sisa hutang TIDAK disentuh berapa
+  //    pun umurnya, karena riwayatnya masih relevan untuk penagihan.
+  const delDebts = await env.DB.prepare(
+    `DELETE FROM debts WHERE date < datetime('now', '-1 year')
+       AND contact_id IN (SELECT id FROM contacts WHERE total_debt = 0)`
+  ).run();
+  result.debts = delDebts.meta?.changes ?? 0;
+
+  // 3. Riwayat order PPOB lebih tua dari 1 tahun
+  const delOrders = await env.DB.prepare(
+    "DELETE FROM ppob_orders WHERE created_at < datetime('now', '-1 year')"
+  ).run();
+  result.ppob_orders = delOrders.meta?.changes ?? 0;
+
+  // 4. Hard-delete produk PPOB yang sudah nonaktif (soft-deleted) lebih dari
+  //    1 tahun — walau pernah laku terjual (nama di laporan lama boleh kosong).
+  const delProducts = await env.DB.prepare(
+    `DELETE FROM products WHERE active = 0 AND deactivated_at IS NOT NULL
+       AND deactivated_at < datetime('now', '-1 year')`
+  ).run();
+  result.products = delProducts.meta?.changes ?? 0;
+
+  return result;
 }
 
 export default {
   fetch: app.fetch,
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(checkPendingOrders(env));
+    if (event.cron === "0 3 * * *") {
+      ctx.waitUntil(cleanupOldData(env));
+    } else {
+      ctx.waitUntil(checkPendingOrders(env));
+    }
   },
 };

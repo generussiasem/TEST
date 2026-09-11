@@ -239,9 +239,12 @@ button:focus-visible {
 }
 
 table {
+  display: block;
   width: 100%;
   border-collapse: collapse;
   font-size: 14px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 th {
@@ -377,10 +380,12 @@ tr:last-child td {
   justify-content: center;
   background: var(--till-deep);
   background-image: radial-gradient(circle at 20% 20%, rgba(255, 255, 255, 0.05), transparent 40%);
+  padding: 16px;
 }
 
 .auth-card {
-  width: 360px;
+  width: 100%;
+  max-width: 360px;
   background: var(--paper-raised);
   border-radius: var(--radius);
   padding: 32px 30px;

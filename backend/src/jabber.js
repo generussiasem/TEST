@@ -19,11 +19,18 @@ function xmlEscape(str) {
     .replace(/"/g, "&quot;");
 }
 
-// Ambil SEMUA stanza <message> di buffer yang BENAR datang dari targetBareJid.
-// Ini untuk menghindari kasus "Message Carbons" (XEP-0280): server Jabber
-// menyalin balik pesan yang KITA kirim sendiri ke resource kita sendiri,
-// yang kalau tidak difilter akan salah dikira "balasan" (isinya = perintah
-// kita sendiri, mis. "S50.0852...1256.R#TX...", identik dengan yang dikirim).
+// Ambil SEMUA stanza <message> di buffer yang BENAR datang dari targetBareJid
+// DAN benar-benar menjawab ref_id yang kita kirim (expectedRefToken).
+// Ini untuk menghindari 2 sumber salah-tangkap:
+//   1) "Message Carbons" (XEP-0280): server Jabber menyalin balik pesan KITA
+//      sendiri ke resource kita sendiri.
+//   2) BALASAN TRANSAKSI LAIN NYASAR: kalau ada permintaan lain yang jalan
+//      berdekatan waktu (mis. cron checkPendingOrders memproses order lama
+//      sementara kita cek transaksi baru), balasan untuk request LAIN bisa
+//      "tertangkap" sebagai balasan kita — padahal isinya sama sekali beda
+//      ref_id. OkeConnect SELALU menyertakan ref_id (R#...) yang kita kirim
+//      di dalam balasannya, jadi kita wajib cocokkan itu sebelum menerima
+//      suatu <message> sebagai jawaban kita.
 //
 // Mengembalikan array { isError, text } (bisa lebih dari satu pesan) — karena
 // OkeConnect kadang kirim BERTAHAP: pesan pertama "akan diproses" (ack), lalu
@@ -33,10 +40,11 @@ function xmlEscape(str) {
 // Selain carbon-copy, ada kemungkinan lain yang tampilannya mirip: server
 // Jabber memantulkan balik (bounce) pesan kita sendiri sebagai stanza
 // <message type="error">, biasanya kalau JID tujuan tidak valid/tidak bisa
-// dihubungi. Isi bounce ini SAMA PERSIS dengan pesan yang kita kirim (echo),
-// dan "from"-nya pun tetap JID tujuan — jadi lolos filter "from" di atas —
-// padahal itu tandanya pesan GAGAL terkirim ke OkeConnect, bukan balasan sukses.
-function extractAllReplies(buffer, targetBareJid) {
+// dihubungi. Isi bounce ini SAMA PERSIS dengan pesan yang kita kirim (echo,
+// jadi otomatis mengandung ref_id kita sendiri juga — tetap lolos filter ini),
+// dan "from"-nya pun tetap JID tujuan — padahal itu tandanya pesan GAGAL
+// terkirim ke OkeConnect, bukan balasan sukses.
+function extractAllReplies(buffer, targetBareJid, expectedRefToken) {
   const regex = /<message\b([^>]*)>([\s\S]*?)<\/message>/g;
   const out = [];
   let m;
@@ -49,6 +57,10 @@ function extractAllReplies(buffer, targetBareJid) {
     if (fromBare.toLowerCase() !== targetBareJid.toLowerCase()) continue; // bukan dari OkeConnect — kemungkinan carbon-copy diri sendiri, abaikan
     const isError = /type=["']error["']/.test(attrs);
     const bodyMatch = inner.match(/<body[^>]*>([\s\S]*?)<\/body>/);
+    const text = bodyMatch ? bodyMatch[1] : inner;
+    if (expectedRefToken && !isError && !text.includes(expectedRefToken)) {
+      continue; // balasan ini untuk transaksi/permintaan LAIN — bukan punya kita, abaikan
+    }
     if (isError) {
       const errCondMatch = inner.match(/<error[^>]*>[\s\S]*?<([a-z0-9-]+)\s+xmlns=["']urn:ietf:params:xml:ns:xmpp-stanzas["']/i);
       out.push({
@@ -59,7 +71,7 @@ function extractAllReplies(buffer, targetBareJid) {
           (bodyMatch ? ` — isi pesan yang dipantulkan: ${bodyMatch[1]}` : ""),
       });
     } else {
-      out.push({ isError: false, text: bodyMatch ? bodyMatch[1] : inner });
+      out.push({ isError: false, text });
     }
   }
   return out;
@@ -94,7 +106,7 @@ async function readUntil(reader, predicate, timeoutMs = 15000) {
 // Kalau waktu habis dan yang ada cuma ack, tetap kembalikan ack itu (lebih baik
 // daripada tidak ada informasi apa pun) sambil biarkan cron checkPendingOrders
 // menyusuri hasil aslinya nanti.
-async function waitForFinalReply(reader, targetBareJid, timeoutMs = 25000) {
+async function waitForFinalReply(reader, targetBareJid, expectedRefToken, timeoutMs = 25000) {
   let buffer = "";
   const decoder = new TextDecoder();
   const deadline = Date.now() + timeoutMs;
@@ -108,7 +120,7 @@ async function waitForFinalReply(reader, targetBareJid, timeoutMs = 25000) {
     if (done) break;
     if (value === undefined) continue;
     buffer += decoder.decode(value, { stream: true });
-    const replies = extractAllReplies(buffer, targetBareJid);
+    const replies = extractAllReplies(buffer, targetBareJid, expectedRefToken);
     if (replies.length) {
       latest = replies[replies.length - 1];
       if (latest.isError || FINAL_REPLY_KEYWORDS.test(latest.text)) {
@@ -118,7 +130,7 @@ async function waitForFinalReply(reader, targetBareJid, timeoutMs = 25000) {
     }
   }
   if (latest) return latest; // waktu habis, tapi setidaknya ada balasan (walau cuma ack)
-  throw new Error(`Timeout menunggu balasan XMPP dari ${targetBareJid}, tidak ada pesan apa pun diterima`);
+  throw new Error(`Timeout menunggu balasan XMPP dari ${targetBareJid} untuk ref ${expectedRefToken}, tidak ada pesan yang cocok diterima`);
 }
 
 /**
@@ -233,9 +245,12 @@ export async function sendJabberCommand({ jid, password, to, body }) {
 
     // 6. Tunggu balasan <message> yang BENAR datang dari OkeConnect DAN benar-benar
     // final (bukan cuma ack "akan diproses") — bukan echo/carbon-copy dari pesan
-    // kita sendiri, dan bukan stanza error/bounce.
+    // kita sendiri, bukan stanza error/bounce, DAN benar-benar menjawab ref_id
+    // yang barusan kita kirim (bukan balasan transaksi lain yang nyasar).
     const targetBareJid = to.split("/")[0];
-    const parsed = await waitForFinalReply(reader, targetBareJid, 25000);
+    const refTokenMatch = body.match(/R#([A-Za-z0-9]+)/);
+    const expectedRefToken = refTokenMatch ? refTokenMatch[1] : null;
+    const parsed = await waitForFinalReply(reader, targetBareJid, expectedRefToken, 25000);
     if (parsed.isError) {
       throw new Error(parsed.text);
     }

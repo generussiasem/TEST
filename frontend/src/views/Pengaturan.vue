@@ -8,6 +8,7 @@ const walletForm = ref({ name: "", type: "umum", balance: 0 });
 const error = ref("");
 const okMsg = ref("");
 const walletMsg = ref("");
+const editingWallet = ref(null);
 
 function rupiah(n) {
   return "Rp" + Number(n || 0).toLocaleString("id-ID");
@@ -37,6 +38,32 @@ async function addWallet() {
     await api.post("/api/wallets", walletForm.value);
     walletMsg.value = "Akun ditambahkan.";
     walletForm.value = { name: "", type: "umum", balance: 0 };
+    await load();
+  } catch (err) {
+    error.value = err.message;
+  }
+}
+
+function startEditWallet(w) {
+  editingWallet.value = { ...w };
+}
+
+async function saveWalletEdit() {
+  error.value = "";
+  try {
+    await api.put(`/api/wallets/${editingWallet.value.id}`, editingWallet.value);
+    editingWallet.value = null;
+    await load();
+  } catch (err) {
+    error.value = err.message;
+  }
+}
+
+async function hapusWallet(w) {
+  if (!confirm(`Hapus akun "${w.name}"?`)) return;
+  error.value = "";
+  try {
+    await api.delete(`/api/wallets/${w.id}`);
     await load();
   } catch (err) {
     error.value = err.message;
@@ -100,16 +127,37 @@ onMounted(load);
             <th>Nama</th>
             <th>Tipe</th>
             <th>Saldo</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="w in wallets" :key="w.id">
-            <td>{{ w.name }}</td>
-            <td>{{ w.type === "distributor_ppob" ? "Distributor PPOB" : "Umum" }}</td>
-            <td class="num">{{ rupiah(w.balance) }}</td>
+            <template v-if="editingWallet && editingWallet.id === w.id">
+              <td><input v-model="editingWallet.name" /></td>
+              <td>
+                <select v-model="editingWallet.type">
+                  <option value="umum">Umum</option>
+                  <option value="distributor_ppob">Distributor PPOB</option>
+                </select>
+              </td>
+              <td><input v-model.number="editingWallet.balance" type="number" style="width: 110px" /></td>
+              <td style="white-space: nowrap">
+                <button class="btn" style="padding: 4px 10px" @click="saveWalletEdit">Simpan</button>
+                <button class="btn ghost" style="padding: 4px 10px" @click="editingWallet = null">Batal</button>
+              </td>
+            </template>
+            <template v-else>
+              <td>{{ w.name }}</td>
+              <td>{{ w.type === "distributor_ppob" ? "Distributor PPOB" : "Umum" }}</td>
+              <td class="num">{{ rupiah(w.balance) }}</td>
+              <td style="white-space: nowrap">
+                <button class="btn ghost" style="padding: 4px 10px; margin-right: 6px" @click="startEditWallet(w)">Ubah</button>
+                <button class="btn ghost" style="padding: 4px 10px; color: #b3392c" @click="hapusWallet(w)">Hapus</button>
+              </td>
+            </template>
           </tr>
           <tr v-if="!wallets.length">
-            <td colspan="3" class="muted">Belum ada akun.</td>
+            <td colspan="4" class="muted">Belum ada akun.</td>
           </tr>
         </tbody>
       </table>

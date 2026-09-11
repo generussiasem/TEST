@@ -43,6 +43,17 @@ async function saveEdit() {
   }
 }
 
+async function hapus(e) {
+  if (!confirm(`Hapus karyawan "${e.name}"? Tindakan ini tidak bisa dibatalkan.`)) return;
+  error.value = "";
+  try {
+    await api.delete(`/api/employees/${e.id}`);
+    await load();
+  } catch (err) {
+    error.value = err.message;
+  }
+}
+
 onMounted(load);
 </script>
 
@@ -117,7 +128,10 @@ onMounted(load);
               <td class="num">{{ e.username }}</td>
               <td style="text-transform: capitalize">{{ e.role }}</td>
               <td><span class="badge" :class="e.active ? 'sukses' : 'gagal'">{{ e.active ? "Aktif" : "Nonaktif" }}</span></td>
-              <td><button class="btn ghost" style="padding: 4px 10px" @click="startEdit(e)">Ubah</button></td>
+              <td>
+                <button class="btn ghost" style="padding: 4px 10px; margin-right: 6px" @click="startEdit(e)">Ubah</button>
+                <button class="btn ghost" style="padding: 4px 10px; color: #b3392c" @click="hapus(e)">Hapus</button>
+              </td>
             </template>
           </tr>
         </tbody>

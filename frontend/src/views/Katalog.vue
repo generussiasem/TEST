@@ -41,6 +41,7 @@ const operators = computed(() => {
   const map = new Map();
   for (const p of products.value) {
     if (!p.code) continue; // cuma produk PPOB, bukan barang warung
+    if (p.active === 0) continue; // produk sudah nonaktif (hilang dari sumber OkeConnect), sembunyikan dari pilihan order baru
     const op = operatorFor(p);
     if (!map.has(op.key)) map.set(op.key, { ...op, items: [] });
     map.get(op.key).items.push(p);

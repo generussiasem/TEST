@@ -39,11 +39,15 @@ CREATE TABLE IF NOT EXISTS products (
   cost_price INTEGER NOT NULL DEFAULT 0,
   sell_price INTEGER NOT NULL DEFAULT 0,
   stock INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,      -- 0 = produk PPOB sudah hilang dari daftar harga OkeConnect (soft-delete)
+  deactivated_at TEXT,                    -- kapan jadi nonaktif, dipakai utk hard-delete otomatis setelah >1 tahun
+  last_synced_at TEXT,                    -- ditandai tiap kali sinkron melihat kode ini masih ada di sumber
   created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_products_code ON products(code);
 CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode);
 CREATE INDEX IF NOT EXISTS idx_products_group ON products(product_group);
+CREATE INDEX IF NOT EXISTS idx_products_active ON products(active);
 
 CREATE TABLE IF NOT EXISTS contacts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,6 +105,7 @@ CREATE TABLE IF NOT EXISTS ppob_orders (
   status TEXT NOT NULL DEFAULT 'pending', -- pending | sukses | gagal
   raw_reply TEXT,
   finalized INTEGER NOT NULL DEFAULT 0, -- 1 = sudah dicatat manual sebagai transaksi (khusus order postpaid/tagihan)
+  auto_checked INTEGER NOT NULL DEFAULT 0, -- 1 = sudah dicek otomatis sekali oleh cron (5 menit setelah dibuat); cron tidak akan cek lagi setelah ini, sisanya lewat tombol manual
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );

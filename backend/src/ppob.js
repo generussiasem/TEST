@@ -7,6 +7,21 @@ import { sendJabberCommand } from "./jabber.js";
 //     tabel products untuk kategori ini cuma fee, bukan total tagihan asli).
 //     Kasir harus konfirmasi manual nominal aslinya lewat endpoint
 //     /api/ppob-orders/:ref_id/catat setelah baca balasan OkeConnect.
+// PENTING: cek kegagalan DULU (prioritas), baru sukses — dan waspadai kata
+// "berhasil"/"sukses" yang DINEGASIKAN (mis. "tidak berhasil", "belum sukses").
+// Bug sebelumnya: /sukses|berhasil/i dicek duluan tanpa peduli negasi, jadi
+// balasan seperti "Transaksi tidak berhasil, saldo kurang" ikut kecap "sukses"
+// — dan karena status "sukses" men-trigger pencatatan pemasukan + potong
+// saldo, itu bikin laporan keuangan salah walau transaksinya benar2 gagal.
+export function detectPpobStatus(reply) {
+  const failurePattern = /gagal|ditolak|dibatalkan|invalid|salah pin|saldo tidak cukup|tidak dapat diproses|\berror\b/i;
+  const negatedSuccess = /\b(tidak|belum|bukan|gak|ga)\s+(ber)?hasil\b|\b(tidak|belum|bukan|gak|ga)\s+sukses\b/i;
+  const successPattern = /\bsukses\b|\bberhasil\b/i;
+  if (failurePattern.test(reply) || negatedSuccess.test(reply)) return "gagal";
+  if (successPattern.test(reply)) return "sukses";
+  return "pending";
+}
+
 const POSTPAID_CATEGORIES = ["TAGIHAN", "AIR PDAM"];
 
 function isPostpaid(product) {
@@ -96,8 +111,7 @@ export async function placePpobOrder(env, { productCode, target }) {
       to: env.JABBER_TARGET || "okeconnect@gojabber.com",
       body,
     });
-    if (/sukses|berhasil/i.test(reply)) status = "sukses";
-    else if (/gagal|error/i.test(reply)) status = "gagal";
+    status = detectPpobStatus(reply);
   } catch (err) {
     // Sebelumnya error ini "ditelan" begitu saja jadi tidak kelihatan di mana pun.
     // Sekarang dicatat ke console (muncul di Observability -> Logs, buka Events
