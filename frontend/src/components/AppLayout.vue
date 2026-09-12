@@ -39,6 +39,8 @@ const navItems = computed(() => {
     { to: "/produk", label: "Produk & Stok" },
     { to: "/kontak", label: "Pelanggan & Supplier" },
     { to: "/hutang", label: "Hutang Piutang" },
+    { to: "/mutasi", label: "Mutasi Akun" },
+    { to: "/shift", label: "Tutup Shift" },
     { to: "/laporan", label: "Laporan" },
   ];
   if (isAdmin()) {

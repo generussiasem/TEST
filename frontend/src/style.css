@@ -401,3 +401,65 @@ tr:last-child td {
   font-size: 13px;
   margin-bottom: 22px;
 }
+
+/* ===========================================================
+   CETAK STRUK — dipakai bareng di Kasir, Ppob, PpobTagihan.
+   Trik standar: sembunyikan semua isi halaman KECUALI elemen
+   ber-class .receipt-print saat window.print() dipanggil.
+   =========================================================== */
+.receipt-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 20, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  padding: 16px;
+}
+
+.receipt-box {
+  background: #fff;
+  color: #1a1a1a;
+  width: 100%;
+  max-width: 340px;
+  max-height: 90vh;
+  overflow: auto;
+  border-radius: var(--radius);
+  padding: 20px 18px;
+  font-family: "Courier New", monospace;
+  font-size: 13px;
+}
+
+.receipt-box hr {
+  border: none;
+  border-top: 1px dashed #999;
+  margin: 8px 0;
+}
+
+.receipt-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .receipt-box,
+  .receipt-box * {
+    visibility: visible;
+  }
+  .receipt-box {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    max-width: 100%;
+    box-shadow: none;
+  }
+  .no-print {
+    display: none !important;
+  }
+}

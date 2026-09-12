@@ -14,15 +14,16 @@ compatibility_date = "2026-09-09"
 keep_vars = true
 
 # Cron untuk cek ulang transaksi PPOB yang masih "pending" (misal balasan Jabber telat),
-# ditambah jadwal harian jam 03:00 UTC untuk pembersihan riwayat >1 tahun (lihat
-# fungsi cleanupOldData di index.js — event.cron dipakai untuk membedakan keduanya).
+# ditambah jadwal harian jam 03:00 UTC untuk pembersihan riwayat >1 tahun, dan
+# jadwal tiap 8 jam untuk sinkron otomatis harga PPOB (lihat scheduled() di
+# index.js — event.cron dipakai untuk membedakan ketiganya).
 [triggers]
-crons = ["*/5 * * * *", "0 3 * * *"]
+crons = ["*/5 * * * *", "0 3 * * *", "0 */8 * * *"]
 
 [[d1_databases]]
 binding = "DB"
 database_name = "kasir-ppob-db"
-database_id = "22e31388-c654-4bc4-8b3b-21e2fba11dcb"
+database_id = "16b154f7-7235-403e-9ddb-7dd1da4b20b7"
 
 [vars]
 # Alamat Jabber tujuan transaksi. OkeConnect kasih 2 opsi:
@@ -31,11 +32,20 @@ database_id = "22e31388-c654-4bc4-8b3b-21e2fba11dcb"
 # Ganti nilainya di sini lalu `wrangler deploy` untuk tes cepat tanpa ubah kode.
 JABBER_TARGET = "center@mitra.orderkuota.com"
 
+# ID Jabber "jabber center" Digiflazz tujuan transaksi Anda sebagai buyer.
+# Diisi dari hasil "Tambahkan Teman" / verifikasi koneksi Jabber di member
+# area Digiflazz Anda. Kalau Digiflazz memberi ID center yang beda utk akun
+# Anda, ganti nilainya di sini lalu `wrangler deploy`.
+DIGIFLAZZ_JABBER_TARGET = "jabber1@digiflazz.net"
+
 # Secrets (isi lewat: wrangler secret put NAMA, ATAU dashboard Cloudflare
 # Settings -> Variables and Secrets -> tipe "Secret")
-#   TELEGRAM_BOT_TOKEN   -> token bot dari @BotFather
-#   TELEGRAM_SECRET      -> token rahasia untuk validasi webhook Telegram
-#   JABBER_JID           -> akun Jabber yang Anda daftarkan SENDIRI (bukan ID OrderKuota OK310547),
-#                            harus sama dengan yang diisi di kolom "Jabber 1" Pengaturan OkeConnect
-#   JABBER_PASSWORD      -> password akun Jabber tersebut (bukan password OrderKuota)
-#   JABBER_PIN           -> PIN transaksi PPOB Anda
+#   TELEGRAM_BOT_TOKEN     -> token bot dari @BotFather
+#   TELEGRAM_SECRET        -> token rahasia untuk validasi webhook Telegram
+#   JABBER_JID             -> akun Jabber OkeConnect yang Anda daftarkan SENDIRI (bukan ID OrderKuota OK310547),
+#                              harus sama dengan yang diisi di kolom "Jabber 1" Pengaturan OkeConnect
+#   JABBER_PASSWORD        -> password akun Jabber OkeConnect tersebut (bukan password OrderKuota)
+#   JABBER_PIN             -> PIN transaksi PPOB OkeConnect Anda
+#   DIGIFLAZZ_JABBER_JID   -> akun Jabber yang Anda daftarkan SENDIRI untuk Digiflazz (JID terpisah dari OkeConnect)
+#   DIGIFLAZZ_JABBER_PASSWORD -> password akun Jabber Digiflazz tersebut
+#   DIGIFLAZZ_JABBER_PIN   -> PIN transaksi PPOB Digiflazz Anda

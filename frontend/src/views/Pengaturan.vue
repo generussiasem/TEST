@@ -4,7 +4,7 @@ import { api } from "../api.js";
 
 const settings = ref({ store_name: "", address: "", logo_url: "" });
 const wallets = ref([]);
-const walletForm = ref({ name: "", type: "umum", balance: 0 });
+const walletForm = ref({ name: "", type: "umum", balance: 0, provider: "okeconnect" });
 const error = ref("");
 const okMsg = ref("");
 const walletMsg = ref("");
@@ -37,7 +37,7 @@ async function addWallet() {
   try {
     await api.post("/api/wallets", walletForm.value);
     walletMsg.value = "Akun ditambahkan.";
-    walletForm.value = { name: "", type: "umum", balance: 0 };
+    walletForm.value = { name: "", type: "umum", balance: 0, provider: "okeconnect" };
     await load();
   } catch (err) {
     error.value = err.message;
@@ -112,6 +112,13 @@ onMounted(load);
                 <option value="distributor_ppob">Distributor PPOB</option>
               </select>
             </div>
+            <div class="field" v-if="walletForm.type === 'distributor_ppob'">
+              <label>Provider</label>
+              <select v-model="walletForm.provider">
+                <option value="okeconnect">OkeConnect</option>
+                <option value="digiflazz">Digiflazz</option>
+              </select>
+            </div>
             <div class="field"><label>Saldo Awal</label><input v-model.number="walletForm.balance" type="number" min="0" /></div>
           </div>
           <button class="btn" type="submit">Tambah Akun</button>
@@ -139,6 +146,10 @@ onMounted(load);
                   <option value="umum">Umum</option>
                   <option value="distributor_ppob">Distributor PPOB</option>
                 </select>
+                <select v-if="editingWallet.type === 'distributor_ppob'" v-model="editingWallet.provider" style="margin-top: 4px">
+                  <option value="okeconnect">OkeConnect</option>
+                  <option value="digiflazz">Digiflazz</option>
+                </select>
               </td>
               <td><input v-model.number="editingWallet.balance" type="number" style="width: 110px" /></td>
               <td style="white-space: nowrap">
@@ -148,7 +159,12 @@ onMounted(load);
             </template>
             <template v-else>
               <td>{{ w.name }}</td>
-              <td>{{ w.type === "distributor_ppob" ? "Distributor PPOB" : "Umum" }}</td>
+              <td>
+                {{ w.type === "distributor_ppob" ? "Distributor PPOB" : "Umum" }}
+                <span v-if="w.type === 'distributor_ppob'" class="muted" style="font-size: 12px">
+                  ({{ w.provider === "digiflazz" ? "Digiflazz" : "OkeConnect" }})
+                </span>
+              </td>
               <td class="num">{{ rupiah(w.balance) }}</td>
               <td style="white-space: nowrap">
                 <button class="btn ghost" style="padding: 4px 10px; margin-right: 6px" @click="startEditWallet(w)">Ubah</button>

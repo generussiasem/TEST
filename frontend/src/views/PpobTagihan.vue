@@ -7,6 +7,7 @@ const route = useRoute();
 
 const products = ref([]);
 const orders = ref([]);
+const contacts = ref([]);
 
 const cekSearch = ref("");
 const cekCode = ref("");
@@ -17,14 +18,22 @@ const cekLoading = ref(false);
 const bayarSearch = ref("");
 const bayarCode = ref("");
 const bayarConfirming = ref(false);
-const bayarResult = ref(null);
 const bayarLoading = ref(false);
+const bayarPaidMethod = ref("tunai");
+const bayarContactId = ref(null);
 
-const finalizeAmount = ref(0);
-const finalizeCost = ref(0);
-const finalizing = ref(false);
+// Cari ID pelanggan tersimpan (BPJS/PLN/PDAM dll) lintas kontak
+const idSearch = ref("");
+const idResults = ref([]);
+let idSearchTimer = null;
 
 const error = ref("");
+
+// Kotak konfirmasi harga jual (dipakai bersama utk semua order sukses postpaid)
+const confirmTarget = ref(null);
+const confirmForm = ref({ sellPrice: 0, costTotal: 0, paidMethod: "tunai", contactId: null });
+const confirming = ref(false);
+const lastReceipt = ref(null);
 
 function rupiah(n) {
   return "Rp" + Number(n || 0).toLocaleString("id-ID");
@@ -48,14 +57,12 @@ const bayarOptions = computed(() => {
     .slice(0, 8);
 });
 
-// Order postpaid yang sudah sukses tapi belum dicatat manual (finalized = 0) —
+// Order postpaid yang sudah sukses tapi belum dikonfirmasi (finalized = 0) —
 // biar kasir tidak lupa menuntaskan pencatatannya.
 const belumDicatat = computed(() =>
   orders.value.filter((o) => o.status === "sukses" && !o.finalized && isPostpaidCode(o.product_code))
 );
 
-// Semua riwayat (cek maupun bayar) untuk produk kategori TAGIHAN/AIR PDAM,
-// termasuk yang statusnya 'cek' (pengecekan doang, bukan transaksi).
 const riwayatTagihan = computed(() =>
   orders.value.filter((o) => isPostpaidCode(o.product_code)).sort((a, b) => b.id - a.id)
 );
@@ -65,7 +72,7 @@ function toggleDetail(o) {
   openedId.value = openedId.value === o.id ? null : o.id;
 }
 
-const editingStatus = ref(null); // { ref_id, status, raw_reply }
+const editingStatus = ref(null);
 function startEditStatus(o) {
   editingStatus.value = { ref_id: o.ref_id, status: o.status, raw_reply: o.raw_reply || "" };
 }
@@ -98,8 +105,9 @@ async function cekUlang(o) {
   error.value = "";
   checkingRef.value = o.ref_id;
   try {
-    await api.post(`/api/ppob-orders/${o.ref_id}/cek-ulang`, {});
+    const res = await api.post(`/api/ppob-orders/${o.ref_id}/cek-ulang`, {});
     await load();
+    if (res.needsConfirm) openConfirm(orders.value.find((x) => x.ref_id === o.ref_id));
   } catch (err) {
     error.value = err.message;
   } finally {
@@ -113,9 +121,14 @@ function isPostpaidCode(code) {
 }
 
 async function load() {
-  const [p, o] = await Promise.all([api.get("/api/products"), api.get("/api/ppob-orders")]);
+  const [p, o, c] = await Promise.all([
+    api.get("/api/products"),
+    api.get("/api/ppob-orders"),
+    api.get("/api/contacts?type=pelanggan"),
+  ]);
   products.value = p;
   orders.value = o;
+  contacts.value = c;
   if (route.query.code) {
     const match = products.value.find((x) => x.code === route.query.code);
     if (match) pickCek(match);
@@ -129,6 +142,24 @@ function pickCek(p) {
 function pickBayar(p) {
   bayarCode.value = p.code;
   bayarSearch.value = `${p.name} (${p.code})`;
+}
+
+// Cari ID pelanggan tersimpan (No. BPJS/PLN/PDAM dll) lintas kontak — biar
+// kasir tinggal pilih, tidak perlu ketik ulang tiap pelanggan langganan bayar.
+function searchSavedIds() {
+  clearTimeout(idSearchTimer);
+  if (!idSearch.value.trim()) {
+    idResults.value = [];
+    return;
+  }
+  idSearchTimer = setTimeout(async () => {
+    idResults.value = await api.get(`/api/contact-ids?q=${encodeURIComponent(idSearch.value.trim())}`);
+  }, 300);
+}
+function pickSavedId(idRow) {
+  target.value = idRow.id_number;
+  idSearch.value = "";
+  idResults.value = [];
 }
 
 async function doCek() {
@@ -154,18 +185,24 @@ function mulaiBayar() {
 
 async function doBayar() {
   error.value = "";
-  bayarResult.value = null;
-  if (!bayarCode.value || !target.value) {
-    error.value = "Pilih kode Bayar dulu.";
+  if (bayarPaidMethod.value === "utang" && !bayarContactId.value) {
+    error.value = "Pilih kontak dulu untuk pembayaran Utang.";
     return;
   }
   bayarLoading.value = true;
   try {
-    bayarResult.value = await api.post("/api/ppob/order", { productCode: bayarCode.value, target: target.value });
+    const res = await api.post("/api/ppob/order", {
+      productCode: bayarCode.value,
+      target: target.value,
+      paidMethod: bayarPaidMethod.value,
+      contactId: bayarContactId.value,
+    });
     bayarConfirming.value = false;
-    finalizeAmount.value = 0;
-    finalizeCost.value = 0;
     await load();
+    if (res.needsConfirm) {
+      const orderRow = orders.value.find((o) => o.ref_id === res.refId);
+      if (orderRow) openConfirm(orderRow);
+    }
   } catch (err) {
     error.value = err.message;
   } finally {
@@ -173,21 +210,59 @@ async function doBayar() {
   }
 }
 
-async function finalize(refId) {
+function openConfirm(o) {
+  confirmTarget.value = { refId: o.ref_id, productCode: o.product_code, target: o.target };
+  confirmForm.value = {
+    sellPrice: o.sell_price || 0,
+    costTotal: o.cost_price || 0,
+    paidMethod: o.paid_method || "tunai",
+    contactId: o.contact_id || null,
+  };
+  openedId.value = null;
+}
+
+async function submitKonfirmasi() {
+  if (!confirmTarget.value) return;
+  if (confirmForm.value.paidMethod === "utang" && !confirmForm.value.contactId) {
+    error.value = "Pilih kontak dulu untuk pembayaran Utang.";
+    return;
+  }
   error.value = "";
-  finalizing.value = true;
+  confirming.value = true;
   try {
-    await api.post(`/api/ppob-orders/${refId}/catat`, {
-      amount: finalizeAmount.value,
-      cost_total: finalizeCost.value,
+    await api.post(`/api/ppob-orders/${confirmTarget.value.refId}/konfirmasi`, {
+      sellPrice: confirmForm.value.sellPrice,
+      costTotal: confirmForm.value.costTotal,
+      paidMethod: confirmForm.value.paidMethod,
+      contactId: confirmForm.value.paidMethod === "utang" ? confirmForm.value.contactId : null,
     });
-    bayarResult.value = null;
+    lastReceipt.value = {
+      refId: confirmTarget.value.refId,
+      productCode: confirmTarget.value.productCode,
+      target: confirmTarget.value.target,
+      sellPrice: confirmForm.value.sellPrice,
+      paidMethod: confirmForm.value.paidMethod,
+      contactName: confirmForm.value.contactId ? contacts.value.find((x) => x.id === confirmForm.value.contactId)?.name : null,
+      date: new Date().toLocaleString("id-ID"),
+    };
+    confirmTarget.value = null;
     await load();
   } catch (err) {
     error.value = err.message;
   } finally {
-    finalizing.value = false;
+    confirming.value = false;
   }
+}
+
+function cetakStruk() {
+  window.print();
+}
+function bagikanWA() {
+  if (!lastReceipt.value) return;
+  const r = lastReceipt.value;
+  let text = `*Struk Tagihan*\n${r.date}\n\n${r.productCode}\nTarget: ${r.target}\n\n*Total: ${rupiah(r.sellPrice)}*`;
+  if (r.paidMethod === "utang") text += `\n(Utang atas nama ${r.contactName})`;
+  window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
 }
 
 onMounted(load);
@@ -205,23 +280,27 @@ onMounted(load);
     <div v-if="error" class="error-box">{{ error }}</div>
 
     <div v-if="belumDicatat.length" class="card" style="margin-bottom: 18px; border-color: var(--amber)">
-      <h3 style="margin-bottom: 8px">⚠️ Ada {{ belumDicatat.length }} order sukses belum dicatat</h3>
+      <h3 style="margin-bottom: 8px">⚠️ Ada {{ belumDicatat.length }} order sukses belum dikonfirmasi</h3>
       <p class="muted" style="font-size: 13px; margin-bottom: 10px">
-        Order ini sudah berhasil dibayar ke OkeConnect tapi belum masuk laporan keuangan — catat manual di bawah supaya laba tidak hilang.
+        Order ini sudah berhasil dibayar ke provider tapi belum masuk laporan keuangan.
       </p>
-      <table>
-        <tbody>
-          <tr v-for="o in belumDicatat" :key="o.id">
-            <td>{{ o.product_code }}</td>
-            <td class="num">{{ o.target }}</td>
-            <td class="muted" style="font-size: 12px">{{ o.raw_reply }}</td>
-            <td class="num">{{ o.ref_id }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <p class="muted" style="font-size: 12px; margin-top: 8px">
-        Catat lewat form "Bayar" di bawah setelah membuat order baru dengan kode &amp; target yang sama, atau minta saya tambahkan form catat manual per ref kalau sering terjadi.
-      </p>
+      <div v-for="o in belumDicatat" :key="o.id" style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px dashed var(--line)">
+        <div>{{ o.product_code }} — <span class="num">{{ o.target }}</span> <span class="muted num" style="font-size: 12px">({{ o.ref_id }})</span></div>
+        <button class="btn ghost" style="padding: 4px 10px" @click="openConfirm(o)">Konfirmasi &amp; Catat</button>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom: 18px">
+      <div class="field" style="position: relative; max-width: 360px">
+        <label>Cari ID pelanggan tersimpan (nama atau nomor)</label>
+        <input v-model="idSearch" @input="searchSavedIds" placeholder="mis. Budi, atau nomor meteran" />
+        <div v-if="idResults.length" class="card" style="position: absolute; top: 100%; left: 0; right: 0; z-index: 5; padding: 6px; max-height: 220px; overflow: auto">
+          <div v-for="r in idResults" :key="r.id" @click="pickSavedId(r)" style="padding: 8px; cursor: pointer">
+            <div>{{ r.contact_name }} — {{ r.category }}</div>
+            <div class="muted num" style="font-size: 12px">{{ r.id_number }}</div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="grid cols-2" style="align-items: start">
@@ -260,6 +339,21 @@ onMounted(load);
         </div>
         <p class="muted num" style="font-size: 12.5px; margin-bottom: 12px">Target: {{ target || "(isi di form Cek dulu)" }}</p>
 
+        <div class="field">
+          <label>Metode Bayar</label>
+          <div style="display: flex; gap: 8px">
+            <button type="button" class="btn" :class="{ ghost: bayarPaidMethod !== 'tunai' }" style="flex: 1; justify-content: center" @click="bayarPaidMethod = 'tunai'">Tunai/Bank</button>
+            <button type="button" class="btn" :class="{ ghost: bayarPaidMethod !== 'utang' }" style="flex: 1; justify-content: center" @click="bayarPaidMethod = 'utang'">Utang</button>
+          </div>
+        </div>
+        <div v-if="bayarPaidMethod === 'utang'" class="field">
+          <label>Kontak</label>
+          <select v-model.number="bayarContactId">
+            <option :value="null" disabled>— pilih pelanggan —</option>
+            <option v-for="c in contacts" :key="c.id" :value="c.id">{{ c.name }}</option>
+          </select>
+        </div>
+
         <button v-if="!bayarConfirming" class="btn" :disabled="!bayarCode || !target" @click="mulaiBayar">Lanjut Bayar</button>
         <div v-else class="error-box" style="background: var(--amber-soft); color: #7a5514">
           Yakin sudah cek nominal & konfirmasi ke pelanggan? Ini akan memotong saldo distributor sungguhan.
@@ -268,20 +362,58 @@ onMounted(load);
             <button class="btn ghost" @click="bayarConfirming = false">Batal</button>
           </div>
         </div>
-
-        <div v-if="bayarResult" class="ok-box" style="margin-top: 14px; white-space: pre-wrap">
-          Status: <strong>{{ bayarResult.status }}</strong>{{ bayarResult.reply ? " — " + bayarResult.reply : "" }}
-        </div>
-
-        <div v-if="bayarResult && bayarResult.needsManualRecord" class="card" style="margin-top: 14px; background: var(--paper)">
-          <h3 style="margin-bottom: 8px; font-size: 15px">Catat sebagai transaksi</h3>
-          <div class="form-row">
-            <div class="field"><label>Diterima dari pelanggan</label><input v-model.number="finalizeAmount" type="number" min="0" /></div>
-            <div class="field"><label>Terpotong dari saldo</label><input v-model.number="finalizeCost" type="number" min="0" /></div>
-          </div>
-          <button class="btn" :disabled="finalizing" @click="finalize(bayarResult.refId)">{{ finalizing ? "Menyimpan…" : "Simpan Transaksi" }}</button>
-        </div>
       </div>
+    </div>
+
+    <!-- Kotak konfirmasi harga jual (nominal tagihan asli + fee) -->
+    <div v-if="confirmTarget" class="receipt-modal-backdrop no-print" @click.self="confirmTarget = null">
+      <div class="card" style="max-width: 420px; width: 100%">
+        <h3 style="margin-bottom: 4px">Konfirmasi Pembayaran Tagihan</h3>
+        <p class="muted" style="font-size: 13px; margin-bottom: 14px">{{ confirmTarget.productCode }} → {{ confirmTarget.target }}</p>
+
+        <div class="field"><label>Modal (nominal tagihan asli yang terpotong dari saldo)</label><input v-model.number="confirmForm.costTotal" type="number" /></div>
+        <div class="field"><label>Harga Jual (diterima dari pelanggan, termasuk fee)</label><input v-model.number="confirmForm.sellPrice" type="number" /></div>
+
+        <div class="field">
+          <label>Metode Bayar</label>
+          <div style="display: flex; gap: 8px">
+            <button type="button" class="btn" :class="{ ghost: confirmForm.paidMethod !== 'tunai' }" style="flex: 1; justify-content: center" @click="confirmForm.paidMethod = 'tunai'">Tunai/Bank</button>
+            <button type="button" class="btn" :class="{ ghost: confirmForm.paidMethod !== 'utang' }" style="flex: 1; justify-content: center" @click="confirmForm.paidMethod = 'utang'">Utang</button>
+          </div>
+        </div>
+        <div v-if="confirmForm.paidMethod === 'utang'" class="field">
+          <label>Kontak</label>
+          <select v-model.number="confirmForm.contactId">
+            <option :value="null" disabled>— pilih pelanggan —</option>
+            <option v-for="c in contacts" :key="c.id" :value="c.id">{{ c.name }}</option>
+          </select>
+        </div>
+
+        <button class="btn" style="width: 100%; justify-content: center; margin-bottom: 8px; margin-top: 8px" :disabled="confirming" @click="submitKonfirmasi">
+          {{ confirming ? "Menyimpan…" : "Simpan & Lanjut ke Struk" }}
+        </button>
+        <button class="btn ghost" style="width: 100%; justify-content: center" @click="confirmTarget = null">Nanti Saja</button>
+      </div>
+    </div>
+
+    <!-- Struk hasil konfirmasi terakhir -->
+    <div v-if="lastReceipt" class="card no-print" style="margin: 18px 0">
+      <h3 style="margin-bottom: 10px">Transaksi Terakhir: {{ lastReceipt.refId }}</h3>
+      <button class="btn ghost" style="margin-right: 8px" @click="cetakStruk">🖨️ Cetak Struk</button>
+      <button class="btn ghost" @click="bagikanWA">📤 Bagikan via WhatsApp</button>
+    </div>
+    <div v-if="lastReceipt" class="receipt-box" style="display: none">
+      <div style="text-align: center; margin-bottom: 6px">
+        <strong>STRUK TAGIHAN</strong>
+        <div>{{ lastReceipt.date }}</div>
+      </div>
+      <hr />
+      <div>{{ lastReceipt.productCode }}</div>
+      <div>Target: {{ lastReceipt.target }}</div>
+      <hr />
+      <div class="receipt-row"><strong>TOTAL</strong><strong>{{ rupiah(lastReceipt.sellPrice) }}</strong></div>
+      <div v-if="lastReceipt.paidMethod === 'utang'" style="margin-top: 6px">Utang a.n. {{ lastReceipt.contactName }}</div>
+      <div style="text-align: center; margin-top: 10px">Terima kasih!</div>
     </div>
 
     <div class="card" style="margin-top: 22px">
@@ -302,7 +434,10 @@ onMounted(load);
               <td class="num">{{ o.ref_id }}</td>
               <td>{{ o.product_code }}</td>
               <td class="num">{{ o.target }}</td>
-              <td><span class="badge" :class="o.status">{{ o.status }}</span></td>
+              <td>
+                <span class="badge" :class="o.status">{{ o.status }}</span>
+                <span v-if="o.status === 'sukses' && !o.finalized" class="badge gagal" style="margin-left: 4px">belum dicatat</span>
+              </td>
               <td class="muted" style="font-size: 12.5px">{{ new Date(o.created_at).toLocaleString("id-ID") }}</td>
             </tr>
             <tr v-if="openedId === o.id">
@@ -314,10 +449,11 @@ onMounted(load);
                   <div><span class="muted">Target (ID Pelanggan/No. Meter)</span><br /><span class="num">{{ o.target }}</span></div>
                   <div><span class="muted">Dibuat</span><br />{{ new Date(o.created_at).toLocaleString("id-ID") }}</div>
                   <div><span class="muted">Diperbarui</span><br />{{ new Date(o.updated_at).toLocaleString("id-ID") }}</div>
+                  <div><span class="muted">Metode Bayar</span><br />{{ o.paid_method === "utang" ? "Utang" : "Tunai/Bank" }}</div>
                   <div v-if="o.status === 'sukses'"><span class="muted">Sudah dicatat sebagai transaksi?</span><br />{{ o.finalized ? "Ya" : "Belum" }}</div>
                 </div>
                 <div style="margin-top: 10px">
-                  <span class="muted" style="font-size: 13px">Balasan mentah dari OkeConnect</span>
+                  <span class="muted" style="font-size: 13px">Balasan mentah dari provider</span>
                   <div class="num" style="white-space: pre-wrap; background: var(--paper-raised); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; margin-top: 4px; font-size: 13px">{{ o.raw_reply || "(kosong)" }}</div>
                 </div>
 
@@ -342,6 +478,14 @@ onMounted(load);
                 </div>
                 <div v-else style="margin-top: 12px">
                   <button
+                    v-if="o.status === 'sukses' && !o.finalized"
+                    class="btn"
+                    style="padding: 4px 10px; margin-right: 6px"
+                    @click.stop="openConfirm(o)"
+                  >
+                    Konfirmasi &amp; Catat
+                  </button>
+                  <button
                     v-if="o.status === 'pending'"
                     class="btn ghost"
                     style="padding: 4px 10px; margin-right: 6px"
@@ -364,3 +508,11 @@ onMounted(load);
     </div>
   </div>
 </template>
+
+<style scoped>
+@media print {
+  .receipt-box {
+    display: block !important;
+  }
+}
+</style>

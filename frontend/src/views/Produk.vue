@@ -88,6 +88,28 @@ const ppobError = ref("");
 const ppobOkMsg = ref("");
 const syncing = ref(false);
 
+// Tambah produk PPOB MANUAL — dipakai terutama untuk provider "digiflazz"
+// (belum ada sinkron otomatis untuk Digiflazz, lihat README backend).
+// Produk provider "okeconnect" biasanya cukup lewat tombol "Sinkron Harga
+// PPOB", tapi tombol tambah manual ini tetap boleh dipakai kalau perlu.
+const ppobShowAdd = ref(false);
+const blankPpob = () => ({ code: "", name: "", category: "", cost_price: 0, sell_price: 0, provider: "digiflazz" });
+const ppobAddForm = ref(blankPpob());
+
+async function submitPpobAdd() {
+  ppobError.value = "";
+  try {
+    await api.post("/api/products", ppobAddForm.value);
+    ppobAddForm.value = blankPpob();
+    ppobShowAdd.value = false;
+    ppobOkMsg.value = "Produk PPOB ditambahkan.";
+    ppobPage.value = 1;
+    await loadPpob();
+  } catch (err) {
+    ppobError.value = err.message;
+  }
+}
+
 const ppobTotalPages = computed(() => Math.max(1, Math.ceil(ppobTotal.value / ppobPageSize)));
 
 async function loadPpob() {
@@ -285,8 +307,36 @@ onMounted(async () => {
       <div v-if="ppobOkMsg" class="ok-box">{{ ppobOkMsg }}</div>
 
       <div class="page-head">
-        <div></div>
-        <button class="btn ghost" :disabled="syncing" @click="syncPrices">{{ syncing ? "Sinkron…" : "Sinkron Harga PPOB" }}</button>
+        <button class="btn" @click="ppobShowAdd = !ppobShowAdd">{{ ppobShowAdd ? "Batal" : "+ Produk PPOB Manual" }}</button>
+        <button class="btn ghost" :disabled="syncing" @click="syncPrices">{{ syncing ? "Sinkron…" : "Sinkron Harga PPOB (OkeConnect)" }}</button>
+      </div>
+
+      <div v-if="ppobShowAdd" class="card" style="margin-bottom: 18px">
+        <h3 style="margin-bottom: 12px">Tambah Produk PPOB Manual</h3>
+        <p class="muted" style="font-size: 12.5px; margin-bottom: 10px">
+          Dipakai terutama untuk produk provider Digiflazz (belum ada sinkron otomatis).
+        </p>
+        <form @submit.prevent="submitPpobAdd">
+          <div class="form-row">
+            <div class="field"><label>Nama</label><input v-model="ppobAddForm.name" required /></div>
+            <div class="field"><label>Kategori</label><input v-model="ppobAddForm.category" placeholder="mis. Pulsa" /></div>
+          </div>
+          <div class="form-row">
+            <div class="field"><label>Kode produk (SKU)</label><input v-model="ppobAddForm.code" required /></div>
+            <div class="field">
+              <label>Provider</label>
+              <select v-model="ppobAddForm.provider">
+                <option value="digiflazz">Digiflazz</option>
+                <option value="okeconnect">OkeConnect</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="field"><label>Harga Modal</label><input v-model.number="ppobAddForm.cost_price" type="number" min="0" /></div>
+            <div class="field"><label>Harga Jual</label><input v-model.number="ppobAddForm.sell_price" type="number" min="0" /></div>
+          </div>
+          <button class="btn" type="submit">Simpan</button>
+        </form>
       </div>
 
       <div class="card">
@@ -303,6 +353,7 @@ onMounted(async () => {
             <tr>
               <th>Nama</th>
               <th>Kode</th>
+              <th>Provider</th>
               <th>Modal</th>
               <th>Jual</th>
               <th>Status</th>
@@ -314,6 +365,12 @@ onMounted(async () => {
               <template v-if="ppobEditing && ppobEditing.id === p.id">
                 <td><input v-model="ppobEditing.name" /></td>
                 <td class="muted num" style="font-size: 12.5px">{{ p.code }}</td>
+                <td>
+                  <select v-model="ppobEditing.provider" style="width: 110px">
+                    <option value="okeconnect">OkeConnect</option>
+                    <option value="digiflazz">Digiflazz</option>
+                  </select>
+                </td>
                 <td><input v-model.number="ppobEditing.cost_price" type="number" style="width: 90px" /></td>
                 <td><input v-model.number="ppobEditing.sell_price" type="number" style="width: 90px" /></td>
                 <td><span class="badge" :class="p.active ? 'sukses' : 'gagal'">{{ p.active ? "Aktif" : "Nonaktif" }}</span></td>
@@ -328,6 +385,9 @@ onMounted(async () => {
                   <div class="muted" style="font-size: 12px">{{ p.category }}</div>
                 </td>
                 <td class="muted num" style="font-size: 12.5px">{{ p.code }}</td>
+                <td>
+                  <span class="badge" :class="p.provider === 'digiflazz' ? 'sukses' : ''">{{ p.provider === 'digiflazz' ? 'Digiflazz' : 'OkeConnect' }}</span>
+                </td>
                 <td class="num">{{ rupiah(p.cost_price) }}</td>
                 <td class="num">{{ rupiah(p.sell_price) }}</td>
                 <td>
@@ -344,10 +404,10 @@ onMounted(async () => {
               </template>
             </tr>
             <tr v-if="!ppobLoading && !ppobItems.length">
-              <td colspan="6" class="muted">Tidak ada produk PPOB yang cocok.</td>
+              <td colspan="7" class="muted">Tidak ada produk PPOB yang cocok.</td>
             </tr>
             <tr v-if="ppobLoading">
-              <td colspan="6" class="muted">Memuat…</td>
+              <td colspan="7" class="muted">Memuat…</td>
             </tr>
           </tbody>
         </table>

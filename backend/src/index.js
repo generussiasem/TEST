@@ -2,8 +2,9 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { sendJabberCommand } from "./jabber.js";
 import { sendTelegramMessage } from "./telegram.js";
-import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus } from "./ppob.js";
+import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, syncPpobPrices, getProviderConfig, finalizePpobOrder } from "./ppob.js";
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
+import { getEmployeeByChatId, handleLinkCommand, sendMainMenu, handleAdminCallback, handleAdminSessionMessage } from "./bot-admin.js";
 
 const app = new Hono();
 
@@ -86,7 +87,7 @@ app.put("/api/store-settings", requireAdmin, async (c) => {
 
 app.get("/api/employees", requireAdmin, async (c) => {
   const { results } = await c.env.DB.prepare(
-    "SELECT id, name, username, role, active, created_at FROM employees ORDER BY id"
+    "SELECT id, name, username, role, active, telegram_id, created_at FROM employees ORDER BY id"
   ).all();
   return c.json(results);
 });
@@ -137,6 +138,35 @@ app.delete("/api/employees/:id", requireAdmin, async (c) => {
   return c.json({ ok: true });
 });
 
+// Bikin kode sekali-pakai (10 menit) supaya karyawan bisa "menghubungkan"
+// akun Telegram-nya sendiri lewat bot admin/kasir: kirim "/hubung KODE" ke
+// bot. Setelah terhubung, telegram_id tersimpan di employees dan dipakai
+// bot-admin.js buat identifikasi siapa yang sedang chat.
+function randomLinkCode() {
+  return String(Math.floor(100000 + Math.random() * 900000)); // 6 digit
+}
+
+app.post("/api/employees/:id/telegram-link-code", requireAdmin, async (c) => {
+  const id = c.req.param("id");
+  const employee = await c.env.DB.prepare("SELECT id FROM employees WHERE id = ?").bind(id).first();
+  if (!employee) return c.json({ ok: false, error: "Karyawan tidak ditemukan" }, 404);
+  const code = randomLinkCode();
+  await c.env.DB.prepare(
+    "UPDATE employees SET link_code = ?, link_code_expires = datetime('now', '+10 minutes') WHERE id = ?"
+  )
+    .bind(code, id)
+    .run();
+  return c.json({ ok: true, code, expiresInMinutes: 10 });
+});
+
+app.post("/api/employees/:id/telegram-unlink", requireAdmin, async (c) => {
+  const id = c.req.param("id");
+  await c.env.DB.prepare("UPDATE employees SET telegram_id = NULL, link_code = NULL, link_code_expires = NULL WHERE id = ?")
+    .bind(id)
+    .run();
+  return c.json({ ok: true });
+});
+
 // ---------------------------------------------------------------------------
 // API KASIR (dipakai frontend Vue Anda, sama pola dengan Kasir Warung lama)
 // ---------------------------------------------------------------------------
@@ -147,18 +177,18 @@ app.get("/api/wallets", async (c) => {
 });
 
 app.post("/api/wallets", async (c) => {
-  const { name, type = "umum", balance = 0 } = await c.req.json();
-  await c.env.DB.prepare("INSERT INTO wallets (name, type, balance) VALUES (?, ?, ?)")
-    .bind(name, type, balance)
+  const { name, type = "umum", balance = 0, provider = null } = await c.req.json();
+  await c.env.DB.prepare("INSERT INTO wallets (name, type, balance, provider) VALUES (?, ?, ?, ?)")
+    .bind(name, type, balance, type === "distributor_ppob" ? provider || "okeconnect" : null)
     .run();
   return c.json({ ok: true });
 });
 
 app.put("/api/wallets/:id", requireAdmin, async (c) => {
   const id = c.req.param("id");
-  const { name, type, balance } = await c.req.json();
-  await c.env.DB.prepare("UPDATE wallets SET name = ?, type = ?, balance = ? WHERE id = ?")
-    .bind(name, type, balance, id)
+  const { name, type, balance, provider } = await c.req.json();
+  await c.env.DB.prepare("UPDATE wallets SET name = ?, type = ?, balance = ?, provider = ? WHERE id = ?")
+    .bind(name, type, balance, type === "distributor_ppob" ? provider || "okeconnect" : null, id)
     .run();
   return c.json({ ok: true });
 });
@@ -223,24 +253,24 @@ app.get("/api/products/barcode/:code", async (c) => {
 });
 
 app.post("/api/products", async (c) => {
-  const { code, barcode, name, category, cost_price = 0, sell_price = 0, stock = 0 } = await c.req.json();
+  const { code, barcode, name, category, cost_price = 0, sell_price = 0, stock = 0, provider = "okeconnect" } = await c.req.json();
   await c.env.DB.prepare(
-    `INSERT INTO products (code, barcode, name, category, cost_price, sell_price, stock)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO products (code, barcode, name, category, cost_price, sell_price, stock, provider)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   )
-    .bind(code || null, barcode || null, name, category || null, cost_price, sell_price, stock)
+    .bind(code || null, barcode || null, name, category || null, cost_price, sell_price, stock, provider || "okeconnect")
     .run();
   return c.json({ ok: true });
 });
 
 app.put("/api/products/:id", async (c) => {
   const id = c.req.param("id");
-  const { name, category, cost_price, sell_price, stock, barcode } = await c.req.json();
+  const { name, category, cost_price, sell_price, stock, barcode, provider } = await c.req.json();
   await c.env.DB.prepare(
-    `UPDATE products SET name = ?, category = ?, cost_price = ?, sell_price = ?, stock = ?, barcode = ?
+    `UPDATE products SET name = ?, category = ?, cost_price = ?, sell_price = ?, stock = ?, barcode = ?, provider = COALESCE(?, provider)
      WHERE id = ?`
   )
-    .bind(name, category || null, cost_price, sell_price, stock, barcode || null, id)
+    .bind(name, category || null, cost_price, sell_price, stock, barcode || null, provider || null, id)
     .run();
   return c.json({ ok: true });
 });
@@ -307,6 +337,75 @@ app.delete("/api/contacts/:id", async (c) => {
   return c.json({ ok: true });
 });
 
+// ID pelanggan fleksibel per kontak (No. BPJS, ID PLN, No. PDAM, dst) — tidak
+// dibatasi jenis tertentu, dipakai supaya kasir tinggal pilih dari daftar
+// tersimpan alih-alih ketik ulang tiap kali pelanggan yang sama bayar lagi.
+app.get("/api/contacts/:id/ids", async (c) => {
+  const contactId = c.req.param("id");
+  const { results } = await c.env.DB.prepare(
+    "SELECT * FROM contact_ids WHERE contact_id = ? ORDER BY category, id"
+  )
+    .bind(contactId)
+    .all();
+  return c.json(results);
+});
+
+app.post("/api/contacts/:id/ids", async (c) => {
+  const contactId = c.req.param("id");
+  const { category, id_number, note } = await c.req.json();
+  if (!category || !id_number) {
+    return c.json({ ok: false, error: "category dan id_number wajib diisi" }, 400);
+  }
+  await c.env.DB.prepare(
+    "INSERT INTO contact_ids (contact_id, category, id_number, note) VALUES (?, ?, ?, ?)"
+  )
+    .bind(contactId, category, id_number, note || null)
+    .run();
+  return c.json({ ok: true });
+});
+
+app.put("/api/contact-ids/:id", async (c) => {
+  const id = c.req.param("id");
+  const { category, id_number, note } = await c.req.json();
+  await c.env.DB.prepare("UPDATE contact_ids SET category = ?, id_number = ?, note = ? WHERE id = ?")
+    .bind(category, id_number, note || null, id)
+    .run();
+  return c.json({ ok: true });
+});
+
+app.delete("/api/contact-ids/:id", async (c) => {
+  const id = c.req.param("id");
+  await c.env.DB.prepare("DELETE FROM contact_ids WHERE id = ?").bind(id).run();
+  return c.json({ ok: true });
+});
+
+// Cari ID pelanggan tersimpan lintas kontak, dipakai di halaman PPOB/Tagihan
+// supaya kasir bisa cari langsung dari nomor ID-nya (bukan cuma dari nama
+// kontak) — mis. ketik no. meteran PLN, langsung ketemu siapa pemiliknya.
+app.get("/api/contact-ids", async (c) => {
+  const q = (c.req.query("q") || "").trim();
+  const category = c.req.query("category");
+  const where = [];
+  const params = [];
+  if (q) {
+    where.push("(ci.id_number LIKE ? OR c.name LIKE ?)");
+    params.push(`%${q}%`, `%${q}%`);
+  }
+  if (category) {
+    where.push("ci.category = ?");
+    params.push(category);
+  }
+  const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
+  const { results } = await c.env.DB.prepare(
+    `SELECT ci.*, c.name AS contact_name, c.phone AS contact_phone
+     FROM contact_ids ci JOIN contacts c ON c.id = ci.contact_id
+     ${whereSql} ORDER BY ci.category, c.name LIMIT 50`
+  )
+    .bind(...params)
+    .all();
+  return c.json(results);
+});
+
 // Sinkronkan daftar harga PPOB dari OkeConnect ke tabel products.
 // URL-nya simpan sebagai secret PRICE_LIST_URL, contoh:
 //   https://okeconnect.com/harga/json?id=xxxxxxxxxxxxxxxx
@@ -316,105 +415,8 @@ app.delete("/api/contacts/:id", async (c) => {
 //   curl "<PRICE_LIST_URL>" | head
 // lalu sesuaikan pemetaan field di bawah.
 app.post("/api/products/sync", async (c) => {
-  if (!c.env.PRICE_LIST_URL) {
-    return c.json({ ok: false, error: "Secret PRICE_LIST_URL belum diisi di Worker Settings → Variables and Secrets" }, 400);
-  }
-
-  let list;
-  try {
-    const res = await fetch(c.env.PRICE_LIST_URL);
-    if (!res.ok) {
-      return c.json({ ok: false, error: `Gagal ambil daftar harga, server balas status ${res.status}` }, 502);
-    }
-    const data = await res.json();
-    list = Array.isArray(data) ? data : data.data || data.result || [];
-  } catch (err) {
-    return c.json({ ok: false, error: "Gagal ambil/baca daftar harga: " + err.message }, 502);
-  }
-
-  // Markup flat per transaksi di atas harga modal OkeConnect. Sesuaikan sendiri
-  // di sini, atau nanti ubah manual per produk lewat halaman "Produk" -> "Ubah".
-  const MARKUP = 500;
-
-  // Ditandai di setiap baris yang "terlihat" pada sinkron kali ini — dipakai
-  // setelah upsert selesai untuk menandai kode yang TIDAK terlihat lagi
-  // (berarti sudah hilang dari daftar OkeConnect) sebagai nonaktif otomatis.
-  const runStartedAt = new Date().toISOString();
-
-  const stmt = c.env.DB.prepare(
-    `INSERT INTO products (code, name, category, product_group, cost_price, sell_price, active, deactivated_at, last_synced_at)
-     VALUES (?, ?, ?, ?, ?, ?, 1, NULL, ?)
-     ON CONFLICT(code) DO UPDATE SET
-       name = excluded.name,
-       category = excluded.category,
-       product_group = excluded.product_group,
-       cost_price = excluded.cost_price,
-       sell_price = excluded.sell_price,
-       active = 1,
-       deactivated_at = NULL,
-       last_synced_at = excluded.last_synced_at`
-  );
-
-  const batchItems = [];
-  let skipped = 0;
-  for (const item of list) {
-    const code = item.kode || item.code || item.product_code;
-    // Field asli daftar harga OkeConnect: "keterangan" (deskripsi detail) dan
-    // "produk" (nama grup produk) — bukan "nama"/"deskripsi" seperti sebelumnya.
-    const name = item.keterangan || item.produk || item.nama || item.name;
-    const category = item.kategori || item.category || null;
-    // "produk" jauh lebih spesifik dari "kategori" — mis. "Telkomsel", "Masa
-    // Aktif Axis", "SMS Telepon Indosat" — dipakai buat Katalog PPOB bertingkat.
-    const productGroup = item.produk || null;
-    // "harga" di JSON OkeConnect adalah harga MODAL (yang Anda bayar ke mereka),
-    // bukan harga jual ke pelanggan — sebelumnya salah ditaruh di sell_price.
-    const cost = Number(item.harga || item.price || 0);
-    const sell = cost + MARKUP;
-    if (!code || !name) {
-      skipped++;
-      continue;
-    }
-    if (item.status === "0" || item.status === 0) {
-      skipped++;
-      continue; // produk nonaktif/kosong di OkeConnect — biarkan tertangkap sbg "tidak terlihat" di bawah
-    }
-    batchItems.push(stmt.bind(code, name, category, productGroup, cost, sell, runStartedAt));
-  }
-
-  // Kirim per-batch (bukan satu-satu berurutan) supaya jauh lebih cepat dan
-  // tidak kena limit waktu eksekusi Worker untuk daftar harga yang isinya
-  // ribuan produk. D1 batasi ukuran satu batch, jadi dipecah per 100 statement.
-  const BATCH_SIZE = 100;
-  let count = 0;
-  let lastError = null;
-  for (let i = 0; i < batchItems.length; i += BATCH_SIZE) {
-    const chunk = batchItems.slice(i, i + BATCH_SIZE);
-    try {
-      await c.env.DB.batch(chunk);
-      count += chunk.length;
-    } catch (err) {
-      lastError = `batch mulai index ${i}: ${err.message}`;
-    }
-  }
-
-  // Kode yang sebelumnya aktif tapi TIDAK terlihat di sinkron kali ini (baik
-  // karena hilang total dari sumber, atau statusnya 0) → tandai nonaktif.
-  // Soft-delete, bukan DELETE — riwayat transaksi lama & nama produk tetap aman.
-  const deactivateRes = await c.env.DB.prepare(
-    `UPDATE products SET active = 0, deactivated_at = datetime('now')
-     WHERE code IS NOT NULL AND active = 1 AND (last_synced_at IS NULL OR last_synced_at < ?)`
-  )
-    .bind(runStartedAt)
-    .run();
-
-  return c.json({
-    ok: true,
-    synced: count,
-    total: list.length,
-    skipped,
-    deactivated: deactivateRes.meta?.changes ?? 0,
-    lastError,
-  });
+  const result = await syncPpobPrices(c.env);
+  return c.json(result, result.ok ? 200 : (result.error?.includes("PRICE_LIST_URL") ? 400 : 502));
 });
 
 app.get("/api/transactions", async (c) => {
@@ -438,18 +440,69 @@ app.get("/api/transactions/:id", async (c) => {
 
 // Catat transaksi baru. Untuk penjualan barang fisik (misal hasil scan barcode),
 // sertakan "items": [{ product_id, qty }] — sistem hitung total & modal otomatis,
-// lalu kurangi stok. Untuk expense/mutation, "items" boleh dikosongkan.
+// lalu kurangi stok. Untuk expense, "items" boleh dikosongkan. Untuk mutation
+// (pindah saldo antar akun, mis. setor tunai Kas -> Bank), isi "wallet_id"
+// (akun asal) DAN "to_wallet_id" (akun tujuan), "items" tidak dipakai.
 app.post("/api/transactions", async (c) => {
   const employee = c.get("employee");
   const {
     type, // sale | purchase | expense | mutation
     category,
     wallet_id,
+    to_wallet_id, // khusus type='mutation': akun tujuan
     note,
     contact_id,
     items = [], // [{ product_id, qty }]
-    amount, // dipakai kalau tidak ada items (mis. expense manual)
+    amount, // dipakai kalau tidak ada items (mis. expense manual / mutasi)
+    paid_method = "tunai", // "tunai" (isi wallet_id) | "utang" (wajib contact_id, wallet_id diabaikan)
   } = await c.req.json();
+
+  if (paid_method === "utang" && !contact_id) {
+    return c.json({ ok: false, error: "Pembayaran Utang wajib pilih kontak" }, 400);
+  }
+
+  // Mutasi antar akun: tidak ada items/stok/laba, cuma pindah saldo dari satu
+  // akun ke akun lain (mis. setor tunai dari Kas ke Bank).
+  if (type === "mutation") {
+    if (!wallet_id || !to_wallet_id) {
+      return c.json({ ok: false, error: "Mutasi wajib memilih akun asal dan akun tujuan" }, 400);
+    }
+    if (wallet_id === to_wallet_id) {
+      return c.json({ ok: false, error: "Akun asal dan akun tujuan tidak boleh sama" }, 400);
+    }
+    const mutasiTotal = amount || 0;
+    if (mutasiTotal <= 0) {
+      return c.json({ ok: false, error: "Nominal mutasi harus lebih dari 0" }, 400);
+    }
+
+    const shift = employee
+      ? await c.env.DB.prepare("SELECT id FROM shifts WHERE employee_id = ? AND status = 'open'")
+          .bind(employee.employeeId)
+          .first()
+      : null;
+
+    const insertResult = await c.env.DB.prepare(
+      `INSERT INTO transactions (type, category, wallet_id, to_wallet_id, amount, cost_total, note, contact_id, employee_id, shift_id)
+       VALUES ('mutation', ?, ?, ?, ?, 0, ?, ?, ?, ?)`
+    )
+      .bind(
+        category || null,
+        wallet_id,
+        to_wallet_id,
+        mutasiTotal,
+        note || null,
+        contact_id || null,
+        employee ? employee.employeeId : null,
+        shift ? shift.id : null
+      )
+      .run();
+    const transactionId = insertResult.meta.last_row_id;
+
+    await c.env.DB.prepare("UPDATE wallets SET balance = balance - ? WHERE id = ?").bind(mutasiTotal, wallet_id).run();
+    await c.env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?").bind(mutasiTotal, to_wallet_id).run();
+
+    return c.json({ ok: true, transactionId, total: mutasiTotal, costTotal: 0 });
+  }
 
   let total = 0;
   let costTotal = 0;
@@ -468,11 +521,33 @@ app.post("/api/transactions", async (c) => {
 
   if (!items.length) total = amount || 0;
 
+  // Bayar Utang: uang belum masuk kas sama sekali, jadi wallet_id dikosongkan
+  // (stok tetap berkurang & laporan laba tetap kehitung seperti biasa).
+  const effectiveWalletId = paid_method === "utang" ? null : wallet_id;
+
+  // Tempelkan shift_id kasir yang sedang login (kalau ada shift yang masih
+  // terbuka), supaya transaksi ini ikut kehitung di Laporan Shift-nya nanti.
+  const openShift = employee
+    ? await c.env.DB.prepare("SELECT id FROM shifts WHERE employee_id = ? AND status = 'open'")
+        .bind(employee.employeeId)
+        .first()
+    : null;
+
   const insertResult = await c.env.DB.prepare(
-    `INSERT INTO transactions (type, category, wallet_id, amount, cost_total, note, contact_id, employee_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO transactions (type, category, wallet_id, amount, cost_total, note, contact_id, employee_id, shift_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
-    .bind(type, category || null, wallet_id || null, total, costTotal, note || null, contact_id || null, employee ? employee.employeeId : null)
+    .bind(
+      type,
+      category || null,
+      effectiveWalletId || null,
+      total,
+      costTotal,
+      note || null,
+      contact_id || null,
+      employee ? employee.employeeId : null,
+      openShift ? openShift.id : null
+    )
     .run();
   const transactionId = insertResult.meta.last_row_id;
 
@@ -495,10 +570,23 @@ app.post("/api/transactions", async (c) => {
     }
   }
 
-  if (wallet_id) {
+  if (effectiveWalletId) {
     const delta = type === "sale" ? total : -total; // penjualan nambah kas, pembelian/expense ngurangin
     await c.env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?")
-      .bind(delta, wallet_id)
+      .bind(delta, effectiveWalletId)
+      .run();
+  }
+
+  // Bayar Utang (cuma berlaku utk penjualan): otomatis catat sbg piutang,
+  // tanpa perlu kasir isi manual dobel di menu Hutang Piutang.
+  if (paid_method === "utang" && type === "sale" && contact_id) {
+    await c.env.DB.prepare(
+      `INSERT INTO debts (contact_id, type, amount, note) VALUES (?, 'piutang', ?, ?)`
+    )
+      .bind(contact_id, total, note || `Transaksi kasir #${transactionId}`)
+      .run();
+    await c.env.DB.prepare("UPDATE contacts SET total_debt = total_debt + ? WHERE id = ?")
+      .bind(total, contact_id)
       .run();
   }
 
@@ -527,7 +615,15 @@ app.delete("/api/transactions/:id", requireAdmin, async (c) => {
   const t = await c.env.DB.prepare("SELECT * FROM transactions WHERE id = ?").bind(id).first();
   if (!t) return c.json({ ok: false, error: "Transaksi tidak ditemukan" }, 404);
 
-  if (t.wallet_id) {
+  if (t.type === "mutation") {
+    // Balikkan mutasi: kembalikan saldo akun asal, tarik lagi dari akun tujuan.
+    if (t.wallet_id) {
+      await c.env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?").bind(t.amount, t.wallet_id).run();
+    }
+    if (t.to_wallet_id) {
+      await c.env.DB.prepare("UPDATE wallets SET balance = balance - ? WHERE id = ?").bind(t.amount, t.to_wallet_id).run();
+    }
+  } else if (t.wallet_id) {
     const delta = t.type === "sale" ? t.amount : -t.amount; // balikkan: kebalikan dari efek saat dibuat
     await c.env.DB.prepare("UPDATE wallets SET balance = balance - ? WHERE id = ?")
       .bind(delta, t.wallet_id)
@@ -623,17 +719,26 @@ app.delete("/api/debts/:id", async (c) => {
 // LAPORAN KEUANGAN
 // ---------------------------------------------------------------------------
 
-// Arus kas per akun/dompet dalam rentang tanggal
+// Arus kas per akun/dompet dalam rentang tanggal. Mutasi antar akun dihitung
+// dua sisi: "keluar" di akun asal, "masuk" di akun tujuan (bukan cuma
+// sale/purchase/expense seperti sebelumnya).
 app.get("/api/reports/cashflow", async (c) => {
   const start = c.req.query("start") || "1970-01-01";
   const end = c.req.query("end") || "2999-12-31";
   const { results } = await c.env.DB.prepare(
-    `SELECT wallet_id, w.name AS wallet_name,
-            SUM(CASE WHEN t.type = 'sale' THEN t.amount ELSE 0 END) AS masuk,
-            SUM(CASE WHEN t.type IN ('purchase','expense') THEN t.amount ELSE 0 END) AS keluar
-     FROM transactions t LEFT JOIN wallets w ON w.id = t.wallet_id
-     WHERE date(t.date) BETWEEN date(?) AND date(?)
-     GROUP BY wallet_id`
+    `SELECT w.id AS wallet_id, w.name AS wallet_name,
+            COALESCE(SUM(CASE
+              WHEN t.wallet_id = w.id AND t.type = 'sale' THEN t.amount
+              WHEN t.to_wallet_id = w.id AND t.type = 'mutation' THEN t.amount
+              ELSE 0 END), 0) AS masuk,
+            COALESCE(SUM(CASE
+              WHEN t.wallet_id = w.id AND t.type IN ('purchase','expense','mutation') THEN t.amount
+              ELSE 0 END), 0) AS keluar
+     FROM wallets w
+     LEFT JOIN transactions t
+       ON (t.wallet_id = w.id OR t.to_wallet_id = w.id) AND date(t.date) BETWEEN date(?) AND date(?)
+     GROUP BY w.id
+     HAVING masuk > 0 OR keluar > 0`
   )
     .bind(start, end)
     .all();
@@ -669,6 +774,150 @@ app.get("/api/reports/profit", async (c) => {
     biaya_operasional: expenses.total,
     laba_bersih: netProfit,
   });
+});
+
+// ---------------------------------------------------------------------------
+// SHIFT KASIR (Buka/Tutup Shift, Rekap/Laporan Shift, Kas Opname)
+// ---------------------------------------------------------------------------
+// Satu shift = satu periode kerja kasir pada satu akun kas fisik tertentu.
+// Saldo awal diisi manual (hasil hitung fisik laci kas saat buka), lalu semua
+// transaksi yang tercatat selama shift berjalan (penjualan, pembelian,
+// biaya, mutasi masuk/keluar) ditandai dengan shift_id yang sama. Saat tutup
+// shift, sistem hitung "saldo seharusnya" dari saldo awal + pergerakan itu,
+// lalu dibandingkan dengan saldo fisik hasil hitung ulang kasir (selisih =
+// lebih/kurang, biasa disebut "kas opname").
+
+async function computeShiftBreakdown(db, shift) {
+  const row = await db
+    .prepare(
+      `SELECT
+        COALESCE(SUM(CASE WHEN type = 'sale' AND wallet_id = ? THEN amount ELSE 0 END), 0) AS total_penjualan,
+        COALESCE(SUM(CASE WHEN type = 'purchase' AND wallet_id = ? THEN amount ELSE 0 END), 0) AS total_pembelian,
+        COALESCE(SUM(CASE WHEN type = 'expense' AND wallet_id = ? THEN amount ELSE 0 END), 0) AS total_pengeluaran,
+        COALESCE(SUM(CASE WHEN type = 'mutation' AND wallet_id = ? THEN amount ELSE 0 END), 0) AS mutasi_keluar,
+        COALESCE(SUM(CASE WHEN type = 'mutation' AND to_wallet_id = ? THEN amount ELSE 0 END), 0) AS mutasi_masuk,
+        COUNT(*) AS jumlah_transaksi
+       FROM transactions WHERE shift_id = ?`
+    )
+    .bind(shift.wallet_id, shift.wallet_id, shift.wallet_id, shift.wallet_id, shift.wallet_id, shift.id)
+    .first();
+  const net_movement =
+    row.total_penjualan - row.total_pembelian - row.total_pengeluaran - row.mutasi_keluar + row.mutasi_masuk;
+  return { ...row, net_movement };
+}
+
+// Riwayat shift. Kasir biasa cuma lihat shift miliknya sendiri; admin lihat semua.
+app.get("/api/shifts", async (c) => {
+  const employee = c.get("employee");
+  const status = c.req.query("status");
+  let query = `SELECT s.*, e.name AS employee_name, w.name AS wallet_name FROM shifts s
+    JOIN employees e ON e.id = s.employee_id JOIN wallets w ON w.id = s.wallet_id WHERE 1=1`;
+  const binds = [];
+  if (employee.role !== "admin") {
+    query += " AND s.employee_id = ?";
+    binds.push(employee.employeeId);
+  }
+  if (status) {
+    query += " AND s.status = ?";
+    binds.push(status);
+  }
+  query += " ORDER BY s.opened_at DESC LIMIT 100";
+  const { results } = await c.env.DB.prepare(query)
+    .bind(...binds)
+    .all();
+  return c.json(results);
+});
+
+// Shift yang sedang berjalan milik kasir yang login (kalau ada), lengkap
+// dengan rekap sementara — dipakai halaman Shift buat preview sebelum tutup.
+app.get("/api/shifts/current", async (c) => {
+  const employee = c.get("employee");
+  const shift = await c.env.DB.prepare(
+    `SELECT s.*, w.name AS wallet_name FROM shifts s JOIN wallets w ON w.id = s.wallet_id
+     WHERE s.employee_id = ? AND s.status = 'open'`
+  )
+    .bind(employee.employeeId)
+    .first();
+  if (!shift) return c.json(null);
+  const breakdown = await computeShiftBreakdown(c.env.DB, shift);
+  return c.json({ ...shift, ...breakdown, expected_balance: shift.opening_balance + breakdown.net_movement });
+});
+
+// Detail satu shift (dipakai buat lihat/cetak Laporan Shift yang sudah ditutup).
+app.get("/api/shifts/:id", async (c) => {
+  const employee = c.get("employee");
+  const id = c.req.param("id");
+  const shift = await c.env.DB.prepare(
+    `SELECT s.*, e.name AS employee_name, w.name AS wallet_name FROM shifts s
+     JOIN employees e ON e.id = s.employee_id JOIN wallets w ON w.id = s.wallet_id WHERE s.id = ?`
+  )
+    .bind(id)
+    .first();
+  if (!shift) return c.json({ ok: false, error: "Shift tidak ditemukan" }, 404);
+  if (employee.role !== "admin" && shift.employee_id !== employee.employeeId) {
+    return c.json({ ok: false, error: "Bukan shift Anda" }, 403);
+  }
+  const breakdown = await computeShiftBreakdown(c.env.DB, shift);
+  const { results: transactionsList } = await c.env.DB.prepare(
+    "SELECT * FROM transactions WHERE shift_id = ? ORDER BY date"
+  )
+    .bind(id)
+    .all();
+  return c.json({ ...shift, ...breakdown, transactions: transactionsList });
+});
+
+// Buka shift baru. Satu kasir hanya boleh punya 1 shift terbuka pada satu waktu.
+app.post("/api/shifts/open", async (c) => {
+  const employee = c.get("employee");
+  const existing = await c.env.DB.prepare(
+    "SELECT id FROM shifts WHERE employee_id = ? AND status = 'open'"
+  )
+    .bind(employee.employeeId)
+    .first();
+  if (existing) {
+    return c.json({ ok: false, error: "Anda masih punya shift yang belum ditutup. Tutup dulu sebelum buka baru." }, 400);
+  }
+  const { wallet_id, opening_balance, opening_note } = await c.req.json();
+  if (!wallet_id) return c.json({ ok: false, error: "Pilih akun kas yang mau di-opname dulu" }, 400);
+
+  const result = await c.env.DB.prepare(
+    `INSERT INTO shifts (employee_id, wallet_id, opening_balance, opening_note) VALUES (?, ?, ?, ?)`
+  )
+    .bind(employee.employeeId, wallet_id, opening_balance || 0, opening_note || null)
+    .run();
+  return c.json({ ok: true, shiftId: result.meta.last_row_id });
+});
+
+// Tutup shift: input saldo fisik hasil hitung ulang (closing_balance), sistem
+// bandingkan dengan saldo seharusnya (opening_balance + pergerakan transaksi
+// selama shift) buat dapat selisih (lebih/kurang kas).
+app.post("/api/shifts/:id/close", async (c) => {
+  const employee = c.get("employee");
+  const id = c.req.param("id");
+  const shift = await c.env.DB.prepare("SELECT * FROM shifts WHERE id = ?").bind(id).first();
+  if (!shift) return c.json({ ok: false, error: "Shift tidak ditemukan" }, 404);
+  if (shift.status !== "open") return c.json({ ok: false, error: "Shift ini sudah ditutup" }, 400);
+  if (employee.role !== "admin" && shift.employee_id !== employee.employeeId) {
+    return c.json({ ok: false, error: "Bukan shift Anda" }, 403);
+  }
+
+  const { closing_balance, closing_note } = await c.req.json();
+  if (closing_balance === undefined || closing_balance === null) {
+    return c.json({ ok: false, error: "Isi hasil hitung kas fisik dulu" }, 400);
+  }
+
+  const breakdown = await computeShiftBreakdown(c.env.DB, shift);
+  const expected = shift.opening_balance + breakdown.net_movement;
+  const difference = closing_balance - expected;
+
+  await c.env.DB.prepare(
+    `UPDATE shifts SET status = 'closed', closing_balance = ?, expected_balance = ?, difference = ?,
+       closing_note = ?, closed_at = datetime('now') WHERE id = ?`
+  )
+    .bind(closing_balance, expected, difference, closing_note || null, id)
+    .run();
+
+  return c.json({ ok: true, expected_balance: expected, difference, ...breakdown });
 });
 
 app.get("/api/ppob-orders", async (c) => {
@@ -718,10 +967,10 @@ app.post("/api/ppob-orders/:refId/cek-ulang", async (c) => {
   const order = await c.env.DB.prepare("SELECT * FROM ppob_orders WHERE ref_id = ?").bind(refId).first();
   if (!order) return c.json({ ok: false, error: "Order tidak ditemukan" }, 404);
   try {
-    const { status, reply } = await recheckOrder(c.env, order);
-    return c.json({ ok: true, status, reply });
+    const { status, reply } = await recheckOrder(c.env, order, { autoRecord: false });
+    return c.json({ ok: true, status, reply, needsConfirm: status === "sukses" });
   } catch (err) {
-    return c.json({ ok: false, error: "Gagal cek ke OkeConnect: " + err.message }, 502);
+    return c.json({ ok: false, error: err.message }, 502);
   }
 });
 
@@ -751,12 +1000,12 @@ app.delete("/api/ppob-orders/:refId", requireAdmin, async (c) => {
 // Order PPOB langsung dari halaman kasir web (pola sama dengan /beli di Telegram,
 // tapi lewat sini biar bisa dipanggil dari UI kasir, misal setelah scan barcode/pilih produk).
 app.post("/api/ppob/order", async (c) => {
-  const { productCode, target } = await c.req.json();
+  const { productCode, target, paidMethod, contactId, batchId } = await c.req.json();
   if (!productCode || !target) {
     return c.json({ ok: false, error: "productCode dan target wajib diisi" }, 400);
   }
   try {
-    const result = await placePpobOrder(c.env, { productCode, target });
+    const result = await placePpobOrder(c.env, { productCode, target, paidMethod, contactId, batchId });
     return c.json({ ok: true, ...result });
   } catch (err) {
     return c.json({ ok: false, error: err.message }, 400);
@@ -780,46 +1029,36 @@ app.post("/api/ppob/cek", async (c) => {
   }
 });
 
-// Setelah order postpaid (tagihan/PDAM) sukses, kasir input manual nominal
-// asli yang diterima dari pelanggan & yang terpotong dari saldo distributor
-// (dibaca dari balasan Cek/Bayar OkeConnect) — baru di sini dicatat sebagai
-// transaksi & saldo dipotong, supaya laporan keuangan akurat.
-app.post("/api/ppob-orders/:refId/catat", async (c) => {
+// Konfirmasi harga jual final SETELAH order PPOB sukses (berlaku utk semua
+// kategori — pulsa/kuota/token prabayar MAUPUN tagihan/PDAM pascabayar,
+// menggantikan endpoint /catat yang lama yang cuma utk pascabayar). Baru di
+// sini transaksi benar-benar dicatat & saldo distributor dipotong — supaya
+// kasir sempat mengoreksi harga jual (dan utk pascabayar, mengisi nominal
+// tagihan asli) sebelum permanen tercatat ke laporan.
+app.post("/api/ppob-orders/:refId/konfirmasi", async (c) => {
   const refId = c.req.param("refId");
-  const { amount, cost_total } = await c.req.json();
-  if (amount === undefined || cost_total === undefined) {
-    return c.json({ ok: false, error: "amount dan cost_total wajib diisi" }, 400);
+  const { sellPrice, costTotal, tokenCode, paidMethod, contactId } = await c.req.json();
+  try {
+    const result = await finalizePpobOrder(c.env, { refId, sellPrice, costTotal, tokenCode, paidMethod, contactId });
+    return c.json({ ok: true, ...result });
+  } catch (err) {
+    return c.json({ ok: false, error: err.message }, 400);
   }
-  const order = await c.env.DB.prepare("SELECT * FROM ppob_orders WHERE ref_id = ?").bind(refId).first();
-  if (!order) return c.json({ ok: false, error: "Order tidak ditemukan" }, 404);
-  if (order.status !== "sukses") return c.json({ ok: false, error: "Order belum sukses, tidak bisa dicatat" }, 400);
-  if (order.finalized) return c.json({ ok: false, error: "Order ini sudah pernah dicatat" }, 400);
-
-  await c.env.DB.prepare(
-    `INSERT INTO transactions (type, category, wallet_id, amount, cost_total, note)
-     VALUES ('sale', 'Tagihan/PDAM', ?, ?, ?, ?)`
-  )
-    .bind(order.wallet_id, amount, cost_total, `${order.product_code} ke ${order.target} (ref ${refId})`)
-    .run();
-
-  if (order.wallet_id) {
-    await c.env.DB.prepare("UPDATE wallets SET balance = balance - ? WHERE id = ?")
-      .bind(cost_total, order.wallet_id)
-      .run();
-  }
-
-  await c.env.DB.prepare("UPDATE ppob_orders SET finalized = 1 WHERE ref_id = ?").bind(refId).run();
-
-  return c.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------
-// WEBHOOK TELEGRAM — bot jualan PPOB
+// WEBHOOK TELEGRAM — bot jualan PPOB (publik) + bot admin/kasir (khusus
+// karyawan yang sudah terhubung, lihat bot-admin.js)
 //
-// Perintah yang didukung (contoh):
-//   /beli TSEL5 081234567890         -> order pulsa/paket kode TSEL5 ke nomor itu
+// Perintah publik (siapa saja boleh pakai):
+//   /beli KODE NOMOR                 -> order pulsa/paket kode KODE ke nomor itu
 //   /cek REF123                      -> cek status order
 //   /saldo                           -> lihat saldo akun distributor
+//   /cari kata-kunci                 -> cari kode produk
+//
+// Perintah admin/kasir (wajib terhubung dulu lewat halaman Karyawan di web):
+//   /hubung KODE                     -> hubungkan chat ini ke akun karyawan
+//   /menu atau /start                -> buka menu tombol (Hutang, Konfirmasi PPOB, dst)
 //
 // Format ke OkeConnect mengikuti: {KODE}.{NO_HP}.{PIN}.R#{ID}
 // (lihat catatan CS OkeConnect Anda). Sesuaikan bila format berbeda per produk.
@@ -831,12 +1070,44 @@ app.post("/telegram/webhook", async (c) => {
   if (secret !== c.env.TELEGRAM_SECRET) return c.text("forbidden", 403);
 
   const update = await c.req.json();
+  const env = c.env;
+
+  // Tombol menu bot admin/kasir (Hutang Piutang, Konfirmasi Harga PPOB, dst)
+  // — beda jalur dari pesan teks biasa di bawah.
+  if (update.callback_query) {
+    await handleAdminCallback(env, update.callback_query);
+    return c.text("ok");
+  }
+
   const message = update.message;
   if (!message || !message.text) return c.text("ok");
 
   const chatId = String(message.chat.id);
   const text = message.text.trim();
-  const env = c.env;
+
+  // Hubungkan akun karyawan ke bot: "/hubung KODE" (kode dibuat di halaman
+  // Karyawan pada web, tombol "Hubungkan Bot Telegram"). Dicek duluan,
+  // terlepas chat ini sudah terhubung sebagai siapa sebelumnya.
+  if (text.startsWith("/hubung")) {
+    const reply = await handleLinkCommand(env, chatId, text);
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, reply);
+    return c.text("ok");
+  }
+
+  const employee = await getEmployeeByChatId(env, chatId);
+
+  // Menu khusus karyawan/admin yang sudah terhubung — Hutang Piutang &
+  // konfirmasi harga jual PPOB lewat tombol, terpisah dari command lama.
+  if (employee) {
+    if (text === "/start" || text === "/menu") {
+      await sendMainMenu(env, chatId, employee);
+      return c.text("ok");
+    }
+    // Kalau sedang di tengah alur (mis. bot lagi nunggu nominal pembayaran
+    // hutang atau harga jual baru), tangkap di sini duluan.
+    const handled = await handleAdminSessionMessage(env, chatId, text);
+    if (handled) return c.text("ok");
+  }
 
   if (text.startsWith("/beli")) {
     const parts = text.split(/\s+/);
@@ -929,19 +1200,35 @@ app.post("/telegram/webhook", async (c) => {
 // (menghindari kebutuhan koneksi Jabber yang nyala 24 jam terus-menerus)
 // ---------------------------------------------------------------------------
 
-// Cek ulang SATU order ke OkeConnect (via CEK.R#) dan update status/raw_reply +
-// catat transaksi kalau ternyata sukses. Dipakai baik oleh cron (otomatis,
-// sekali saja per order) maupun endpoint manual (tombol "Cek Ulang Status").
-async function recheckOrder(env, order) {
-  // TODO: sesuaikan format perintah "cek status" sesuai dokumentasi OkeConnect
-  // (di screenshot CS Anda ada varian format berakhiran huruf 'A' untuk ID pelanggan —
-  // konfirmasi ke OkeConnect apakah itu juga dipakai untuk query status).
-  const reply = await sendJabberCommand({
-    jid: env.JABBER_JID,
-    password: env.JABBER_PASSWORD,
-    to: env.JABBER_TARGET || "okeconnect@gojabber.com",
-    body: `CEK.R#${order.ref_id}`,
-  });
+// Cek ulang SATU order ke OkeConnect (via CEK.R#) dan update status/raw_reply.
+// Dipakai baik oleh cron (otomatis, sekali saja per order) maupun endpoint
+// manual (tombol "Cek Ulang Status"). autoRecord=true (jalur cron, kasir TIDAK
+// di depan layar) akan langsung catat transaksi pakai harga default begitu
+// ketahuan sukses. autoRecord=false (tombol manual, kasir SEDANG di depan
+// layar) TIDAK auto-catat — biarkan kasir muncul kotak konfirmasi harga dulu
+// (sama seperti order yang baru saja dibuat), baru dicatat lewat /konfirmasi.
+async function recheckOrder(env, order, { autoRecord } = {}) {
+  const cfg = getProviderConfig(env, order.provider);
+
+  // Digiflazz pascabayar ("bayar.KODE.NOMOR.PIN") TIDAK punya trx id sama
+  // sekali — tidak ada cara aman untuk "cek status ulang" tanpa berisiko
+  // mengirim ulang command "bayar." itu sendiri dan berpotensi dobel-bayar.
+  // Jadi order jenis ini SENGAJA TIDAK di-recheck otomatis di sini — kalau
+  // balasannya sempat gagal/putus di tengah jalan, harus dicek manual lewat
+  // CS Digiflazz atau riwayat "Bayar Tagihan" di member area mereka.
+  if (cfg.provider === "digiflazz" && order.request_body && /^bayar\./i.test(order.request_body)) {
+    throw new Error(
+      "Order pascabayar Digiflazz tidak bisa dicek ulang otomatis (tidak ada trx id, beresiko dobel-bayar kalau dikirim ulang). Cek status pembayaran ini langsung ke CS/member area Digiflazz."
+    );
+  }
+
+  // OkeConnect: command khusus "CEK.R#{ID}" (TODO: belum dikonfirmasi CS,
+  // ada varian berakhiran 'A' untuk ID pelanggan — lihat catatan lama).
+  // Digiflazz prabayar: TIDAK ada command "cek status" terpisah — caranya
+  // kirim ULANG persis body transaksi asli dengan Trxid yang sama (disimpan
+  // di order.request_body saat order dibuat).
+  const body = cfg.provider === "digiflazz" && order.request_body ? order.request_body : `CEK.R#${order.ref_id}`;
+  const reply = await sendJabberCommand({ jid: cfg.jid, password: cfg.password, to: cfg.target, body });
   const status = detectPpobStatus(reply);
 
   await env.DB.prepare(
@@ -950,7 +1237,7 @@ async function recheckOrder(env, order) {
     .bind(status, reply, order.id)
     .run();
 
-  if (status === "sukses") {
+  if (status === "sukses" && autoRecord) {
     const product = await env.DB.prepare("SELECT * FROM products WHERE code = ?")
       .bind(order.product_code)
       .first();
@@ -958,7 +1245,15 @@ async function recheckOrder(env, order) {
       ? await env.DB.prepare("SELECT * FROM wallets WHERE id = ?").bind(order.wallet_id).first()
       : null;
     if (product) {
-      await recordPpobSale(env, { product, wallet, refId: order.ref_id, target: order.target });
+      await recordPpobSale(env, {
+        product,
+        wallet,
+        refId: order.ref_id,
+        target: order.target,
+        paidMethod: order.paid_method,
+        contactId: order.contact_id,
+      });
+      await env.DB.prepare("UPDATE ppob_orders SET finalized = 1 WHERE id = ?").bind(order.id).run();
     }
   }
 
@@ -977,6 +1272,8 @@ async function recheckOrder(env, order) {
 // diulang tiap 5 menit selamanya. Kalau setelah cek sekali ini masih
 // "pending" juga, itu ranah tombol manual "Cek Ulang Status" di menu detail
 // transaksi (lihat endpoint /api/ppob-orders/:refId/cek-ulang), bukan cron lagi.
+// Kasir dianggap TIDAK di depan layar di jalur ini, jadi auto-catat langsung
+// pakai harga default kalau ternyata sukses (autoRecord: true).
 async function checkPendingOrders(env) {
   const { results } = await env.DB.prepare(
     `SELECT * FROM ppob_orders
@@ -986,7 +1283,7 @@ async function checkPendingOrders(env) {
 
   for (const order of results) {
     try {
-      await recheckOrder(env, order);
+      await recheckOrder(env, order, { autoRecord: true });
     } catch (err) {
       // Tetap tandai auto_checked supaya tidak dicoba otomatis lagi tiap
       // 5 menit selamanya — kalau gagal, biarkan tombol manual yang urus.
@@ -1057,6 +1354,8 @@ export default {
   async scheduled(event, env, ctx) {
     if (event.cron === "0 3 * * *") {
       ctx.waitUntil(cleanupOldData(env));
+    } else if (event.cron === "0 */8 * * *") {
+      ctx.waitUntil(syncPpobPrices(env));
     } else {
       ctx.waitUntil(checkPendingOrders(env));
     }

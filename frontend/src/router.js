@@ -12,6 +12,8 @@ const routes = [
   { path: "/tagihan", name: "tagihan", component: () => import("./views/PpobTagihan.vue") },
   { path: "/kontak", name: "kontak", component: () => import("./views/Kontak.vue") },
   { path: "/hutang", name: "hutang", component: () => import("./views/Hutang.vue") },
+  { path: "/mutasi", name: "mutasi", component: () => import("./views/Mutasi.vue") },
+  { path: "/shift", name: "shift", component: () => import("./views/Shift.vue") },
   { path: "/laporan", name: "laporan", component: () => import("./views/Laporan.vue") },
   {
     path: "/karyawan",

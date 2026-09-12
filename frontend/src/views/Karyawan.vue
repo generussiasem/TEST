@@ -8,6 +8,7 @@ const error = ref("");
 const showAdd = ref(false);
 const editing = ref(null);
 const newPassword = ref("");
+const linkInfo = ref({}); // { [employeeId]: { code, expiresInMinutes } } — hasil generate kode terakhir
 
 async function load() {
   employees.value = await api.get("/api/employees");
@@ -48,6 +49,30 @@ async function hapus(e) {
   error.value = "";
   try {
     await api.delete(`/api/employees/${e.id}`);
+    await load();
+  } catch (err) {
+    error.value = err.message;
+  }
+}
+
+async function buatKodeTelegram(e) {
+  error.value = "";
+  try {
+    const result = await api.post(`/api/employees/${e.id}/telegram-link-code`, {});
+    linkInfo.value = { ...linkInfo.value, [e.id]: result };
+  } catch (err) {
+    error.value = err.message;
+  }
+}
+
+async function putuskanTelegram(e) {
+  if (!confirm(`Putuskan koneksi bot Telegram untuk "${e.name}"?`)) return;
+  error.value = "";
+  try {
+    await api.post(`/api/employees/${e.id}/telegram-unlink`, {});
+    const copy = { ...linkInfo.value };
+    delete copy[e.id];
+    linkInfo.value = copy;
     await load();
   } catch (err) {
     error.value = err.message;
@@ -97,43 +122,64 @@ onMounted(load);
             <th>Username</th>
             <th>Peran</th>
             <th>Status</th>
+            <th>Bot Telegram</th>
             <th></th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="e in employees" :key="e.id">
-            <template v-if="editing && editing.id === e.id">
-              <td><input v-model="editing.name" /></td>
-              <td class="muted">{{ e.username }}</td>
-              <td>
-                <select v-model="editing.role">
-                  <option value="kasir">Kasir</option>
-                  <option value="admin">Admin</option>
-                </select>
+          <template v-for="e in employees" :key="e.id">
+            <tr>
+              <template v-if="editing && editing.id === e.id">
+                <td><input v-model="editing.name" /></td>
+                <td class="muted">{{ e.username }}</td>
+                <td>
+                  <select v-model="editing.role">
+                    <option value="kasir">Kasir</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                </td>
+                <td>
+                  <select v-model="editing.active">
+                    <option :value="1">Aktif</option>
+                    <option :value="0">Nonaktif</option>
+                  </select>
+                </td>
+                <td class="muted">—</td>
+                <td style="white-space: nowrap">
+                  <input v-model="newPassword" type="password" placeholder="Password baru (opsional)" style="width: 160px; margin-right: 6px" />
+                  <button class="btn" style="padding: 4px 10px" @click="saveEdit">Simpan</button>
+                  <button class="btn ghost" style="padding: 4px 10px" @click="editing = null">Batal</button>
+                </td>
+              </template>
+              <template v-else>
+                <td>{{ e.name }}</td>
+                <td class="num">{{ e.username }}</td>
+                <td style="text-transform: capitalize">{{ e.role }}</td>
+                <td><span class="badge" :class="e.active ? 'sukses' : 'gagal'">{{ e.active ? "Aktif" : "Nonaktif" }}</span></td>
+                <td>
+                  <span class="badge" :class="e.telegram_id ? 'sukses' : 'cek'">{{ e.telegram_id ? "Terhubung" : "Belum terhubung" }}</span>
+                </td>
+                <td style="white-space: nowrap">
+                  <button class="btn ghost" style="padding: 4px 10px; margin-right: 6px" @click="startEdit(e)">Ubah</button>
+                  <button v-if="!e.telegram_id" class="btn ghost" style="padding: 4px 10px; margin-right: 6px" @click="buatKodeTelegram(e)">
+                    Hubungkan Bot Telegram
+                  </button>
+                  <button v-else class="btn ghost" style="padding: 4px 10px; margin-right: 6px; color: #b3392c" @click="putuskanTelegram(e)">
+                    Putuskan
+                  </button>
+                  <button class="btn ghost" style="padding: 4px 10px; color: #b3392c" @click="hapus(e)">Hapus</button>
+                </td>
+              </template>
+            </tr>
+            <tr v-if="linkInfo[e.id]">
+              <td colspan="6" style="background: var(--paper-raised)">
+                <div style="padding: 10px 4px; font-size: 13.5px">
+                  Buka bot Telegram, lalu kirim: <code>/hubung {{ linkInfo[e.id].code }}</code>
+                  <span class="muted"> — kode berlaku {{ linkInfo[e.id].expiresInMinutes }} menit.</span>
+                </div>
               </td>
-              <td>
-                <select v-model="editing.active">
-                  <option :value="1">Aktif</option>
-                  <option :value="0">Nonaktif</option>
-                </select>
-              </td>
-              <td style="white-space: nowrap">
-                <input v-model="newPassword" type="password" placeholder="Password baru (opsional)" style="width: 160px; margin-right: 6px" />
-                <button class="btn" style="padding: 4px 10px" @click="saveEdit">Simpan</button>
-                <button class="btn ghost" style="padding: 4px 10px" @click="editing = null">Batal</button>
-              </td>
-            </template>
-            <template v-else>
-              <td>{{ e.name }}</td>
-              <td class="num">{{ e.username }}</td>
-              <td style="text-transform: capitalize">{{ e.role }}</td>
-              <td><span class="badge" :class="e.active ? 'sukses' : 'gagal'">{{ e.active ? "Aktif" : "Nonaktif" }}</span></td>
-              <td>
-                <button class="btn ghost" style="padding: 4px 10px; margin-right: 6px" @click="startEdit(e)">Ubah</button>
-                <button class="btn ghost" style="padding: 4px 10px; color: #b3392c" @click="hapus(e)">Hapus</button>
-              </td>
-            </template>
-          </tr>
+            </tr>
+          </template>
         </tbody>
       </table>
     </div>

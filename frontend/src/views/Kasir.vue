@@ -4,14 +4,18 @@ import { api } from "../api.js";
 
 const products = ref([]);
 const wallets = ref([]);
+const contacts = ref([]);
 const cart = ref([]); // { product, qty }
 const barcodeInput = ref("");
 const search = ref("");
 const walletId = ref(null);
+const paidMethod = ref("tunai"); // tunai | utang
+const contactId = ref(null);
 const error = ref("");
 const okMsg = ref("");
 const scanRef = ref(null);
 const submitting = ref(false);
+const lastReceipt = ref(null); // { items, total, cost, paidMethod, contactName, date }
 
 function rupiah(n) {
   return "Rp" + Number(n || 0).toLocaleString("id-ID");
@@ -29,9 +33,17 @@ const searchResults = computed(() => {
 });
 
 async function load() {
-  const [p, w] = await Promise.all([api.get("/api/products"), api.get("/api/wallets")]);
+  // PENTING: type=fisik supaya produk PPOB (pulsa/token/dst) TIDAK ikut
+  // muncul di pencarian Kasir — dulu ini bug, Kasir bisa "menjual" produk PPOB
+  // yang harusnya cuma lewat menu PPOB tersendiri.
+  const [p, w, c] = await Promise.all([
+    api.get("/api/products?type=fisik"),
+    api.get("/api/wallets"),
+    api.get("/api/contacts?type=pelanggan"),
+  ]);
   products.value = p;
   wallets.value = w.filter((x) => x.type !== "distributor_ppob");
+  contacts.value = c;
   if (wallets.value.length) walletId.value = wallets.value[0].id;
 }
 
@@ -67,17 +79,32 @@ function removeLine(line) {
 
 async function checkout() {
   if (!cart.value.length) return;
+  if (paidMethod.value === "utang" && !contactId.value) {
+    error.value = "Pilih kontak dulu untuk pembayaran Utang.";
+    return;
+  }
   error.value = "";
   okMsg.value = "";
   submitting.value = true;
   try {
+    const snapshot = {
+      items: cart.value.map((l) => ({ name: l.product.name, qty: l.qty, sell_price: l.product.sell_price })),
+      total: total.value,
+      cost: cost.value,
+      paidMethod: paidMethod.value,
+      contactName: contactId.value ? contacts.value.find((x) => x.id === contactId.value)?.name : null,
+      date: new Date().toLocaleString("id-ID"),
+    };
     await api.post("/api/transactions", {
       type: "sale",
       category: "Penjualan Warung",
-      wallet_id: walletId.value,
+      wallet_id: paidMethod.value === "tunai" ? walletId.value : null,
+      contact_id: paidMethod.value === "utang" ? contactId.value : null,
+      paid_method: paidMethod.value,
       items: cart.value.map((l) => ({ product_id: l.product.id, qty: l.qty })),
     });
     okMsg.value = `Transaksi berhasil dicatat — total ${rupiah(total.value)}.`;
+    lastReceipt.value = snapshot;
     cart.value = [];
     await load(); // refresh stok
   } catch (err) {
@@ -85,6 +112,20 @@ async function checkout() {
   } finally {
     submitting.value = false;
   }
+}
+
+function cetakStruk() {
+  window.print();
+}
+
+function bagikanWA() {
+  if (!lastReceipt.value) return;
+  const r = lastReceipt.value;
+  let text = `*Struk Belanja*\n${r.date}\n\n`;
+  for (const it of r.items) text += `${it.name} x${it.qty} — ${rupiah(it.sell_price * it.qty)}\n`;
+  text += `\n*Total: ${rupiah(r.total)}*`;
+  if (r.paidMethod === "utang") text += `\n(Utang atas nama ${r.contactName})`;
+  window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
 }
 
 onMounted(async () => {
@@ -123,16 +164,31 @@ onMounted(async () => {
               onmouseover="this.style.background='var(--paper)'"
               onmouseout="this.style.background='transparent'"
             >
-              <span>{{ p.name }} <span class="muted" style="font-size: 12px">{{ p.code ? `#${p.code}` : "" }}</span></span>
+              <span>{{ p.name }}</span>
               <span class="num">{{ rupiah(p.sell_price) }}</span>
             </div>
           </div>
         </div>
 
         <div class="field">
+          <label>Metode Bayar</label>
+          <div style="display: flex; gap: 8px">
+            <button class="btn" :class="{ ghost: paidMethod !== 'tunai' }" style="flex: 1; justify-content: center" @click="paidMethod = 'tunai'">Tunai/Bank</button>
+            <button class="btn" :class="{ ghost: paidMethod !== 'utang' }" style="flex: 1; justify-content: center" @click="paidMethod = 'utang'">Utang</button>
+          </div>
+        </div>
+
+        <div v-if="paidMethod === 'tunai'" class="field">
           <label>Bayar dari akun</label>
           <select v-model.number="walletId">
             <option v-for="w in wallets" :key="w.id" :value="w.id">{{ w.name }}</option>
+          </select>
+        </div>
+        <div v-else class="field">
+          <label>Kontak (wajib)</label>
+          <select v-model.number="contactId">
+            <option :value="null" disabled>— pilih pelanggan —</option>
+            <option v-for="c in contacts" :key="c.id" :value="c.id">{{ c.name }}</option>
           </select>
         </div>
       </div>
@@ -169,5 +225,36 @@ onMounted(async () => {
         </div>
       </div>
     </div>
+
+    <!-- Struk hasil transaksi terakhir -->
+    <div v-if="lastReceipt" class="card no-print" style="margin-top: 18px">
+      <h3 style="margin-bottom: 10px">Transaksi Terakhir</h3>
+      <button class="btn ghost" style="margin-right: 8px" @click="cetakStruk">🖨️ Cetak Struk</button>
+      <button class="btn ghost" @click="bagikanWA">📤 Bagikan via WhatsApp</button>
+    </div>
+
+    <div v-if="lastReceipt" class="receipt-box" style="display: none">
+      <div style="text-align: center; margin-bottom: 6px">
+        <strong>STRUK BELANJA</strong>
+        <div>{{ lastReceipt.date }}</div>
+      </div>
+      <hr />
+      <div v-for="(it, i) in lastReceipt.items" :key="i" class="receipt-row">
+        <span>{{ it.name }} x{{ it.qty }}</span>
+        <span>{{ rupiah(it.sell_price * it.qty) }}</span>
+      </div>
+      <hr />
+      <div class="receipt-row"><strong>TOTAL</strong><strong>{{ rupiah(lastReceipt.total) }}</strong></div>
+      <div v-if="lastReceipt.paidMethod === 'utang'" style="margin-top: 6px">Utang a.n. {{ lastReceipt.contactName }}</div>
+      <div style="text-align: center; margin-top: 10px">Terima kasih!</div>
+    </div>
   </div>
 </template>
+
+<style scoped>
+@media print {
+  .receipt-box {
+    display: block !important;
+  }
+}
+</style>
