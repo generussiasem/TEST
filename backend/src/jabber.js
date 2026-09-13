@@ -52,13 +52,32 @@ function extractAllReplies(buffer, targetBareJid, expectedRefToken) {
     const attrs = m[1];
     const inner = m[2];
     const fromMatch = attrs.match(/from=["']([^"']+)["']/);
+    // DIAGNOSTIK SEMENTARA: catat SETIAP stanza <message> yang lewat di buffer,
+    // cocok filter atau tidak — supaya kalau macet lagi, wrangler tail bisa
+    // menunjukkan apa SEBENARNYA yang diterima dari server (from-nya siapa,
+    // isinya apa), bukan cuma "timeout, tidak ada yang cocok". Hapus log ini
+    // kalau sudah tidak dibutuhkan lagi.
+    console.log(
+      "[jabber-debug] stanza <message> masuk — attrs:",
+      attrs,
+      "| body:",
+      (inner.match(/<body[^>]*>([\s\S]*?)<\/body>/) || [])[1] || inner.slice(0, 200)
+    );
     if (!fromMatch) continue;
     const fromBare = fromMatch[1].split("/")[0];
-    if (fromBare.toLowerCase() !== targetBareJid.toLowerCase()) continue; // bukan dari OkeConnect — kemungkinan carbon-copy diri sendiri, abaikan
+    if (fromBare.toLowerCase() !== targetBareJid.toLowerCase()) {
+      console.log(
+        `[jabber-debug] diabaikan: from="${fromBare}" tidak sama dengan target yang ditunggu "${targetBareJid}"`
+      );
+      continue; // bukan dari OkeConnect — kemungkinan carbon-copy diri sendiri, abaikan
+    }
     const isError = /type=["']error["']/.test(attrs);
     const bodyMatch = inner.match(/<body[^>]*>([\s\S]*?)<\/body>/);
     const text = bodyMatch ? bodyMatch[1] : inner;
     if (expectedRefToken && !isError && !text.includes(expectedRefToken)) {
+      console.log(
+        `[jabber-debug] diabaikan: body tidak mengandung ref token "${expectedRefToken}" — kemungkinan balasan transaksi lain. Isi: ${text.slice(0, 200)}`
+      );
       continue; // balasan ini untuk transaksi/permintaan LAIN — bukan punya kita, abaikan
     }
     if (isError) {
@@ -130,6 +149,11 @@ async function waitForFinalReply(reader, targetBareJid, expectedRefToken, timeou
     }
   }
   if (latest) return latest; // waktu habis, tapi setidaknya ada balasan (walau cuma ack)
+  // DIAGNOSTIK SEMENTARA: sertakan cuplikan buffer mentah (300 char terakhir)
+  // di pesan error, supaya kelihatan di log/console apakah stream benar-benar
+  // kosong (server sama sekali tidak kirim apa-apa) atau ada sesuatu masuk
+  // tapi bukan berupa <message> (mis. cuma whitespace keep-alive, atau iq lain).
+  console.log("[jabber-debug] TIMEOUT — buffer mentah 300 char terakhir:", buffer.slice(-300) || "(buffer kosong sama sekali)");
   throw new Error(`Timeout menunggu balasan XMPP dari ${targetBareJid} untuk ref ${expectedRefToken}, tidak ada pesan yang cocok diterima`);
 }
 
@@ -238,6 +262,7 @@ export async function sendJabberCommand({ jid, password, to, body }) {
 
     // 5. Kirim perintah transaksi sebagai stanza <message>
     const msgId = "trx-" + Date.now();
+    console.log(`[jabber-debug] mengirim ke "${to}" — body: ${body}`);
     await send(
       `<message id="${msgId}" to="${xmlEscape(to)}" type="chat">` +
         `<body>${xmlEscape(body)}</body></message>`
