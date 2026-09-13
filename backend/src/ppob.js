@@ -328,8 +328,11 @@ export async function finalizePpobOrder(env, { refId, sellPrice, costTotal, toke
  *
  * Kata kunci di tabel ppob_blocked_keywords (kelola lewat halaman Produk →
  * tab Produk PPOB → "Kata Kunci Diblokir") membuat produk yang kode/nama/
- * kategorinya cocok TIDAK ikut disinkron sama sekali — kalau sebelumnya
- * sudah aktif di katalog, otomatis dinonaktifkan begitu keyword ditambahkan.
+ * kategorinya cocok TIDAK ikut disinkron sama sekali. Kalau produk itu sudah
+ * pernah terdaftar sebelumnya, akan DIHAPUS PERMANEN dari tabel products —
+ * KECUALI kalau produk itu sudah pernah dipakai di transaksi manapun
+ * (transaction_items), yang mana cuma dinonaktifkan saja (sama seperti
+ * tombol "Nonaktifkan" manual) supaya laporan lama tidak jadi bolong/rusak.
  *
  * sell_price TIDAK lagi otomatis ditambah markup tetap — defaultnya SAMA
  * dengan cost_price (untung Rp0) supaya harga jual harus ditentukan sendiri
@@ -366,9 +369,11 @@ export async function syncPpobPrices(env) {
 
   // Ambil kondisi SEKARANG di database (semua produk OkeConnect, termasuk
   // yang sudah nonaktif) — dipakai buat bandingkan, bukan buat ditulis ulang.
+  // "id" ikut diambil supaya nanti bisa dicek riwayat transaksinya sebelum
+  // benar-benar dihapus (lihat blockedCodes di bawah).
   const existingMap = new Map();
   const { results: existingRows } = await env.DB.prepare(
-    "SELECT code, name, category, product_group, cost_price, active FROM products WHERE provider = 'okeconnect'"
+    "SELECT id, code, name, category, product_group, cost_price, active FROM products WHERE provider = 'okeconnect'"
   ).all();
   for (const row of existingRows) existingMap.set(row.code, row);
 
@@ -388,6 +393,7 @@ export async function syncPpobPrices(env) {
 
   const batchItems = [];
   const seenActiveCodes = new Set();
+  const blockedCodes = new Set(); // kode yang kena kata kunci PADA RUN INI — dipakai buat hapus permanen di bawah
   let skipped = 0;
   let blocked = 0;
   let unchanged = 0;
@@ -414,6 +420,7 @@ export async function syncPpobPrices(env) {
     }
     if (isBlocked(code, name, category)) {
       blocked++;
+      blockedCodes.add(code);
       continue;
     }
 
@@ -449,12 +456,55 @@ export async function syncPpobPrices(env) {
     }
   }
 
+  // Produk yang kena kata kunci blokir DAN sudah pernah tercatat di database
+  // sebelumnya → HAPUS PERMANEN (bukan cuma dinonaktifkan), asalkan belum
+  // pernah dipakai di transaksi manapun (transaction_items) — supaya laporan
+  // lama tidak jadi rusak/bolong. Kalau sudah pernah dipakai, tetap cuma
+  // dinonaktifkan (sama seperti tombol "Nonaktifkan" manual di halaman Produk).
+  const existingBlocked = existingRows.filter((r) => blockedCodes.has(r.code));
+  let blockedDeleted = 0;
+  let blockedKeptInactive = 0;
+  if (existingBlocked.length) {
+    const idPlaceholders = existingBlocked.map(() => "?").join(",");
+    const { results: usageRows } = await env.DB.prepare(
+      `SELECT product_id, COUNT(*) AS n FROM transaction_items WHERE product_id IN (${idPlaceholders}) GROUP BY product_id`
+    )
+      .bind(...existingBlocked.map((r) => r.id))
+      .all();
+    const usedProductIds = new Set(usageRows.map((r) => r.product_id));
+
+    const toDeleteIds = existingBlocked.filter((r) => !usedProductIds.has(r.id)).map((r) => r.id);
+    const toKeepInactive = existingBlocked.filter((r) => usedProductIds.has(r.id)).map((r) => r.code);
+
+    const DEL_CHUNK = 100;
+    for (let i = 0; i < toDeleteIds.length; i += DEL_CHUNK) {
+      const ids = toDeleteIds.slice(i, i + DEL_CHUNK);
+      const placeholders = ids.map(() => "?").join(",");
+      const res = await env.DB.prepare(`DELETE FROM products WHERE id IN (${placeholders})`)
+        .bind(...ids)
+        .run();
+      blockedDeleted += res.meta?.changes ?? 0;
+    }
+
+    for (let i = 0; i < toKeepInactive.length; i += DEL_CHUNK) {
+      const codes = toKeepInactive.slice(i, i + DEL_CHUNK);
+      const placeholders = codes.map(() => "?").join(",");
+      const res = await env.DB.prepare(
+        `UPDATE products SET active = 0, deactivated_at = datetime('now') WHERE provider = 'okeconnect' AND code IN (${placeholders})`
+      )
+        .bind(...codes)
+        .run();
+      blockedKeptInactive += res.meta?.changes ?? 0;
+    }
+  }
+
   // Produk yang sebelumnya aktif tapi TIDAK muncul lagi di daftar terbaru
-  // (hilang, status "0", ATAU sekarang kena filter kata kunci) → nonaktifkan.
-  // Dihitung dari data yang sudah kita ambil di memori (existingRows vs
-  // seenActiveCodes), BUKAN dari last_synced_at — supaya baris yang sengaja
-  // TIDAK ditulis (karena tidak berubah) tidak salah kena deaktivasi.
-  const toDeactivate = existingRows.filter((r) => r.active === 1 && !seenActiveCodes.has(r.code)).map((r) => r.code);
+  // (hilang dari sumber, ATAU muncul dengan status "0") → nonaktifkan seperti
+  // biasa. blockedCodes SUDAH ditangani terpisah di atas (hapus/nonaktifkan),
+  // jadi tidak diulang lagi di sini.
+  const toDeactivate = existingRows
+    .filter((r) => r.active === 1 && !seenActiveCodes.has(r.code) && !blockedCodes.has(r.code))
+    .map((r) => r.code);
   let deactivated = 0;
   const DEACT_CHUNK = 100;
   for (let i = 0; i < toDeactivate.length; i += DEACT_CHUNK) {
@@ -475,6 +525,8 @@ export async function syncPpobPrices(env) {
     unchanged,
     skipped,
     blocked,
+    blockedDeleted,
+    blockedKeptInactive,
     deactivated,
     lastError,
   };

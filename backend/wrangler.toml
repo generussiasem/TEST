@@ -30,7 +30,7 @@ crons = ["*/5 * * * *", "0 3 * * *", "0 23 * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "kasir-ppob-db"
-database_id = "16b154f7-7235-403e-9ddb-7dd1da4b20b7"
+database_id = "22e31388-c654-4bc4-8b3b-21e2fba11dcb"
 
 [vars]
 # Alamat Jabber tujuan transaksi. OkeConnect kasih 2 opsi:

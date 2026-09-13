@@ -222,8 +222,11 @@ async function syncPrices() {
     ppobOkMsg.value =
       `Sinkron selesai — ${res.synced} produk ditulis/diperbarui dari total ${res.total} di sumber` +
       (res.unchanged ? ` (${res.unchanged} sama persis, dilewati biar hemat kuota database)` : "") +
-      (res.blocked ? `, ${res.blocked} dilewati karena kena kata kunci blokir` : "") +
-      (res.deactivated ? `, ${res.deactivated} dinonaktifkan otomatis (sudah tidak ada di sumber/kena blokir)` : "") +
+      (res.blockedDeleted ? `, ${res.blockedDeleted} dihapus permanen karena kena kata kunci blokir` : "") +
+      (res.blockedKeptInactive
+        ? `, ${res.blockedKeptInactive} kena kata kunci blokir tapi dibiarkan nonaktif saja (sudah pernah tercatat di transaksi)`
+        : "") +
+      (res.deactivated ? `, ${res.deactivated} dinonaktifkan otomatis (sudah tidak ada di sumber)` : "") +
       (res.skipped ? `, ${res.skipped} dilewati karena data tidak lengkap` : "") +
       ".";
     ppobPage.value = 1;
@@ -353,8 +356,9 @@ onMounted(async () => {
         <h3 style="margin-bottom: 4px">Kata Kunci Diblokir dari Sinkron</h3>
         <p class="muted" style="font-size: 12.5px; margin-bottom: 10px">
           Produk yang kode, nama, ATAU kategorinya mengandung salah satu kata kunci di bawah ini tidak akan ikut
-          disinkron dari OkeConnect — kalau sebelumnya sudah aktif di katalog, otomatis dinonaktifkan begitu kata
-          kunci ini ditambahkan. Tidak peka huruf besar/kecil.
+          disinkron dari OkeConnect. Kalau produk itu sudah pernah terdaftar sebelumnya, saat sinkron berikutnya jalan
+          akan <strong>dihapus permanen</strong> dari katalog — kecuali kalau produk itu sudah pernah dipakai di
+          transaksi, maka cuma dinonaktifkan saja (biar laporan lama tidak rusak). Tidak peka huruf besar/kecil.
         </p>
         <form @submit.prevent="tambahKeyword" style="display: flex; gap: 8px; margin-bottom: 12px">
           <input v-model="newKeyword" placeholder="mis. GAME, VOUCHER GAME, PDAM KAB X" style="flex: 1" />
