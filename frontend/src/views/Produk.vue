@@ -96,6 +96,40 @@ const ppobShowAdd = ref(false);
 const blankPpob = () => ({ code: "", name: "", category: "", cost_price: 0, sell_price: 0, provider: "digiflazz" });
 const ppobAddForm = ref(blankPpob());
 
+// Kata kunci yang diblokir dari sinkronisasi PPOB — produk yang kode/nama/
+// kategorinya cocok tidak ikut disinkron sama sekali (lihat syncPpobPrices).
+const blockedKeywords = ref([]);
+const showBlocked = ref(false);
+const newKeyword = ref("");
+
+async function loadBlockedKeywords() {
+  blockedKeywords.value = await api.get("/api/ppob-blocked-keywords");
+}
+
+async function tambahKeyword() {
+  ppobError.value = "";
+  const kw = newKeyword.value.trim();
+  if (!kw) return;
+  try {
+    await api.post("/api/ppob-blocked-keywords", { keyword: kw });
+    newKeyword.value = "";
+    await loadBlockedKeywords();
+  } catch (err) {
+    ppobError.value = err.message;
+  }
+}
+
+async function hapusKeyword(k) {
+  if (!confirm(`Hapus kata kunci "${k.keyword}" dari daftar blokir?`)) return;
+  ppobError.value = "";
+  try {
+    await api.delete(`/api/ppob-blocked-keywords/${k.id}`);
+    await loadBlockedKeywords();
+  } catch (err) {
+    ppobError.value = err.message;
+  }
+}
+
 async function submitPpobAdd() {
   ppobError.value = "";
   try {
@@ -186,8 +220,10 @@ async function syncPrices() {
   try {
     const res = await api.post("/api/products/sync", {});
     ppobOkMsg.value =
-      `Sinkron selesai — ${res.synced} dari ${res.total} produk diperbarui` +
-      (res.deactivated ? `, ${res.deactivated} dinonaktifkan otomatis (sudah tidak ada di sumber)` : "") +
+      `Sinkron selesai — ${res.synced} produk ditulis/diperbarui dari total ${res.total} di sumber` +
+      (res.unchanged ? ` (${res.unchanged} sama persis, dilewati biar hemat kuota database)` : "") +
+      (res.blocked ? `, ${res.blocked} dilewati karena kena kata kunci blokir` : "") +
+      (res.deactivated ? `, ${res.deactivated} dinonaktifkan otomatis (sudah tidak ada di sumber/kena blokir)` : "") +
       (res.skipped ? `, ${res.skipped} dilewati karena data tidak lengkap` : "") +
       ".";
     ppobPage.value = 1;
@@ -202,6 +238,7 @@ async function syncPrices() {
 function switchTab(t) {
   tab.value = t;
   if (t === "ppob" && !ppobItems.value.length) loadPpob();
+  if (t === "ppob" && !blockedKeywords.value.length) loadBlockedKeywords();
 }
 
 onMounted(async () => {
@@ -309,6 +346,38 @@ onMounted(async () => {
       <div class="page-head">
         <button class="btn" @click="ppobShowAdd = !ppobShowAdd">{{ ppobShowAdd ? "Batal" : "+ Produk PPOB Manual" }}</button>
         <button class="btn ghost" :disabled="syncing" @click="syncPrices">{{ syncing ? "Sinkron…" : "Sinkron Harga PPOB (OkeConnect)" }}</button>
+        <button class="btn ghost" @click="showBlocked = !showBlocked">{{ showBlocked ? "Tutup" : "🚫 Kata Kunci Diblokir" }}</button>
+      </div>
+
+      <div v-if="showBlocked" class="card" style="margin-bottom: 18px">
+        <h3 style="margin-bottom: 4px">Kata Kunci Diblokir dari Sinkron</h3>
+        <p class="muted" style="font-size: 12.5px; margin-bottom: 10px">
+          Produk yang kode, nama, ATAU kategorinya mengandung salah satu kata kunci di bawah ini tidak akan ikut
+          disinkron dari OkeConnect — kalau sebelumnya sudah aktif di katalog, otomatis dinonaktifkan begitu kata
+          kunci ini ditambahkan. Tidak peka huruf besar/kecil.
+        </p>
+        <form @submit.prevent="tambahKeyword" style="display: flex; gap: 8px; margin-bottom: 12px">
+          <input v-model="newKeyword" placeholder="mis. GAME, VOUCHER GAME, PDAM KAB X" style="flex: 1" />
+          <button class="btn" type="submit">Tambah</button>
+        </form>
+        <div v-if="!blockedKeywords.length" class="muted" style="font-size: 13px">Belum ada kata kunci yang diblokir.</div>
+        <div v-else style="display: flex; flex-wrap: wrap; gap: 8px">
+          <span
+            v-for="k in blockedKeywords"
+            :key="k.id"
+            class="badge gagal"
+            style="display: inline-flex; align-items: center; gap: 6px; font-size: 13px; padding: 4px 10px"
+          >
+            {{ k.keyword }}
+            <button
+              type="button"
+              @click="hapusKeyword(k)"
+              style="background: none; border: none; cursor: pointer; color: inherit; font-weight: bold; padding: 0; line-height: 1"
+            >
+              ×
+            </button>
+          </span>
+        </div>
       </div>
 
       <div v-if="ppobShowAdd" class="card" style="margin-bottom: 18px">

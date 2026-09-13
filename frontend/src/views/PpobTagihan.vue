@@ -28,6 +28,7 @@ const idResults = ref([]);
 let idSearchTimer = null;
 
 const error = ref("");
+const activeProvider = ref("okeconnect"); // tab aktif: pisahkan transaksi OkeConnect & Digiflazz biar tidak ketuker
 
 // Kotak konfirmasi harga jual (dipakai bersama utk semua order sukses postpaid)
 const confirmTarget = ref(null);
@@ -40,7 +41,11 @@ function rupiah(n) {
 }
 
 const postpaidProducts = computed(() =>
-  products.value.filter((p) => (p.category === "TAGIHAN" || p.category === "AIR PDAM") && p.active !== 0)
+  products.value
+    .filter(
+      (p) => (p.category === "TAGIHAN" || p.category === "AIR PDAM") && p.active !== 0 && (p.provider || "okeconnect") === activeProvider.value
+    )
+    .sort((a, b) => (a.sell_price || 0) - (b.sell_price || 0))
 );
 const cekOptions = computed(() => {
   const q = cekSearch.value.toLowerCase();
@@ -60,11 +65,13 @@ const bayarOptions = computed(() => {
 // Order postpaid yang sudah sukses tapi belum dikonfirmasi (finalized = 0) —
 // biar kasir tidak lupa menuntaskan pencatatannya.
 const belumDicatat = computed(() =>
-  orders.value.filter((o) => o.status === "sukses" && !o.finalized && isPostpaidCode(o.product_code))
+  orders.value.filter((o) => o.status === "sukses" && !o.finalized && isPostpaidCode(o.product_code) && (o.provider || "okeconnect") === activeProvider.value)
 );
 
 const riwayatTagihan = computed(() =>
-  orders.value.filter((o) => isPostpaidCode(o.product_code)).sort((a, b) => b.id - a.id)
+  orders.value
+    .filter((o) => isPostpaidCode(o.product_code) && (o.provider || "okeconnect") === activeProvider.value)
+    .sort((a, b) => b.id - a.id)
 );
 
 const openedId = ref(null);
@@ -131,7 +138,10 @@ async function load() {
   contacts.value = c;
   if (route.query.code) {
     const match = products.value.find((x) => x.code === route.query.code);
-    if (match) pickCek(match);
+    if (match) {
+      activeProvider.value = match.provider || "okeconnect";
+      pickCek(match);
+    }
   }
 }
 
@@ -279,6 +289,12 @@ onMounted(load);
 
     <div v-if="error" class="error-box">{{ error }}</div>
 
+    <!-- Pisahkan transaksi per provider biar tidak ketuker -->
+    <div style="display: flex; gap: 8px; margin-bottom: 18px">
+      <button type="button" class="btn" :class="{ ghost: activeProvider !== 'okeconnect' }" @click="activeProvider = 'okeconnect'">OkeConnect</button>
+      <button type="button" class="btn" :class="{ ghost: activeProvider !== 'digiflazz' }" @click="activeProvider = 'digiflazz'">Digiflazz</button>
+    </div>
+
     <div v-if="belumDicatat.length" class="card" style="margin-bottom: 18px; border-color: var(--amber)">
       <h3 style="margin-bottom: 8px">⚠️ Ada {{ belumDicatat.length }} order sukses belum dikonfirmasi</h3>
       <p class="muted" style="font-size: 13px; margin-bottom: 10px">
@@ -417,7 +433,7 @@ onMounted(load);
     </div>
 
     <div class="card" style="margin-top: 22px">
-      <h3 style="margin-bottom: 12px">Riwayat Cek &amp; Bayar Tagihan</h3>
+      <h3 style="margin-bottom: 12px">Riwayat Cek &amp; Bayar Tagihan — {{ activeProvider === "digiflazz" ? "Digiflazz" : "OkeConnect" }}</h3>
       <table>
         <thead>
           <tr>

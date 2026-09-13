@@ -11,6 +11,7 @@ const contacts = ref([]);
 const error = ref("");
 const search = ref("");
 const openedId = ref(null);
+const activeProvider = ref("okeconnect"); // tab aktif: pisahkan transaksi OkeConnect & Digiflazz biar tidak ketuker
 
 // ---- Form tambah ke antrean ----
 const formProductCode = ref("");
@@ -89,7 +90,12 @@ async function cekUlang(o) {
   }
 }
 
-const ppobProducts = computed(() => products.value.filter((p) => p.code && p.active !== 0));
+const ppobProducts = computed(() =>
+  products.value
+    .filter((p) => p.code && p.active !== 0 && (p.provider || "okeconnect") === activeProvider.value)
+    .sort((a, b) => (a.sell_price || 0) - (b.sell_price || 0))
+);
+const filteredOrders = computed(() => orders.value.filter((o) => (o.provider || "okeconnect") === activeProvider.value));
 const searchResults = computed(() => {
   if (!search.value.trim()) return [];
   const q = search.value.toLowerCase();
@@ -107,7 +113,10 @@ async function load() {
   contacts.value = c;
   if (route.query.code) {
     const match = products.value.find((x) => x.code === route.query.code);
-    if (match) pick(match);
+    if (match) {
+      activeProvider.value = match.provider || "okeconnect";
+      pick(match);
+    }
   }
 }
 
@@ -269,6 +278,12 @@ onMounted(load);
 
     <div v-if="error" class="error-box">{{ error }}</div>
 
+    <!-- Pisahkan transaksi per provider biar tidak ketuker -->
+    <div style="display: flex; gap: 8px; margin-bottom: 18px">
+      <button type="button" class="btn" :class="{ ghost: activeProvider !== 'okeconnect' }" @click="activeProvider = 'okeconnect'">OkeConnect</button>
+      <button type="button" class="btn" :class="{ ghost: activeProvider !== 'digiflazz' }" @click="activeProvider = 'digiflazz'">Digiflazz</button>
+    </div>
+
     <div class="grid cols-2" style="align-items: start; margin-bottom: 22px">
       <div class="card">
         <h3 style="margin-bottom: 12px">Tambah ke Antrean</h3>
@@ -397,7 +412,7 @@ onMounted(load);
     </div>
 
     <div class="card">
-      <h3 style="margin-bottom: 12px">Riwayat Order</h3>
+      <h3 style="margin-bottom: 12px">Riwayat Order — {{ activeProvider === "digiflazz" ? "Digiflazz" : "OkeConnect" }}</h3>
       <table>
         <thead>
           <tr>
@@ -409,7 +424,7 @@ onMounted(load);
           </tr>
         </thead>
         <tbody>
-          <template v-for="o in orders" :key="o.id">
+          <template v-for="o in filteredOrders" :key="o.id">
             <tr @click="toggleDetail(o)" style="cursor: pointer">
               <td class="num">{{ o.ref_id }}</td>
               <td>{{ o.product_code }}</td>
@@ -482,8 +497,8 @@ onMounted(load);
               </td>
             </tr>
           </template>
-          <tr v-if="!orders.length">
-            <td colspan="5" class="muted">Belum ada order PPOB.</td>
+          <tr v-if="!filteredOrders.length">
+            <td colspan="5" class="muted">Belum ada order PPOB untuk provider ini.</td>
           </tr>
         </tbody>
       </table>

@@ -232,7 +232,7 @@ app.get("/api/products", async (c) => {
       .bind(...params)
       .first();
     const { results } = await c.env.DB.prepare(
-      `SELECT * FROM products ${whereSql} ORDER BY active DESC, name ASC LIMIT ? OFFSET ?`
+      `SELECT * FROM products ${whereSql} ORDER BY active DESC, sell_price ASC LIMIT ? OFFSET ?`
     )
       .bind(...params, pageSize, offset)
       .all();
@@ -417,6 +417,31 @@ app.get("/api/contact-ids", async (c) => {
 app.post("/api/products/sync", async (c) => {
   const result = await syncPpobPrices(c.env);
   return c.json(result, result.ok ? 200 : (result.error?.includes("PRICE_LIST_URL") ? 400 : 502));
+});
+
+// Kata kunci yang diblokir dari sinkronisasi PPOB OkeConnect — lihat
+// syncPpobPrices di ppob.js untuk cara pencocokannya (case-insensitive,
+// substring, ke kode+nama+kategori produk sumber).
+app.get("/api/ppob-blocked-keywords", async (c) => {
+  const { results } = await c.env.DB.prepare("SELECT * FROM ppob_blocked_keywords ORDER BY keyword").all();
+  return c.json(results);
+});
+
+app.post("/api/ppob-blocked-keywords", async (c) => {
+  const { keyword } = await c.req.json();
+  const trimmed = (keyword || "").trim();
+  if (!trimmed) return c.json({ ok: false, error: "Kata kunci tidak boleh kosong" }, 400);
+  try {
+    await c.env.DB.prepare("INSERT INTO ppob_blocked_keywords (keyword) VALUES (?)").bind(trimmed).run();
+    return c.json({ ok: true });
+  } catch (err) {
+    return c.json({ ok: false, error: err.message.includes("UNIQUE") ? "Kata kunci ini sudah ada" : err.message }, 400);
+  }
+});
+
+app.delete("/api/ppob-blocked-keywords/:id", async (c) => {
+  await c.env.DB.prepare("DELETE FROM ppob_blocked_keywords WHERE id = ?").bind(c.req.param("id")).run();
+  return c.json({ ok: true });
 });
 
 app.get("/api/transactions", async (c) => {
@@ -1354,7 +1379,7 @@ export default {
   async scheduled(event, env, ctx) {
     if (event.cron === "0 3 * * *") {
       ctx.waitUntil(cleanupOldData(env));
-    } else if (event.cron === "0 */8 * * *") {
+    } else if (event.cron === "0 23 * * *") {
       ctx.waitUntil(syncPpobPrices(env));
     } else {
       ctx.waitUntil(checkPendingOrders(env));

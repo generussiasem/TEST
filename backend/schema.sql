@@ -166,3 +166,13 @@ CREATE TABLE IF NOT EXISTS bot_sessions (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Kata kunci yang diblokir dari sinkronisasi harga PPOB OkeConnect (dicocokkan
+-- case-insensitive ke kode/nama/kategori produk sumber) — lihat syncPpobPrices
+-- di backend/src/ppob.js. Produk yang cocok TIDAK ikut masuk/diperbarui, dan
+-- kalau sebelumnya sudah aktif di katalog, otomatis dinonaktifkan.
+CREATE TABLE IF NOT EXISTS ppob_blocked_keywords (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  keyword TEXT UNIQUE NOT NULL,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+

@@ -20,12 +20,19 @@ import { sendJabberCommand } from "./jabber.js";
 //   Karena tidak ada trx id, "cek status" ulang utk transaksi bayar TIDAK
 //   didukung otomatis di sini (lihat recheckOrder di index.js) — beresiko
 //   dobel-bayar kalau command "bayar." dikirim ulang begitu saja.
+// CATATAN: banyak yang pakai SATU akun Jabber pribadi yang sudah "berteman"
+// dengan H2H beberapa provider sekaligus (mis. ysudarto@jabb.im terhubung ke
+// H2H OkeConnect DAN Digiflazz). Kalau begitu, isi JABBER_JID/PASSWORD saja
+// dan biarkan DIGIFLAZZ_JABBER_JID/PASSWORD kosong — otomatis dipakaikan
+// kredensial yang sama di bawah ini. PIN tetap wajib diisi TERPISAH per
+// provider (itu kode rahasia dari masing-masing H2H, bukan bagian dari login
+// akun Jabber), begitu juga `target` (JID resmi tiap provider yang dituju).
 export function getProviderConfig(env, provider) {
   if (provider === "digiflazz") {
     return {
       provider: "digiflazz",
-      jid: env.DIGIFLAZZ_JABBER_JID,
-      password: env.DIGIFLAZZ_JABBER_PASSWORD,
+      jid: env.DIGIFLAZZ_JABBER_JID || env.JABBER_JID,
+      password: env.DIGIFLAZZ_JABBER_PASSWORD || env.JABBER_PASSWORD,
       pin: env.DIGIFLAZZ_JABBER_PIN,
       target: env.DIGIFLAZZ_JABBER_TARGET,
       buildPrabayarBody(productCode, target, pin, refId) {
@@ -306,10 +313,23 @@ export async function finalizePpobOrder(env, { refId, sellPrice, costTotal, toke
 /** Ambil daftar harga terbaru dari OkeConnect dan sinkronkan ke tabel products
  * (upsert + soft-delete otomatis kode yang sudah hilang dari sumber). Dipakai
  * baik oleh endpoint manual (tombol "Sinkron Harga PPOB") maupun cron otomatis
- * tiap 8 jam. HANYA untuk provider OkeConnect — produk provider=digiflazz
- * ditambahkan/diedit manual lewat CRUD /api/products untuk sekarang (lihat
- * catatan di getProviderConfig soal belum jelasnya format balasan "H." Jabber
- * Digiflazz untuk sinkronisasi otomatis).
+ * (sekali sehari jam 6 pagi WIB). HANYA untuk provider OkeConnect — produk
+ * provider=digiflazz ditambahkan/diedit manual lewat CRUD /api/products untuk
+ * sekarang (lihat catatan di getProviderConfig soal belum jelasnya format
+ * balasan "H." Jabber Digiflazz untuk sinkronisasi otomatis).
+ *
+ * PENTING (dioptimalkan setelah kena limit "rows written" harian D1 free
+ * tier): daftar harga OkeConnect isinya ribuan kode produk, dan SEBELUMNYA
+ * fungsi ini menulis ULANG semua baris itu tiap kali jalan walau harganya
+ * sama persis — itu yang bikin kena limit 100rb baris/hari. Sekarang fungsi
+ * ini BANDINGKAN dulu dengan data yang sudah ada, dan CUMA menulis baris yang
+ * benar-benar baru/berubah/reaktif — biasanya cuma sebagian kecil dari
+ * seluruh daftar tiap kali sinkron.
+ *
+ * Kata kunci di tabel ppob_blocked_keywords (kelola lewat halaman Produk →
+ * tab Produk PPOB → "Kata Kunci Diblokir") membuat produk yang kode/nama/
+ * kategorinya cocok TIDAK ikut disinkron sama sekali — kalau sebelumnya
+ * sudah aktif di katalog, otomatis dinonaktifkan begitu keyword ditambahkan.
  *
  * sell_price TIDAK lagi otomatis ditambah markup tetap — defaultnya SAMA
  * dengan cost_price (untung Rp0) supaya harga jual harus ditentukan sendiri
@@ -332,8 +352,27 @@ export async function syncPpobPrices(env) {
     return { ok: false, error: "Gagal ambil/baca daftar harga: " + err.message };
   }
 
-  const runStartedAt = new Date().toISOString();
+  // Kata kunci yang diblokir (mis. kategori/produk yang tidak mau dijual toko
+  // ini) — dicocokkan case-insensitive ke kode, nama, ATAU kategori. Produk
+  // yang cocok diperlakukan sama seperti status="0" (dilewati, dan kalau
+  // sebelumnya sudah aktif, otomatis dinonaktifkan di bagian bawah).
+  const { results: blockedRows } = await env.DB.prepare("SELECT keyword FROM ppob_blocked_keywords").all();
+  const blockedKeywords = blockedRows.map((r) => r.keyword.toLowerCase()).filter(Boolean);
+  function isBlocked(code, name, category) {
+    if (!blockedKeywords.length) return false;
+    const haystack = `${code} ${name} ${category || ""}`.toLowerCase();
+    return blockedKeywords.some((kw) => haystack.includes(kw));
+  }
 
+  // Ambil kondisi SEKARANG di database (semua produk OkeConnect, termasuk
+  // yang sudah nonaktif) — dipakai buat bandingkan, bukan buat ditulis ulang.
+  const existingMap = new Map();
+  const { results: existingRows } = await env.DB.prepare(
+    "SELECT code, name, category, product_group, cost_price, active FROM products WHERE provider = 'okeconnect'"
+  ).all();
+  for (const row of existingRows) existingMap.set(row.code, row);
+
+  const runStartedAt = new Date().toISOString();
   const stmt = env.DB.prepare(
     `INSERT INTO products (code, name, category, product_group, cost_price, sell_price, active, deactivated_at, last_synced_at, provider)
      VALUES (?, ?, ?, ?, ?, ?, 1, NULL, ?, 'okeconnect')
@@ -348,7 +387,11 @@ export async function syncPpobPrices(env) {
   );
 
   const batchItems = [];
+  const seenActiveCodes = new Set();
   let skipped = 0;
+  let blocked = 0;
+  let unchanged = 0;
+
   for (const item of list) {
     const code = item.kode || item.code || item.product_code;
     const name = item.keterangan || item.produk || item.nama || item.name;
@@ -369,6 +412,27 @@ export async function syncPpobPrices(env) {
       skipped++;
       continue;
     }
+    if (isBlocked(code, name, category)) {
+      blocked++;
+      continue;
+    }
+
+    seenActiveCodes.add(code);
+
+    const existing = existingMap.get(code);
+    const changed =
+      !existing ||
+      existing.active !== 1 ||
+      existing.name !== name ||
+      existing.category !== category ||
+      existing.product_group !== productGroup ||
+      Number(existing.cost_price) !== cost;
+
+    if (!changed) {
+      unchanged++;
+      continue;
+    }
+
     batchItems.push(stmt.bind(code, name, category, productGroup, cost, sell, runStartedAt));
   }
 
@@ -385,19 +449,33 @@ export async function syncPpobPrices(env) {
     }
   }
 
-  const deactivateRes = await env.DB.prepare(
-    `UPDATE products SET active = 0, deactivated_at = datetime('now')
-     WHERE code IS NOT NULL AND active = 1 AND (last_synced_at IS NULL OR last_synced_at < ?)`
-  )
-    .bind(runStartedAt)
-    .run();
+  // Produk yang sebelumnya aktif tapi TIDAK muncul lagi di daftar terbaru
+  // (hilang, status "0", ATAU sekarang kena filter kata kunci) → nonaktifkan.
+  // Dihitung dari data yang sudah kita ambil di memori (existingRows vs
+  // seenActiveCodes), BUKAN dari last_synced_at — supaya baris yang sengaja
+  // TIDAK ditulis (karena tidak berubah) tidak salah kena deaktivasi.
+  const toDeactivate = existingRows.filter((r) => r.active === 1 && !seenActiveCodes.has(r.code)).map((r) => r.code);
+  let deactivated = 0;
+  const DEACT_CHUNK = 100;
+  for (let i = 0; i < toDeactivate.length; i += DEACT_CHUNK) {
+    const codes = toDeactivate.slice(i, i + DEACT_CHUNK);
+    const placeholders = codes.map(() => "?").join(",");
+    const res = await env.DB.prepare(
+      `UPDATE products SET active = 0, deactivated_at = datetime('now') WHERE provider = 'okeconnect' AND code IN (${placeholders})`
+    )
+      .bind(...codes)
+      .run();
+    deactivated += res.meta?.changes ?? 0;
+  }
 
   return {
     ok: true,
     synced: count,
     total: list.length,
+    unchanged,
     skipped,
-    deactivated: deactivateRes.meta?.changes ?? 0,
+    blocked,
+    deactivated,
     lastError,
   };
 }

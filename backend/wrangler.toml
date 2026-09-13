@@ -18,7 +18,14 @@ keep_vars = true
 # jadwal tiap 8 jam untuk sinkron otomatis harga PPOB (lihat scheduled() di
 # index.js — event.cron dipakai untuk membedakan ketiganya).
 [triggers]
-crons = ["*/5 * * * *", "0 3 * * *", "0 */8 * * *"]
+# */5 * * * *  -> cek ulang status order PPOB yang masih pending (tiap 5 menit)
+# 0 3 * * *    -> bersih-bersih data lama (jam 10 pagi WIB)
+# 0 23 * * *   -> sinkron harga PPOB OkeConnect, SEKALI SEHARI jam 06:00 WIB
+#                 (23:00 UTC = 06:00 WIB, karena WIB = UTC+7). Sengaja tidak
+#                 sering-sering — sinkron sekarang cuma menulis baris yang
+#                 berubah (lihat syncPpobPrices di ppob.js), tapi tetap ada
+#                 biaya baca+kirim ke API OkeConnect tiap kali jalan.
+crons = ["*/5 * * * *", "0 3 * * *", "0 23 * * *"]
 
 [[d1_databases]]
 binding = "DB"

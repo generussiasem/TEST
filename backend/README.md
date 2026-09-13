@@ -94,12 +94,25 @@ Worker, sedangkan Jabber tidak mensyaratkan itu sama sekali.
    alamat baku untuk semua buyer — WAJIB dicek di akun Anda sendiri).
 3. Isi secrets berikut:
    ```
-   wrangler secret put DIGIFLAZZ_JABBER_JID
-   wrangler secret put DIGIFLAZZ_JABBER_PASSWORD
    wrangler secret put DIGIFLAZZ_JABBER_PIN
    ```
    Lalu isi `DIGIFLAZZ_JABBER_TARGET` di `wrangler.toml` (`[vars]`) dengan ID
    Jabber center Digiflazz dari langkah 2, lalu `wrangler deploy`.
+
+   **Kalau akun Jabber Anda (JID di langkah 1) sudah dipakai/"berteman" dengan
+   H2H beberapa provider sekaligus** (satu akun Jabber pribadi terhubung ke
+   OkeConnect DAN Digiflazz, bukan 2 akun terpisah) — cukup segitu saja,
+   TIDAK perlu isi `DIGIFLAZZ_JABBER_JID`/`DIGIFLAZZ_JABBER_PASSWORD`, karena
+   otomatis dipakaikan `JABBER_JID`/`JABBER_PASSWORD` yang sama dengan
+   OkeConnect. PIN tetap wajib diisi terpisah (`DIGIFLAZZ_JABBER_PIN`) karena
+   itu kode rahasia dari Digiflazz sendiri, bukan bagian dari login Jabber.
+
+   Kalau sebaliknya Anda pakai 2 akun Jabber yang benar-benar berbeda untuk
+   tiap provider, isi juga:
+   ```
+   wrangler secret put DIGIFLAZZ_JABBER_JID
+   wrangler secret put DIGIFLAZZ_JABBER_PASSWORD
+   ```
 4. Jalankan migrasi `migrasi-fitur-digiflazz.sql` sekali ke database yang
    sudah berjalan (kalau database baru, `schema.sql` sudah termasuk semua ini).
 5. Tambahkan produk Digiflazz manual lewat halaman **Produk** (atau
