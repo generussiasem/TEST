@@ -338,9 +338,12 @@ onMounted(load);
 
         <div v-if="batchResults.length" style="margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px">
           <p class="muted" style="font-size: 12.5px; margin-bottom: 6px">Hasil batch terakhir:</p>
-          <div v-for="(r, i) in batchResults" :key="i" style="display: flex; justify-content: space-between; padding: 4px 0; font-size: 13.5px">
-            <span>{{ r.name }} ({{ r.target }})</span>
-            <span class="badge" :class="r.status">{{ r.status }}</span>
+          <div v-for="(r, i) in batchResults" :key="i" style="padding: 4px 0; font-size: 13.5px">
+            <div style="display: flex; justify-content: space-between">
+              <span>{{ r.name }} ({{ r.target }})</span>
+              <span class="badge" :class="r.status">{{ r.status }}</span>
+            </div>
+            <div v-if="r.status === 'error' || r.reply" class="muted" style="font-size: 12px; margin-top: 2px">{{ r.error || r.reply }}</div>
           </div>
         </div>
       </div>

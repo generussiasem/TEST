@@ -94,6 +94,26 @@ function extractTokenCode(reply) {
   return match ? match[1] : null;
 }
 
+// Cek kelengkapan config SEBELUM kirim apapun ke Jabber — supaya kalau ada
+// secret yang belum diisi (mis. lupa bikin DIGIFLAZZ_JABBER_PIN terpisah dan
+// mengira otomatis ikut punya OkeConnect), errornya jelas dan LANGSUNG ("PIN
+// belum dikonfigurasi"), bukan diam-diam mengirim literal string "undefined"
+// ke server lalu bingung kenapa selalu gagal/timeout tanpa penjelasan.
+function assertCfgComplete(cfg) {
+  const envNames =
+    cfg.provider === "digiflazz"
+      ? { jid: "DIGIFLAZZ_JABBER_JID atau JABBER_JID", password: "DIGIFLAZZ_JABBER_PASSWORD atau JABBER_PASSWORD", pin: "DIGIFLAZZ_JABBER_PIN", target: "DIGIFLAZZ_JABBER_TARGET" }
+      : { jid: "JABBER_JID", password: "JABBER_PASSWORD", pin: "JABBER_PIN", target: "JABBER_TARGET" };
+  const missing = ["jid", "password", "pin", "target"].filter((k) => !cfg[k]);
+  if (missing.length) {
+    throw new Error(
+      `Konfigurasi provider "${cfg.provider}" belum lengkap — secret/var berikut masih kosong: ` +
+        missing.map((k) => envNames[k]).join(", ") +
+        `. Isi dulu lewat Cloudflare Settings > Variables and Secrets, lalu coba lagi.`
+    );
+  }
+}
+
 /** Kirim command "Cek" (cek tagihan/cek nama pelanggan) — TIDAK memotong saldo
  * dan TIDAK memengaruhi laporan keuangan, tapi tetap DISIMPAN ke ppob_orders
  * (status 'cek') supaya balasannya bisa dilihat lagi lain waktu.
@@ -107,6 +127,7 @@ export async function cekTagihan(env, { productCode, target }) {
     throw new Error(`Kode produk "${productCode}" tidak ditemukan.`);
   }
   const cfg = getProviderConfig(env, product.provider);
+  assertCfgComplete(cfg);
   const refId = "CEK" + Date.now();
   // Digiflazz: command "cek." khusus pascabayar, tidak pakai refId sama sekali.
   // OkeConnect: perilaku lama tidak berubah (suffix "A" kalau kategori pascabayar).
@@ -153,6 +174,7 @@ export async function placePpobOrder(env, { productCode, target, paidMethod = "t
   }
 
   const cfg = getProviderConfig(env, product.provider);
+  assertCfgComplete(cfg);
   const wallet = await env.DB.prepare(
     "SELECT * FROM wallets WHERE type = 'distributor_ppob' AND provider = ? LIMIT 1"
   )

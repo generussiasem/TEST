@@ -44,7 +44,7 @@ function xmlEscape(str) {
 // jadi otomatis mengandung ref_id kita sendiri juga — tetap lolos filter ini),
 // dan "from"-nya pun tetap JID tujuan — padahal itu tandanya pesan GAGAL
 // terkirim ke OkeConnect, bukan balasan sukses.
-function extractAllReplies(buffer, targetBareJid, expectedRefToken) {
+function extractAllReplies(buffer, targetBareJid, expectedRefToken, expectedPrefix) {
   const regex = /<message\b([^>]*)>([\s\S]*?)<\/message>/g;
   const out = [];
   let m;
@@ -74,9 +74,18 @@ function extractAllReplies(buffer, targetBareJid, expectedRefToken) {
     const isError = /type=["']error["']/.test(attrs);
     const bodyMatch = inner.match(/<body[^>]*>([\s\S]*?)<\/body>/);
     const text = bodyMatch ? bodyMatch[1] : inner;
-    if (expectedRefToken && !isError && !text.includes(expectedRefToken)) {
+    // Beberapa balasan GAGAL langsung (mis. "saldo kurang") dari OkeConnect
+    // TIDAK menyertakan ref ID (R#...) sama sekali — cuma "KODE.NOMOR GAGAL...".
+    // Ref token tetap dicek DULU (paling akurat), tapi kalau tidak ketemu,
+    // terima juga kalau body diawali persis KODE.NOMOR yang barusan kita
+    // kirim (expectedPrefix) — jauh lebih spesifik daripada asal terima semua
+    // balasan dari target yang sama, jadi resiko "ketuker" transaksi lain yang
+    // kebetulan jalan bersamaan tetap kecil.
+    const matchesRef = expectedRefToken && text.includes(expectedRefToken);
+    const matchesPrefix = expectedPrefix && text.startsWith(expectedPrefix);
+    if (!isError && expectedRefToken && !matchesRef && !matchesPrefix) {
       console.log(
-        `[jabber-debug] diabaikan: body tidak mengandung ref token "${expectedRefToken}" — kemungkinan balasan transaksi lain. Isi: ${text.slice(0, 200)}`
+        `[jabber-debug] diabaikan: body tidak mengandung ref token "${expectedRefToken}" maupun prefix "${expectedPrefix}" — kemungkinan balasan transaksi lain. Isi: ${text.slice(0, 200)}`
       );
       continue; // balasan ini untuk transaksi/permintaan LAIN — bukan punya kita, abaikan
     }
@@ -125,7 +134,7 @@ async function readUntil(reader, predicate, timeoutMs = 15000) {
 // Kalau waktu habis dan yang ada cuma ack, tetap kembalikan ack itu (lebih baik
 // daripada tidak ada informasi apa pun) sambil biarkan cron checkPendingOrders
 // menyusuri hasil aslinya nanti.
-async function waitForFinalReply(reader, targetBareJid, expectedRefToken, timeoutMs = 25000) {
+async function waitForFinalReply(reader, targetBareJid, expectedRefToken, expectedPrefix, timeoutMs = 25000) {
   let buffer = "";
   const decoder = new TextDecoder();
   const deadline = Date.now() + timeoutMs;
@@ -139,7 +148,7 @@ async function waitForFinalReply(reader, targetBareJid, expectedRefToken, timeou
     if (done) break;
     if (value === undefined) continue;
     buffer += decoder.decode(value, { stream: true });
-    const replies = extractAllReplies(buffer, targetBareJid, expectedRefToken);
+    const replies = extractAllReplies(buffer, targetBareJid, expectedRefToken, expectedPrefix);
     if (replies.length) {
       latest = replies[replies.length - 1];
       if (latest.isError || FINAL_REPLY_KEYWORDS.test(latest.text)) {
@@ -275,7 +284,13 @@ export async function sendJabberCommand({ jid, password, to, body }) {
     const targetBareJid = to.split("/")[0];
     const refTokenMatch = body.match(/R#([A-Za-z0-9]+)/);
     const expectedRefToken = refTokenMatch ? refTokenMatch[1] : null;
-    const parsed = await waitForFinalReply(reader, targetBareJid, expectedRefToken, 25000);
+    // Fallback kalau balasan tidak menyertakan ref ID (mis. gagal langsung
+    // karena saldo kurang) — "KODE.NOMOR" adalah dua segmen pertama body kita
+    // sendiri (format semua provider di ppob.js: KODE.NOMOR.PIN[...]), dan
+    // OkeConnect selalu mengulang persis "KODE.NOMOR" di awal balasannya.
+    const bodySegments = body.split(".");
+    const expectedPrefix = bodySegments.length >= 2 ? `${bodySegments[0]}.${bodySegments[1]}` : null;
+    const parsed = await waitForFinalReply(reader, targetBareJid, expectedRefToken, expectedPrefix, 25000);
     if (parsed.isError) {
       throw new Error(parsed.text);
     }
