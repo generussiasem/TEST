@@ -112,13 +112,6 @@ onMounted(load);
                 <option value="distributor_ppob">Distributor PPOB</option>
               </select>
             </div>
-            <div class="field" v-if="walletForm.type === 'distributor_ppob'">
-              <label>Provider</label>
-              <select v-model="walletForm.provider">
-                <option value="okeconnect">OkeConnect</option>
-                <option value="digiflazz">Digiflazz</option>
-              </select>
-            </div>
             <div class="field"><label>Saldo Awal</label><input v-model.number="walletForm.balance" type="number" min="0" /></div>
           </div>
           <button class="btn" type="submit">Tambah Akun</button>
@@ -146,10 +139,6 @@ onMounted(load);
                   <option value="umum">Umum</option>
                   <option value="distributor_ppob">Distributor PPOB</option>
                 </select>
-                <select v-if="editingWallet.type === 'distributor_ppob'" v-model="editingWallet.provider" style="margin-top: 4px">
-                  <option value="okeconnect">OkeConnect</option>
-                  <option value="digiflazz">Digiflazz</option>
-                </select>
               </td>
               <td><input v-model.number="editingWallet.balance" type="number" style="width: 110px" /></td>
               <td style="white-space: nowrap">
@@ -161,9 +150,7 @@ onMounted(load);
               <td>{{ w.name }}</td>
               <td>
                 {{ w.type === "distributor_ppob" ? "Distributor PPOB" : "Umum" }}
-                <span v-if="w.type === 'distributor_ppob'" class="muted" style="font-size: 12px">
-                  ({{ w.provider === "digiflazz" ? "Digiflazz" : "OkeConnect" }})
-                </span>
+                <span v-if="w.type === 'distributor_ppob'" class="muted" style="font-size: 12px"> (OkeConnect) </span>
               </td>
               <td class="num">{{ rupiah(w.balance) }}</td>
               <td style="white-space: nowrap">

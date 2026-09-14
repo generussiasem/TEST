@@ -11,7 +11,6 @@ const contacts = ref([]);
 const error = ref("");
 const search = ref("");
 const openedId = ref(null);
-const activeProvider = ref("okeconnect"); // tab aktif: pisahkan transaksi OkeConnect & Digiflazz biar tidak ketuker
 
 // ---- Form tambah ke antrean ----
 const formProductCode = ref("");
@@ -92,10 +91,10 @@ async function cekUlang(o) {
 
 const ppobProducts = computed(() =>
   products.value
-    .filter((p) => p.code && p.active !== 0 && (p.provider || "okeconnect") === activeProvider.value)
+    .filter((p) => p.code && p.active !== 0)
     .sort((a, b) => (a.sell_price || 0) - (b.sell_price || 0))
 );
-const filteredOrders = computed(() => orders.value.filter((o) => (o.provider || "okeconnect") === activeProvider.value));
+const filteredOrders = computed(() => orders.value);
 const searchResults = computed(() => {
   if (!search.value.trim()) return [];
   const q = search.value.toLowerCase();
@@ -114,7 +113,6 @@ async function load() {
   if (route.query.code) {
     const match = products.value.find((x) => x.code === route.query.code);
     if (match) {
-      activeProvider.value = match.provider || "okeconnect";
       pick(match);
     }
   }
@@ -272,17 +270,11 @@ onMounted(load);
     <div class="page-head">
       <div>
         <h1>Pulsa &amp; PPOB</h1>
-        <p>Order dikirim ke provider (OkeConnect/Digiflazz) lewat Jabber — bisa antre beberapa produk sekaligus</p>
+        <p>Order dikirim ke OkeConnect lewat Jabber — bisa antre beberapa produk sekaligus</p>
       </div>
     </div>
 
     <div v-if="error" class="error-box">{{ error }}</div>
-
-    <!-- Pisahkan transaksi per provider biar tidak ketuker -->
-    <div style="display: flex; gap: 8px; margin-bottom: 18px">
-      <button type="button" class="btn" :class="{ ghost: activeProvider !== 'okeconnect' }" @click="activeProvider = 'okeconnect'">OkeConnect</button>
-      <button type="button" class="btn" :class="{ ghost: activeProvider !== 'digiflazz' }" @click="activeProvider = 'digiflazz'">Digiflazz</button>
-    </div>
 
     <div class="grid cols-2" style="align-items: start; margin-bottom: 22px">
       <div class="card">
@@ -415,7 +407,7 @@ onMounted(load);
     </div>
 
     <div class="card">
-      <h3 style="margin-bottom: 12px">Riwayat Order — {{ activeProvider === "digiflazz" ? "Digiflazz" : "OkeConnect" }}</h3>
+      <h3 style="margin-bottom: 12px">Riwayat Order — OkeConnect</h3>
       <table>
         <thead>
           <tr>

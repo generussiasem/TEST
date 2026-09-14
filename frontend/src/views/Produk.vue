@@ -88,12 +88,10 @@ const ppobError = ref("");
 const ppobOkMsg = ref("");
 const syncing = ref(false);
 
-// Tambah produk PPOB MANUAL — dipakai terutama untuk provider "digiflazz"
-// (belum ada sinkron otomatis untuk Digiflazz, lihat README backend).
-// Produk provider "okeconnect" biasanya cukup lewat tombol "Sinkron Harga
-// PPOB", tapi tombol tambah manual ini tetap boleh dipakai kalau perlu.
+// Tambah produk PPOB MANUAL — tombol tambah manual ini tetap boleh dipakai
+// kalau perlu, walau biasanya sinkron lewat tombol "Sinkron Harga PPOB".
 const ppobShowAdd = ref(false);
-const blankPpob = () => ({ code: "", name: "", category: "", cost_price: 0, sell_price: 0, provider: "digiflazz" });
+const blankPpob = () => ({ code: "", name: "", category: "", cost_price: 0, sell_price: 0, provider: "okeconnect" });
 const ppobAddForm = ref(blankPpob());
 
 // Kata kunci yang diblokir dari sinkronisasi PPOB — produk yang kode/nama/
@@ -387,7 +385,7 @@ onMounted(async () => {
       <div v-if="ppobShowAdd" class="card" style="margin-bottom: 18px">
         <h3 style="margin-bottom: 12px">Tambah Produk PPOB Manual</h3>
         <p class="muted" style="font-size: 12.5px; margin-bottom: 10px">
-          Dipakai terutama untuk produk provider Digiflazz (belum ada sinkron otomatis).
+          Dipakai untuk produk yang belum ikut sinkron otomatis.
         </p>
         <form @submit.prevent="submitPpobAdd">
           <div class="form-row">
@@ -396,13 +394,6 @@ onMounted(async () => {
           </div>
           <div class="form-row">
             <div class="field"><label>Kode produk (SKU)</label><input v-model="ppobAddForm.code" required /></div>
-            <div class="field">
-              <label>Provider</label>
-              <select v-model="ppobAddForm.provider">
-                <option value="digiflazz">Digiflazz</option>
-                <option value="okeconnect">OkeConnect</option>
-              </select>
-            </div>
           </div>
           <div class="form-row">
             <div class="field"><label>Harga Modal</label><input v-model.number="ppobAddForm.cost_price" type="number" min="0" /></div>
@@ -439,10 +430,7 @@ onMounted(async () => {
                 <td><input v-model="ppobEditing.name" /></td>
                 <td class="muted num" style="font-size: 12.5px">{{ p.code }}</td>
                 <td>
-                  <select v-model="ppobEditing.provider" style="width: 110px">
-                    <option value="okeconnect">OkeConnect</option>
-                    <option value="digiflazz">Digiflazz</option>
-                  </select>
+                  <span class="badge">OkeConnect</span>
                 </td>
                 <td><input v-model.number="ppobEditing.cost_price" type="number" style="width: 90px" /></td>
                 <td><input v-model.number="ppobEditing.sell_price" type="number" style="width: 90px" /></td>
@@ -459,7 +447,7 @@ onMounted(async () => {
                 </td>
                 <td class="muted num" style="font-size: 12.5px">{{ p.code }}</td>
                 <td>
-                  <span class="badge" :class="p.provider === 'digiflazz' ? 'sukses' : ''">{{ p.provider === 'digiflazz' ? 'Digiflazz' : 'OkeConnect' }}</span>
+                  <span class="badge sukses">OkeConnect</span>
                 </td>
                 <td class="num">{{ rupiah(p.cost_price) }}</td>
                 <td class="num">{{ rupiah(p.sell_price) }}</td>
