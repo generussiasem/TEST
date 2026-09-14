@@ -1,54 +1,13 @@
 import { sendJabberCommand } from "./jabber.js";
 
 // ---------------------------------------------------------------------------
-// Konfigurasi per-provider PPOB (jalur Jabber). OkeConnect & Digiflazz jalan
-// BERDAMPINGAN — dipilih per-produk lewat kolom products.provider, BUKAN
-// pengaturan global. Semua lewat Jabber (bukan REST API Digiflazz) karena
-// REST API mewajibkan whitelist IP statis yang tidak tersedia di Cloudflare
-// Worker, sedangkan Jabber tidak mensyaratkan itu.
-//
-// CATATAN JUJUR (belum pernah diuji ke server Digiflazz asli — format diambil
-// dari developer.digiflazz.com/jabber/):
-// - Prabayar (pulsa/kuota/token): "KODE.NOMOR.PIN R#TRXID" (SPASI sebelum R#,
-//   beda dari OkeConnect yang pakai TITIK). Cek status = kirim ULANG persis
-//   body yang sama (Trxid sama), bukan command "CEK.R#" seperti OkeConnect.
-// - Pascabayar (listrik/PDAM/dll) pakai 2 command TERPISAH, TANPA trx id sama
-//   sekali (beda total dari prabayar):
-//     cek tagihan  -> "cek.KODE.NOMOR.PIN"   (inquiry, tidak potong saldo)
-//     bayar tagihan -> "bayar.KODE.NOMOR.PIN" (baru ini yang benar-benar bayar)
-//   Digiflazz mensyaratkan bayar dilakukan di HARI YANG SAMA dengan cek-nya.
-//   Karena tidak ada trx id, "cek status" ulang utk transaksi bayar TIDAK
-//   didukung otomatis di sini (lihat recheckOrder di index.js) — beresiko
-//   dobel-bayar kalau command "bayar." dikirim ulang begitu saja.
-// CATATAN: banyak yang pakai SATU akun Jabber pribadi yang sudah "berteman"
-// dengan H2H beberapa provider sekaligus (mis. ysudarto@jabb.im terhubung ke
-// H2H OkeConnect DAN Digiflazz). Kalau begitu, isi JABBER_JID/PASSWORD saja
-// dan biarkan DIGIFLAZZ_JABBER_JID/PASSWORD kosong — otomatis dipakaikan
-// kredensial yang sama di bawah ini. PIN tetap wajib diisi TERPISAH per
-// provider (itu kode rahasia dari masing-masing H2H, bukan bagian dari login
-// akun Jabber), begitu juga `target` (JID resmi tiap provider yang dituju).
+// Konfigurasi provider PPOB (jalur Jabber). Hanya OkeConnect yang didukung —
+// dipilih per-produk lewat kolom products.provider (nilainya selalu
+// 'okeconnect' sekarang, kolom dipertahankan untuk kompatibilitas data lama).
 export function getProviderConfig(env, provider) {
-  if (provider === "digiflazz") {
-    return {
-      provider: "digiflazz",
-      jid: env.DIGIFLAZZ_JABBER_JID || env.JABBER_JID,
-      password: env.DIGIFLAZZ_JABBER_PASSWORD || env.JABBER_PASSWORD,
-      pin: env.DIGIFLAZZ_JABBER_PIN,
-      target: env.DIGIFLAZZ_JABBER_TARGET,
-      buildPrabayarBody(productCode, target, pin, refId) {
-        return `${productCode}.${target}.${pin} R#${refId}`;
-      },
-      buildPascaCekBody(productCode, target, pin) {
-        return `cek.${productCode}.${target}.${pin}`;
-      },
-      buildPascaBayarBody(productCode, target, pin) {
-        return `bayar.${productCode}.${target}.${pin}`;
-      },
-    };
-  }
-  // Default: okeconnect (perilaku lama, tidak berubah — cek maupun bayar
-  // pascabayar sama-sama pakai suffix "A" di belakang R#{refId}, BELUM
-  // dikonfirmasi CS OkeConnect, lihat catatan lama di bawah).
+  // Perilaku lama tidak berubah — cek maupun bayar pascabayar sama-sama pakai
+  // suffix "A" di belakang R#{refId}, BELUM dikonfirmasi CS OkeConnect, lihat
+  // catatan lama di bawah.
   return {
     provider: "okeconnect",
     jid: env.JABBER_JID,
@@ -95,15 +54,11 @@ function extractTokenCode(reply) {
 }
 
 // Cek kelengkapan config SEBELUM kirim apapun ke Jabber — supaya kalau ada
-// secret yang belum diisi (mis. lupa bikin DIGIFLAZZ_JABBER_PIN terpisah dan
-// mengira otomatis ikut punya OkeConnect), errornya jelas dan LANGSUNG ("PIN
-// belum dikonfigurasi"), bukan diam-diam mengirim literal string "undefined"
-// ke server lalu bingung kenapa selalu gagal/timeout tanpa penjelasan.
+// secret yang belum diisi, errornya jelas dan LANGSUNG ("PIN belum
+// dikonfigurasi"), bukan diam-diam mengirim literal string "undefined" ke
+// server lalu bingung kenapa selalu gagal/timeout tanpa penjelasan.
 function assertCfgComplete(cfg) {
-  const envNames =
-    cfg.provider === "digiflazz"
-      ? { jid: "DIGIFLAZZ_JABBER_JID atau JABBER_JID", password: "DIGIFLAZZ_JABBER_PASSWORD atau JABBER_PASSWORD", pin: "DIGIFLAZZ_JABBER_PIN", target: "DIGIFLAZZ_JABBER_TARGET" }
-      : { jid: "JABBER_JID", password: "JABBER_PASSWORD", pin: "JABBER_PIN", target: "JABBER_TARGET" };
+  const envNames = { jid: "JABBER_JID", password: "JABBER_PASSWORD", pin: "JABBER_PIN", target: "JABBER_TARGET" };
   const missing = ["jid", "password", "pin", "target"].filter((k) => !cfg[k]);
   if (missing.length) {
     throw new Error(
@@ -116,9 +71,7 @@ function assertCfgComplete(cfg) {
 
 /** Kirim command "Cek" (cek tagihan/cek nama pelanggan) — TIDAK memotong saldo
  * dan TIDAK memengaruhi laporan keuangan, tapi tetap DISIMPAN ke ppob_orders
- * (status 'cek') supaya balasannya bisa dilihat lagi lain waktu.
- * Catatan Digiflazz: khusus produk Samsat, `target` diisi format
- * "KodePembayaran,NomorIdentitas" (dipisah koma) sesuai dokumentasi mereka. */
+ * (status 'cek') supaya balasannya bisa dilihat lagi lain waktu. */
 export async function cekTagihan(env, { productCode, target }) {
   const product = await env.DB.prepare("SELECT * FROM products WHERE code = ?")
     .bind(productCode)
@@ -129,8 +82,7 @@ export async function cekTagihan(env, { productCode, target }) {
   const cfg = getProviderConfig(env, product.provider);
   assertCfgComplete(cfg);
   const refId = "CEK" + Date.now();
-  // Digiflazz: command "cek." khusus pascabayar, tidak pakai refId sama sekali.
-  // OkeConnect: perilaku lama tidak berubah (suffix "A" kalau kategori pascabayar).
+  // Perilaku lama tidak berubah (suffix "A" kalau kategori pascabayar).
   const body = isPostpaid(product)
     ? cfg.buildPascaCekBody(productCode, target, cfg.pin, refId)
     : cfg.buildPrabayarBody(productCode, target, cfg.pin, refId);
@@ -187,10 +139,6 @@ export async function placePpobOrder(env, { productCode, target, paidMethod = "t
   // pascabayar (listrik, PDAM, BPJS) pakai R#{ID}A (suffix "A") — CATATAN:
   // asumsi berdasarkan pola kategori, BELUM dikonfirmasi CS OkeConnect,
   // wajib dites dulu dengan transaksi kecil.
-  // Digiflazz: pascabayar pakai command "bayar." yang SAMA SEKALI BEDA dari
-  // prabayar (bukan cuma suffix) — lihat catatan di getProviderConfig. Ini
-  // yang BENAR-BENAR MEMBAYAR tagihan, wajib sudah "Cek Tagihan" (cekTagihan())
-  // di HARI YANG SAMA sebelum memanggil ini, sesuai syarat Digiflazz.
   const body = isPostpaid(product)
     ? cfg.buildPascaBayarBody(productCode, target, cfg.pin, refId)
     : cfg.buildPrabayarBody(productCode, target, cfg.pin, refId);
@@ -335,10 +283,7 @@ export async function finalizePpobOrder(env, { refId, sellPrice, costTotal, toke
 /** Ambil daftar harga terbaru dari OkeConnect dan sinkronkan ke tabel products
  * (upsert + soft-delete otomatis kode yang sudah hilang dari sumber). Dipakai
  * baik oleh endpoint manual (tombol "Sinkron Harga PPOB") maupun cron otomatis
- * (sekali sehari jam 6 pagi WIB). HANYA untuk provider OkeConnect — produk
- * provider=digiflazz ditambahkan/diedit manual lewat CRUD /api/products untuk
- * sekarang (lihat catatan di getProviderConfig soal belum jelasnya format
- * balasan "H." Jabber Digiflazz untuk sinkronisasi otomatis).
+ * (sekali sehari jam 6 pagi WIB).
  *
  * PENTING (dioptimalkan setelah kena limit "rows written" harian D1 free
  * tier): daftar harga OkeConnect isinya ribuan kode produk, dan SEBELUMNYA
@@ -372,7 +317,10 @@ export async function syncPpobPrices(env) {
       return { ok: false, error: `Gagal ambil daftar harga, server balas status ${res.status}` };
     }
     const data = await res.json();
-    list = Array.isArray(data) ? data : data.data || data.result || [];
+    list = Array.isArray(data) ? data : data?.data || data?.result || [];
+    if (!Array.isArray(list)) {
+      return { ok: false, error: "Format JSON dari PRICE_LIST_URL tidak dikenali (bukan array, dan tidak ada field data/result berupa array)" };
+    }
   } catch (err) {
     return { ok: false, error: "Gagal ambil/baca daftar harga: " + err.message };
   }
@@ -381,8 +329,16 @@ export async function syncPpobPrices(env) {
   // ini) — dicocokkan case-insensitive ke kode, nama, ATAU kategori. Produk
   // yang cocok diperlakukan sama seperti status="0" (dilewati, dan kalau
   // sebelumnya sudah aktif, otomatis dinonaktifkan di bagian bawah).
-  const { results: blockedRows } = await env.DB.prepare("SELECT keyword FROM ppob_blocked_keywords").all();
-  const blockedKeywords = blockedRows.map((r) => r.keyword.toLowerCase()).filter(Boolean);
+  // Dibungkus try/catch: kalau tabel ini belum ada (mis. schema.sql lama
+  // belum diperbarui ke D1), sinkron tetap jalan tanpa filter blokir alih-alih
+  // gagal total dengan 500.
+  let blockedKeywords = [];
+  try {
+    const { results: blockedRows } = await env.DB.prepare("SELECT keyword FROM ppob_blocked_keywords").all();
+    blockedKeywords = blockedRows.map((r) => r.keyword.toLowerCase()).filter(Boolean);
+  } catch (err) {
+    console.error("Gagal baca ppob_blocked_keywords (tabel belum ada?):", err.message);
+  }
   function isBlocked(code, name, category) {
     if (!blockedKeywords.length) return false;
     const haystack = `${code} ${name} ${category || ""}`.toLowerCase();
@@ -465,7 +421,10 @@ export async function syncPpobPrices(env) {
     batchItems.push(stmt.bind(code, name, category, productGroup, cost, sell, runStartedAt));
   }
 
-  const BATCH_SIZE = 100;
+  // D1 membatasi TOTAL bound parameter per panggilan batch() ke 100 (bukan
+  // per statement). Statement INSERT ini punya 7 parameter per baris, jadi
+  // BATCH_SIZE harus <= 14 (14*7=98) agar tidak kena "too many SQL variables".
+  const BATCH_SIZE = 14;
   let count = 0;
   let lastError = null;
   for (let i = 0; i < batchItems.length; i += BATCH_SIZE) {

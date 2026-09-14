@@ -80,19 +80,27 @@ export async function handleLinkCommand(env, chatId, text) {
   return `Berhasil terhubung sebagai *${employee.name}* (${employee.role}). Kirim /menu untuk mulai.`;
 }
 
-function mainMenuKeyboard() {
-  return {
-    inline_keyboard: [
-      [{ text: "📋 Cek Hutang Pelanggan", callback_data: "h:l:0" }],
-      [{ text: "🧾 Konfirmasi Order PPOB", callback_data: "p:l:0" }],
-      [{ text: "💳 Saldo Distributor", callback_data: "m:saldo" }],
-    ],
-  };
+// Tombol "🧮 Buka Mini App Kasir" cuma muncul kalau secret MINIAPP_URL sudah
+// diisi (lihat README — biasanya https://<WORKER_URL>/miniapp). Ini beda dari
+// tombol lain di menu ini: bukan callback_data yang ditangani handleAdminCallback,
+// tapi tipe "web_app" yang membuka halaman GET /miniapp (lihat miniapp-page.js)
+// sebagai Telegram Mini App penuh (bukan cuma pesan tombol biasa) — di situ
+// karyawan bisa catat/bayar hutang & transaksi PPOB dengan UI form, bukan
+// cuma alur "kirim nominal" lewat chat seperti menu di bawah ini.
+function mainMenuKeyboard(env) {
+  const rows = [];
+  if (env?.MINIAPP_URL) {
+    rows.push([{ text: "🧮 Buka Mini App Kasir", web_app: { url: env.MINIAPP_URL } }]);
+  }
+  rows.push([{ text: "📋 Cek Hutang Pelanggan", callback_data: "h:l:0" }]);
+  rows.push([{ text: "🧾 Konfirmasi Order PPOB", callback_data: "p:l:0" }]);
+  rows.push([{ text: "💳 Saldo Distributor", callback_data: "m:saldo" }]);
+  return { inline_keyboard: rows };
 }
 
 export async function sendMainMenu(env, chatId, employee) {
   await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `Halo, *${employee.name}*! 👋\nMau kelola apa hari ini?`, {
-    reply_markup: mainMenuKeyboard(),
+    reply_markup: mainMenuKeyboard(env),
   });
 }
 
@@ -219,7 +227,7 @@ export async function handleAdminCallback(env, callbackQuery) {
   try {
     if (ns === "m" && action === "main") {
       await clearSession(env, chatId);
-      payload = { text: `Halo, *${employee.name}*! 👋\nMau kelola apa hari ini?`, reply_markup: mainMenuKeyboard() };
+      payload = { text: `Halo, *${employee.name}*! 👋\nMau kelola apa hari ini?`, reply_markup: mainMenuKeyboard(env) };
     } else if (ns === "m" && action === "saldo") {
       const { results } = await env.DB.prepare("SELECT name, balance FROM wallets WHERE type = 'distributor_ppob'").all();
       const lines = results.map((w) => `${w.name}: ${rupiah(w.balance)}`);
@@ -263,7 +271,7 @@ export async function handleAdminCallback(env, callbackQuery) {
         reply_markup: { inline_keyboard: [[{ text: "❌ Batal", callback_data: `p:s:${arg}` }]] },
       };
     } else {
-      payload = { text: "Perintah tidak dikenal.", reply_markup: mainMenuKeyboard() };
+      payload = { text: "Perintah tidak dikenal.", reply_markup: mainMenuKeyboard(env) };
     }
   } catch (err) {
     alert = err.message;

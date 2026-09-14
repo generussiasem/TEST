@@ -77,69 +77,8 @@ dan sesuaikan pemetaan field di `src/index.js` (fungsi `/api/products/sync`).
 ## 4. Tambah akun saldo distributor
 
 Lewat endpoint `/api/wallets` (POST), buat baris dengan `type = "distributor_ppob"`,
-misalnya "Saldo OkeConnect". Sertakan `provider: "okeconnect"` (atau `"digiflazz"`
-kalau sudah ikut langkah di bawah) supaya saldo yang dipotong saat order cocok
-dengan provider produknya.
-
-## 4a. (Opsional) Tambah Digiflazz sebagai provider kedua, berdampingan dengan OkeConnect
-
-Digiflazz dipakai lewat jalur **Jabber**, BUKAN REST API — karena REST API
-Digiflazz mewajibkan whitelist IP statis yang tidak tersedia di Cloudflare
-Worker, sedangkan Jabber tidak mensyaratkan itu sama sekali.
-
-1. Daftar sebagai Buyer di Digiflazz, lalu di member area Anda buat/lihat
-   **akun Jabber** Anda sendiri (JID + password) dan **PIN transaksi**.
-2. Tambahkan (add contact) ID Jabber "jabber center" Digiflazz sesuai yang
-   tertera di halaman Pengaturan Koneksi Jabber akun Anda (tidak ada satu
-   alamat baku untuk semua buyer — WAJIB dicek di akun Anda sendiri).
-3. Isi secrets berikut:
-   ```
-   wrangler secret put DIGIFLAZZ_JABBER_PIN
-   ```
-   Lalu isi `DIGIFLAZZ_JABBER_TARGET` di `wrangler.toml` (`[vars]`) dengan ID
-   Jabber center Digiflazz dari langkah 2, lalu `wrangler deploy`.
-
-   **Kalau akun Jabber Anda (JID di langkah 1) sudah dipakai/"berteman" dengan
-   H2H beberapa provider sekaligus** (satu akun Jabber pribadi terhubung ke
-   OkeConnect DAN Digiflazz, bukan 2 akun terpisah) — cukup segitu saja,
-   TIDAK perlu isi `DIGIFLAZZ_JABBER_JID`/`DIGIFLAZZ_JABBER_PASSWORD`, karena
-   otomatis dipakaikan `JABBER_JID`/`JABBER_PASSWORD` yang sama dengan
-   OkeConnect. PIN tetap wajib diisi terpisah (`DIGIFLAZZ_JABBER_PIN`) karena
-   itu kode rahasia dari Digiflazz sendiri, bukan bagian dari login Jabber.
-
-   Kalau sebaliknya Anda pakai 2 akun Jabber yang benar-benar berbeda untuk
-   tiap provider, isi juga:
-   ```
-   wrangler secret put DIGIFLAZZ_JABBER_JID
-   wrangler secret put DIGIFLAZZ_JABBER_PASSWORD
-   ```
-4. Jalankan migrasi `migrasi-fitur-digiflazz.sql` sekali ke database yang
-   sudah berjalan (kalau database baru, `schema.sql` sudah termasuk semua ini).
-5. Tambahkan produk Digiflazz manual lewat halaman **Produk** (atau
-   `POST /api/products`), isi `provider: "digiflazz"` dan `code` = kode SKU
-   Digiflazz Anda (`buyer_sku_code`). **Belum ada sinkronisasi harga otomatis**
-   untuk Digiflazz (beda dari OkeConnect yang sudah ada tombol "Sinkron Harga
-   PPOB") — format balasan perintah cek-harga Jabber Digiflazz (`H.`) belum
-   dipastikan cukup terstruktur untuk di-parse otomatis, jadi untuk sekarang
-   harga & kode produk Digiflazz diinput manual dan diperbarui sendiri.
-6. **Prabayar & pascabayar SUDAH keduanya didukung**, tapi mekanismenya beda:
-   - Prabayar (pulsa/paket data/token): satu kali order lewat `/api/ppob/order`,
-     command `KODE.NOMOR.PIN R#TRXID`.
-   - Pascabayar (listrik/PDAM/dll): WAJIB 2 langkah — panggil `/api/ppob/cek`
-     dulu (command `cek.KODE.NOMOR.PIN`, tidak potong saldo) untuk lihat
-     nominal tagihan & nama pelanggan, baru `/api/ppob/order` (command
-     `bayar.KODE.NOMOR.PIN`) di **HARI YANG SAMA** untuk benar-benar membayar
-     — syarat ini dari Digiflazz sendiri, bukan batasan project ini.
-   - Khusus produk Samsat, isi `target` dengan format
-     `KodePembayaran,NomorIdentitas` (dipisah koma) sesuai dokumentasi mereka.
-   - **Order pascabayar Digiflazz TIDAK bisa di-cek-ulang otomatis** (tombol
-     "Cek Ulang Status" akan menolak) karena command `bayar.` tidak punya trx
-     id sama sekali — mengirim ulang begitu saja beresiko dobel-bayar. Kalau
-     balasannya sempat terputus/error, cek status pembayarannya langsung ke
-     CS atau member area Digiflazz, jangan andalkan tombol cek ulang.
-7. Uji dengan transaksi kecil dulu sebelum dipakai produksi — semua format
-   pesan Jabber Digiflazz di atas diambil dari dokumentasi resmi tapi belum
-   pernah diuji langsung ke server mereka dari project ini.
+misalnya "Saldo OkeConnect". Sertakan `provider: "okeconnect"` supaya saldo yang
+dipotong saat order cocok dengan provider produknya.
 
 ## 4c. Bot Telegram admin/kasir — kelola Hutang & konfirmasi harga PPOB lewat tombol
 
@@ -179,6 +118,36 @@ WhatsApp*, sudah ada di Kasir/PPOB/Tagihan, dan sekarang juga di halaman
 Kontak untuk tagihan hutang) — BUKAN dikirim otomatis dari bot, supaya
 kasir yang menentukan kapan & ke nomor mana pesannya dikirim.
 
+## 4d. Mini App Kasir di Telegram (catat/bayar hutang & transaksi PPOB dari HP)
+
+Selain menu tombol chat biasa (poin 4c), ada juga **Telegram Mini App** —
+halaman kecil bergaya app (bukan cuma pesan tombol) yang muncul di dalam
+Telegram, isinya form catat hutang, bayar hutang, dan order PPOB (cari
+produk, isi nomor tujuan, pilih Tunai/Utang, sampai konfirmasi harga jual).
+Semua aksinya lewat fungsi backend yang SAMA dengan dashboard web (`ppob.js`),
+jadi begitu dicatat lewat mini app langsung muncul juga di laporan web —
+tidak ada data yang terpisah.
+
+1. Isi secret `MINIAPP_URL` — alamat halaman mini app-nya, yaitu Worker Anda
+   sendiri ditambah `/miniapp`:
+   ```
+   wrangler secret put MINIAPP_URL
+   ```
+   Isi dengan, misalnya: `https://<WORKER_URL>/miniapp` (satu Worker yang sama
+   dengan `/api/*`, tidak perlu domain/hosting terpisah).
+2. Deploy ulang (`npm run deploy`).
+3. Karyawan yang SUDAH terhubung lewat `/hubung KODE` (lihat poin 4c) kirim
+   `/menu` ke bot → sekarang ada tombol tambahan **"🧮 Buka Mini App Kasir"**
+   di paling atas — tap untuk membuka.
+4. Kalau tombolnya tidak mau terbuka / Telegram menolak, biasanya karena
+   domain belum didaftarkan ke bot: buka `@BotFather` → pilih bot Anda →
+   **Bot Settings → Menu Button** atau `/setdomain`, isi dengan domain Worker
+   Anda (tanpa `https://` dan tanpa path, mis. `test.psudiningsih.workers.dev`).
+
+**Catatan**: mini app ini otomatis menolak dibuka lewat browser biasa (bukan
+dari dalam Telegram) — itu bukan bug, memang disengaja karena autentikasinya
+memverifikasi data resmi dari Telegram (`initData`), bukan username/password.
+
 ## 5. Deploy
 
 ```
@@ -199,13 +168,6 @@ npm run deploy
   perbedaan perilaku.
 - Frontend kasir (Vue) belum disertakan di scaffold ini — endpoint `/api/*` sudah siap
   dikonsumsi kalau Anda mau lanjutkan frontend seperti "Kasir Warung" sebelumnya.
-- **Digiflazz (kalau dipakai)**: format pesan Jabber (prabayar & pascabayar,
-  lihat bagian 4a poin 6) diambil dari dokumentasi resmi tapi belum pernah
-  diuji ke server Digiflazz asli — wajib dites dengan transaksi kecil dulu,
-  terutama alur "Cek Tagihan → Bayar Tagihan" pascabayar. Cek-ulang-status
-  otomatis SENGAJA tidak didukung untuk order pascabayar Digiflazz (resiko
-  dobel-bayar, lihat poin 6). Sinkronisasi harga otomatis juga belum ada
-  untuk Digiflazz — produk diinput manual lewat halaman Produk.
 - **Harga jual produk PPOB tidak lagi diberi markup otomatis** — sinkron harga
   OkeConnect sekarang cuma mengisi `sell_price = cost_price` (untung Rp0) untuk
   produk yang BARU pertama kali muncul, dan tidak lagi menimpa `sell_price`

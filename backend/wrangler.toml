@@ -39,12 +39,6 @@ database_id = "16b154f7-7235-403e-9ddb-7dd1da4b20b7"
 # Ganti nilainya di sini lalu `wrangler deploy` untuk tes cepat tanpa ubah kode.
 JABBER_TARGET = "center@mitra.orderkuota.com"
 
-# ID Jabber "jabber center" Digiflazz tujuan transaksi Anda sebagai buyer.
-# Diisi dari hasil "Tambahkan Teman" / verifikasi koneksi Jabber di member
-# area Digiflazz Anda. Kalau Digiflazz memberi ID center yang beda utk akun
-# Anda, ganti nilainya di sini lalu `wrangler deploy`.
-DIGIFLAZZ_JABBER_TARGET = "jabber1@digiflazz.net"
-
 # Secrets (isi lewat: wrangler secret put NAMA, ATAU dashboard Cloudflare
 # Settings -> Variables and Secrets -> tipe "Secret")
 #   TELEGRAM_BOT_TOKEN     -> token bot dari @BotFather
@@ -53,6 +47,3 @@ DIGIFLAZZ_JABBER_TARGET = "jabber1@digiflazz.net"
 #                              harus sama dengan yang diisi di kolom "Jabber 1" Pengaturan OkeConnect
 #   JABBER_PASSWORD        -> password akun Jabber OkeConnect tersebut (bukan password OrderKuota)
 #   JABBER_PIN             -> PIN transaksi PPOB OkeConnect Anda
-#   DIGIFLAZZ_JABBER_JID   -> akun Jabber yang Anda daftarkan SENDIRI untuk Digiflazz (JID terpisah dari OkeConnect)
-#   DIGIFLAZZ_JABBER_PASSWORD -> password akun Jabber Digiflazz tersebut
-#   DIGIFLAZZ_JABBER_PIN   -> PIN transaksi PPOB Digiflazz Anda

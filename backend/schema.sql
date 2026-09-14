@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS wallets (
   name TEXT NOT NULL,
   type TEXT NOT NULL DEFAULT 'umum', -- umum | distributor_ppob
   balance INTEGER NOT NULL DEFAULT 0, -- dalam rupiah (integer, hindari float)
-  provider TEXT, -- okeconnect | digiflazz, hanya relevan kalau type='distributor_ppob'
+  provider TEXT, -- selalu 'okeconnect', hanya relevan kalau type='distributor_ppob'
   created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_wallets_provider ON wallets(provider);
@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS products (
   active INTEGER NOT NULL DEFAULT 1,      -- 0 = produk PPOB sudah hilang dari daftar harga sumbernya (soft-delete)
   deactivated_at TEXT,                    -- kapan jadi nonaktif, dipakai utk hard-delete otomatis setelah >1 tahun
   last_synced_at TEXT,                    -- ditandai tiap kali sinkron melihat kode ini masih ada di sumber
-  provider TEXT NOT NULL DEFAULT 'okeconnect', -- okeconnect | digiflazz — menentukan jalur Jabber mana yang dipakai saat order
+  provider TEXT NOT NULL DEFAULT 'okeconnect', -- selalu 'okeconnect' — jalur Jabber yang dipakai saat order
   created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_products_code ON products(code);
@@ -133,7 +133,7 @@ CREATE TABLE IF NOT EXISTS debts (
   note TEXT
 );
 
--- Transaksi PPOB via Jabber (OkeConnect dan/atau Digiflazz)
+-- Transaksi PPOB via Jabber (OkeConnect)
 CREATE TABLE IF NOT EXISTS ppob_orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ref_id TEXT UNIQUE NOT NULL,       -- ID unik dikirim ke provider (dipakai di format R#{ID})
@@ -151,8 +151,8 @@ CREATE TABLE IF NOT EXISTS ppob_orders (
   batch_id TEXT,                        -- grup order dari satu kali "Proses Semua" keranjang PPOB, buat gabung 1 struk
   finalized INTEGER NOT NULL DEFAULT 0, -- 1 = SUDAH dicatat sebagai transaksi (harga jual final terkonfirmasi/terkunci), berlaku utk semua kategori (bukan cuma postpaid lagi)
   auto_checked INTEGER NOT NULL DEFAULT 0, -- 1 = sudah dicek otomatis sekali oleh cron (5 menit setelah dibuat); cron tidak akan cek lagi setelah ini, sisanya lewat tombol manual
-  provider TEXT NOT NULL DEFAULT 'okeconnect', -- okeconnect | digiflazz — jalur Jabber mana yang dipakai order ini
-  request_body TEXT,                    -- body pesan Jabber asli yang dikirim (dipakai Digiflazz utk re-check status dgn Trxid sama)
+  provider TEXT NOT NULL DEFAULT 'okeconnect', -- selalu 'okeconnect' — jalur Jabber yang dipakai order ini
+  request_body TEXT,                    -- body pesan Jabber asli yang dikirim
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );

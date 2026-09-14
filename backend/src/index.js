@@ -5,6 +5,8 @@ import { sendTelegramMessage } from "./telegram.js";
 import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, syncPpobPrices, getProviderConfig, finalizePpobOrder } from "./ppob.js";
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
 import { getEmployeeByChatId, handleLinkCommand, sendMainMenu, handleAdminCallback, handleAdminSessionMessage } from "./bot-admin.js";
+import miniappRouter from "./miniapp.js";
+import { renderMiniAppPage } from "./miniapp-page.js";
 
 const app = new Hono();
 
@@ -22,11 +24,19 @@ app.use(
   })
 );
 
-// Semua /api/* wajib login, KECUALI /api/auth/login sendiri.
+// Semua /api/* wajib login, KECUALI /api/auth/login sendiri DAN /api/miniapp/*
+// (mini app Telegram punya cara login sendiri lewat initData, lihat miniapp.js
+// — bukan Bearer token dashboard web).
 app.use("/api/*", async (c, next) => {
   if (c.req.path === "/api/auth/login" || c.req.path === "/api/setup") return next();
+  if (c.req.path.startsWith("/api/miniapp/")) return next();
   return requireAuth(c, next);
 });
+
+// Halaman Telegram Mini App (dibuka dari tombol bot, bukan dari dashboard web)
+// dan API-nya. Dipisah dari /api/* biasa karena login pakai initData Telegram.
+app.get("/miniapp", (c) => c.html(renderMiniAppPage()));
+app.route("/api/miniapp", miniappRouter);
 
 // Setup admin pertama — hanya jalan kalau BELUM ada karyawan sama sekali di database.
 // Setelah admin pertama dibuat, endpoint ini otomatis menolak (pakai /api/employees
@@ -415,8 +425,13 @@ app.get("/api/contact-ids", async (c) => {
 //   curl "<PRICE_LIST_URL>" | head
 // lalu sesuaikan pemetaan field di bawah.
 app.post("/api/products/sync", async (c) => {
-  const result = await syncPpobPrices(c.env);
-  return c.json(result, result.ok ? 200 : (result.error?.includes("PRICE_LIST_URL") ? 400 : 502));
+  try {
+    const result = await syncPpobPrices(c.env);
+    return c.json(result, result.ok ? 200 : (result.error?.includes("PRICE_LIST_URL") ? 400 : 502));
+  } catch (err) {
+    console.error("Sync PPOB gagal (uncaught):", err.message, err.stack);
+    return c.json({ ok: false, error: "Sinkron gagal: " + err.message }, 500);
+  }
 });
 
 // Kata kunci yang diblokir dari sinkronisasi PPOB OkeConnect — lihat
@@ -1235,24 +1250,9 @@ app.post("/telegram/webhook", async (c) => {
 async function recheckOrder(env, order, { autoRecord } = {}) {
   const cfg = getProviderConfig(env, order.provider);
 
-  // Digiflazz pascabayar ("bayar.KODE.NOMOR.PIN") TIDAK punya trx id sama
-  // sekali — tidak ada cara aman untuk "cek status ulang" tanpa berisiko
-  // mengirim ulang command "bayar." itu sendiri dan berpotensi dobel-bayar.
-  // Jadi order jenis ini SENGAJA TIDAK di-recheck otomatis di sini — kalau
-  // balasannya sempat gagal/putus di tengah jalan, harus dicek manual lewat
-  // CS Digiflazz atau riwayat "Bayar Tagihan" di member area mereka.
-  if (cfg.provider === "digiflazz" && order.request_body && /^bayar\./i.test(order.request_body)) {
-    throw new Error(
-      "Order pascabayar Digiflazz tidak bisa dicek ulang otomatis (tidak ada trx id, beresiko dobel-bayar kalau dikirim ulang). Cek status pembayaran ini langsung ke CS/member area Digiflazz."
-    );
-  }
-
   // OkeConnect: command khusus "CEK.R#{ID}" (TODO: belum dikonfirmasi CS,
   // ada varian berakhiran 'A' untuk ID pelanggan — lihat catatan lama).
-  // Digiflazz prabayar: TIDAK ada command "cek status" terpisah — caranya
-  // kirim ULANG persis body transaksi asli dengan Trxid yang sama (disimpan
-  // di order.request_body saat order dibuat).
-  const body = cfg.provider === "digiflazz" && order.request_body ? order.request_body : `CEK.R#${order.ref_id}`;
+  const body = `CEK.R#${order.ref_id}`;
   const reply = await sendJabberCommand({ jid: cfg.jid, password: cfg.password, to: cfg.target, body });
   const status = detectPpobStatus(reply);
 
