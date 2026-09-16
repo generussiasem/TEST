@@ -512,3 +512,55 @@ export async function syncPpobPrices(env) {
     lastError,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Cek saldo asli distributor via perintah "Saldo.PIN" lewat Jabber, lalu TIMPA
+// langsung wallets.balance dengan angka itu — BUKAN transaksi mutasi, karena
+// ini murni sinkronisasi angka biar sama dengan kenyataan di OkeConnect, tidak
+// ada uang yang benar-benar berpindah antar dompet toko. Sengaja tidak lewat
+// tabel transactions supaya tidak ikut kehitung di laporan laba/mutasi manapun.
+//
+// Contoh balasan asli OkeConnect (dites langsung 2026-09):
+//   "Yth.laelyponsel (OK310547). Saldo 3.523! Dalam proses 0, Pemakaian hari
+//   ini 251.950, Total Transaksi 4."
+// Formatnya BELUM tentu selalu persis sama (mis. kalau ada saldo minus, atau
+// akun jenis lain) — kalau parseBalanceReply gagal menangkap angka, fungsi ini
+// TIDAK menimpa saldo (lebih aman diam daripada menimpa dengan angka salah/0).
+export function parseBalanceReply(reply) {
+  const match = reply.match(/Saldo\s+([\d.]+)/i);
+  if (!match) return null;
+  const n = Number(match[1].replace(/\./g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
+export async function checkDistributorBalance(env) {
+  const cfg = getProviderConfig(env, "okeconnect");
+  assertCfgComplete(cfg);
+
+  const wallet = await env.DB.prepare(
+    "SELECT * FROM wallets WHERE type = 'distributor_ppob' AND provider = ? LIMIT 1"
+  )
+    .bind(cfg.provider)
+    .first();
+  if (!wallet) {
+    return { ok: false, error: "Belum ada dompet type='distributor_ppob' untuk provider ini." };
+  }
+
+  const body = `Saldo.${cfg.pin}`;
+  const reply = await sendJabberCommand({
+    jid: cfg.jid,
+    password: cfg.password,
+    to: cfg.target,
+    body,
+    firstReplyIsFinal: true,
+  });
+
+  const balance = parseBalanceReply(reply);
+  if (balance === null) {
+    return { ok: false, error: "Tidak bisa membaca angka saldo dari balasan.", raw_reply: reply };
+  }
+
+  await env.DB.prepare("UPDATE wallets SET balance = ? WHERE id = ?").bind(balance, wallet.id).run();
+
+  return { ok: true, wallet_id: wallet.id, balance_before: wallet.balance, balance_after: balance, raw_reply: reply };
+}

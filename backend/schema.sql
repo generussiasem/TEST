@@ -100,12 +100,13 @@ CREATE INDEX IF NOT EXISTS idx_shifts_status ON shifts(status);
 CREATE TABLE IF NOT EXISTS transactions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   date TEXT NOT NULL DEFAULT (datetime('now')),
-  type TEXT NOT NULL, -- sale | purchase | expense | mutation
+  type TEXT NOT NULL, -- sale | purchase | expense | mutation | capital_in | capital_out
   category TEXT,
   wallet_id INTEGER REFERENCES wallets(id),      -- utk mutation: akun ASAL
   to_wallet_id INTEGER REFERENCES wallets(id),   -- cuma diisi kalau type='mutation': akun TUJUAN
   amount INTEGER NOT NULL,       -- total nominal transaksi
   cost_total INTEGER NOT NULL DEFAULT 0, -- total modal (buat hitung laba kotor)
+  cost_wallet_id INTEGER REFERENCES wallets(id), -- utk type='sale' TANPA items yang modalnya dari dompet lain (mis. jasa transfer bank pakai Saldo BCA sendiri) — dompet ini yg dikurangi sebesar cost_total, BUKAN dompet tujuan (wallet_id)
   note TEXT,
   contact_id INTEGER REFERENCES contacts(id),
   employee_id INTEGER REFERENCES employees(id), -- kasir yang input

@@ -14,9 +14,10 @@ compatibility_date = "2026-09-09"
 keep_vars = true
 
 # Cron untuk cek ulang transaksi PPOB yang masih "pending" (misal balasan Jabber telat),
-# ditambah jadwal harian jam 03:00 UTC untuk pembersihan riwayat >1 tahun, dan
-# jadwal tiap 8 jam untuk sinkron otomatis harga PPOB (lihat scheduled() di
-# index.js — event.cron dipakai untuk membedakan ketiganya).
+# ditambah jadwal harian jam 03:00 UTC untuk pembersihan riwayat >1 tahun,
+# jadwal tiap 8 jam untuk sinkron otomatis harga PPOB, dan jadwal tiap 6 jam
+# untuk sinkron saldo dompet distributor (lihat scheduled() di index.js —
+# event.cron dipakai untuk membedakan semuanya).
 [triggers]
 # */5 * * * *  -> cek ulang status order PPOB yang masih pending (tiap 5 menit)
 # 0 3 * * *    -> bersih-bersih data lama (jam 10 pagi WIB)
@@ -25,7 +26,10 @@ keep_vars = true
 #                 sering-sering — sinkron sekarang cuma menulis baris yang
 #                 berubah (lihat syncPpobPrices di ppob.js), tapi tetap ada
 #                 biaya baca+kirim ke API OkeConnect tiap kali jalan.
-crons = ["*/5 * * * *", "0 3 * * *", "0 23 * * *"]
+# 0 */6 * * *  -> sinkron saldo dompet distributor ke angka ASLI OkeConnect
+#                 (perintah "Saldo.PIN" via Jabber, lihat checkDistributorBalance
+#                 di ppob.js) — jam 00:00, 06:00, 12:00, 18:00 UTC.
+crons = ["*/5 * * * *", "0 3 * * *", "0 23 * * *", "0 */6 * * *"]
 
 [[d1_databases]]
 binding = "DB"

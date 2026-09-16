@@ -89,7 +89,7 @@ async function lihatDetail(s) {
   }
 }
 
-const typeLabel = { sale: "Penjualan", purchase: "Pembelian Stok", expense: "Biaya", mutation: "Mutasi Akun" };
+const typeLabel = { sale: "Penjualan", purchase: "Pembelian Stok", expense: "Biaya", mutation: "Mutasi Akun", capital_in: "Modal Masuk", capital_out: "Modal Keluar" };
 
 onMounted(load);
 </script>
@@ -141,6 +141,9 @@ onMounted(load);
             <tr><td class="muted">Total Pengeluaran</td><td class="num" style="color: var(--red)">-{{ rupiah(current.total_pengeluaran) }}</td></tr>
             <tr><td class="muted">Mutasi Masuk</td><td class="num" style="color: var(--till-deep)">+{{ rupiah(current.mutasi_masuk) }}</td></tr>
             <tr><td class="muted">Mutasi Keluar</td><td class="num" style="color: var(--red)">-{{ rupiah(current.mutasi_keluar) }}</td></tr>
+            <tr><td class="muted">Modal Masuk</td><td class="num" style="color: var(--till-deep)">+{{ rupiah(current.modal_masuk) }}</td></tr>
+            <tr><td class="muted">Modal Keluar</td><td class="num" style="color: var(--red)">-{{ rupiah(current.modal_keluar) }}</td></tr>
+            <tr><td class="muted">Modal Dipakai (jasa bermodal dompet ini)</td><td class="num" style="color: var(--red)">-{{ rupiah(current.modal_dipakai) }}</td></tr>
             <tr style="border-top: 1px solid var(--line)"><td><strong>Saldo Seharusnya Sekarang</strong></td><td class="num"><strong>{{ rupiah(current.expected_balance) }}</strong></td></tr>
           </tbody>
         </table>

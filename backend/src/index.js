@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { sendJabberCommand } from "./jabber.js";
 import { sendTelegramMessage } from "./telegram.js";
-import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, syncPpobPrices, getProviderConfig, finalizePpobOrder } from "./ppob.js";
+import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, syncPpobPrices, getProviderConfig, finalizePpobOrder, checkDistributorBalance } from "./ppob.js";
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
 import { getEmployeeByChatId, handleLinkCommand, sendMainMenu, handleAdminCallback, handleAdminSessionMessage } from "./bot-admin.js";
 import miniappRouter from "./miniapp.js";
@@ -482,18 +482,24 @@ app.get("/api/transactions/:id", async (c) => {
 // sertakan "items": [{ product_id, qty }] — sistem hitung total & modal otomatis,
 // lalu kurangi stok. Untuk expense, "items" boleh dikosongkan. Untuk mutation
 // (pindah saldo antar akun, mis. setor tunai Kas -> Bank), isi "wallet_id"
-// (akun asal) DAN "to_wallet_id" (akun tujuan), "items" tidak dipakai.
+// (akun asal) DAN "to_wallet_id" (akun tujuan), "items" tidak dipakai. Untuk
+// jasa/penjualan TANPA barang tapi modalnya dari dompet lain (mis. jasa
+// transfer bank pakai Saldo BCA sendiri): isi "cost_wallet_id" (dompet sumber
+// modal) + "cost_total" (nominal pokok yang dipakai) — dompet itu otomatis
+// dikurangi cost_total, terpisah dari "wallet_id" (dompet tujuan uang masuk).
 app.post("/api/transactions", async (c) => {
   const employee = c.get("employee");
   const {
-    type, // sale | purchase | expense | mutation
+    type, // sale | purchase | expense | mutation | capital_in | capital_out
     category,
     wallet_id,
     to_wallet_id, // khusus type='mutation': akun tujuan
+    cost_wallet_id, // khusus type='sale' tanpa items: dompet sumber modal (mis. Saldo Bank sendiri)
     note,
     contact_id,
     items = [], // [{ product_id, qty }]
     amount, // dipakai kalau tidak ada items (mis. expense manual / mutasi)
+    cost_total: manualCostTotal, // khusus type='sale' tanpa items + cost_wallet_id: nominal pokok/modal
     paid_method = "tunai", // "tunai" (isi wallet_id) | "utang" (wajib contact_id, wallet_id diabaikan)
   } = await c.req.json();
 
@@ -561,6 +567,23 @@ app.post("/api/transactions", async (c) => {
 
   if (!items.length) total = amount || 0;
 
+  // Jasa/penjualan tanpa barang tapi bermodal dari dompet lain (mis. jasa
+  // transfer bank) — dompet sumber modal WAJIB beda dari dompet tujuan, dan
+  // modalnya tidak boleh menghabisi/melebihi total yang diterima (fee jadi
+  // 0/negatif berarti pasti salah input).
+  if (!items.length && type === "sale" && cost_wallet_id) {
+    if (String(cost_wallet_id) === String(wallet_id)) {
+      return c.json({ ok: false, error: "Dompet sumber modal tidak boleh sama dengan dompet tujuan." }, 400);
+    }
+    costTotal = Number(manualCostTotal) || 0;
+    if (costTotal <= 0 || costTotal >= total) {
+      return c.json(
+        { ok: false, error: "Nominal modal harus lebih dari 0 dan kurang dari total yang diterima (supaya fee tidak 0/negatif)." },
+        400
+      );
+    }
+  }
+
   // Bayar Utang: uang belum masuk kas sama sekali, jadi wallet_id dikosongkan
   // (stok tetap berkurang & laporan laba tetap kehitung seperti biasa).
   const effectiveWalletId = paid_method === "utang" ? null : wallet_id;
@@ -574,13 +597,14 @@ app.post("/api/transactions", async (c) => {
     : null;
 
   const insertResult = await c.env.DB.prepare(
-    `INSERT INTO transactions (type, category, wallet_id, amount, cost_total, note, contact_id, employee_id, shift_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO transactions (type, category, wallet_id, cost_wallet_id, amount, cost_total, note, contact_id, employee_id, shift_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       type,
       category || null,
       effectiveWalletId || null,
+      type === "sale" && cost_wallet_id ? cost_wallet_id : null,
       total,
       costTotal,
       note || null,
@@ -611,9 +635,19 @@ app.post("/api/transactions", async (c) => {
   }
 
   if (effectiveWalletId) {
-    const delta = type === "sale" ? total : -total; // penjualan nambah kas, pembelian/expense ngurangin
+    // penjualan & modal masuk nambah kas; pembelian/biaya/modal keluar ngurangin
+    const delta = type === "sale" || type === "capital_in" ? total : -total;
     await c.env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?")
       .bind(delta, effectiveWalletId)
+      .run();
+  }
+
+  // Modal jasa dari dompet lain (mis. Saldo BCA dipakai buat kirim transfer)
+  // — dikurangi TERLEPAS dari paid_method, karena modalnya tetap keluar duluan
+  // walau pelanggan bayarnya belakangan (utang).
+  if (type === "sale" && cost_wallet_id && costTotal > 0) {
+    await c.env.DB.prepare("UPDATE wallets SET balance = balance - ? WHERE id = ?")
+      .bind(costTotal, cost_wallet_id)
       .run();
   }
 
@@ -664,9 +698,19 @@ app.delete("/api/transactions/:id", requireAdmin, async (c) => {
       await c.env.DB.prepare("UPDATE wallets SET balance = balance - ? WHERE id = ?").bind(t.amount, t.to_wallet_id).run();
     }
   } else if (t.wallet_id) {
-    const delta = t.type === "sale" ? t.amount : -t.amount; // balikkan: kebalikan dari efek saat dibuat
+    // balikkan: kebalikan dari efek saat dibuat (lihat delta di POST /api/transactions)
+    const delta = t.type === "sale" || t.type === "capital_in" ? t.amount : -t.amount;
     await c.env.DB.prepare("UPDATE wallets SET balance = balance - ? WHERE id = ?")
       .bind(delta, t.wallet_id)
+      .run();
+  }
+
+  // Balikkan juga modal yang sempat dikurangi dari dompet sumber (cost_wallet_id)
+  // — berlaku baik yang wallet_id-nya terisi (tunai) maupun kosong (utang),
+  // karena modal tetap dikurangi di kedua kasus saat transaksi dibuat.
+  if (t.type === "sale" && t.cost_wallet_id && t.cost_total > 0) {
+    await c.env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?")
+      .bind(t.cost_total, t.cost_wallet_id)
       .run();
   }
 
@@ -768,15 +812,16 @@ app.get("/api/reports/cashflow", async (c) => {
   const { results } = await c.env.DB.prepare(
     `SELECT w.id AS wallet_id, w.name AS wallet_name,
             COALESCE(SUM(CASE
-              WHEN t.wallet_id = w.id AND t.type = 'sale' THEN t.amount
+              WHEN t.wallet_id = w.id AND t.type IN ('sale','capital_in') THEN t.amount
               WHEN t.to_wallet_id = w.id AND t.type = 'mutation' THEN t.amount
               ELSE 0 END), 0) AS masuk,
             COALESCE(SUM(CASE
-              WHEN t.wallet_id = w.id AND t.type IN ('purchase','expense','mutation') THEN t.amount
+              WHEN t.wallet_id = w.id AND t.type IN ('purchase','expense','mutation','capital_out') THEN t.amount
+              WHEN t.cost_wallet_id = w.id AND t.type = 'sale' THEN t.cost_total
               ELSE 0 END), 0) AS keluar
      FROM wallets w
      LEFT JOIN transactions t
-       ON (t.wallet_id = w.id OR t.to_wallet_id = w.id) AND date(t.date) BETWEEN date(?) AND date(?)
+       ON (t.wallet_id = w.id OR t.to_wallet_id = w.id OR t.cost_wallet_id = w.id) AND date(t.date) BETWEEN date(?) AND date(?)
      GROUP BY w.id
      HAVING masuk > 0 OR keluar > 0`
   )
@@ -836,13 +881,33 @@ async function computeShiftBreakdown(db, shift) {
         COALESCE(SUM(CASE WHEN type = 'expense' AND wallet_id = ? THEN amount ELSE 0 END), 0) AS total_pengeluaran,
         COALESCE(SUM(CASE WHEN type = 'mutation' AND wallet_id = ? THEN amount ELSE 0 END), 0) AS mutasi_keluar,
         COALESCE(SUM(CASE WHEN type = 'mutation' AND to_wallet_id = ? THEN amount ELSE 0 END), 0) AS mutasi_masuk,
+        COALESCE(SUM(CASE WHEN type = 'capital_in' AND wallet_id = ? THEN amount ELSE 0 END), 0) AS modal_masuk,
+        COALESCE(SUM(CASE WHEN type = 'capital_out' AND wallet_id = ? THEN amount ELSE 0 END), 0) AS modal_keluar,
+        COALESCE(SUM(CASE WHEN type = 'sale' AND cost_wallet_id = ? THEN cost_total ELSE 0 END), 0) AS modal_dipakai,
         COUNT(*) AS jumlah_transaksi
        FROM transactions WHERE shift_id = ?`
     )
-    .bind(shift.wallet_id, shift.wallet_id, shift.wallet_id, shift.wallet_id, shift.wallet_id, shift.id)
+    .bind(
+      shift.wallet_id,
+      shift.wallet_id,
+      shift.wallet_id,
+      shift.wallet_id,
+      shift.wallet_id,
+      shift.wallet_id,
+      shift.wallet_id,
+      shift.wallet_id,
+      shift.id
+    )
     .first();
   const net_movement =
-    row.total_penjualan - row.total_pembelian - row.total_pengeluaran - row.mutasi_keluar + row.mutasi_masuk;
+    row.total_penjualan -
+    row.total_pembelian -
+    row.total_pengeluaran -
+    row.mutasi_keluar +
+    row.mutasi_masuk +
+    row.modal_masuk -
+    row.modal_keluar -
+    row.modal_dipakai;
   return { ...row, net_movement };
 }
 
@@ -1381,6 +1446,17 @@ export default {
       ctx.waitUntil(cleanupOldData(env));
     } else if (event.cron === "0 23 * * *") {
       ctx.waitUntil(syncPpobPrices(env));
+    } else if (event.cron === "0 */6 * * *") {
+      // Sinkron saldo dompet distributor PPOB ke angka ASLI dari OkeConnect
+      // (perintah "Saldo.PIN") tiap 6 jam — lihat checkDistributorBalance di
+      // ppob.js. Dibungkus try/catch: kalau Jabber sedang gangguan/timeout,
+      // biarkan lewat saja, jangan sampai bikin scheduled() ini gagal total
+      // dan mengganggu jadwal cron lain yang kebetulan jalan bersamaan.
+      ctx.waitUntil(
+        checkDistributorBalance(env).catch((err) =>
+          console.error("[cron] checkDistributorBalance gagal:", err.message)
+        )
+      );
     } else {
       ctx.waitUntil(checkPendingOrders(env));
     }

@@ -134,7 +134,12 @@ async function readUntil(reader, predicate, timeoutMs = 15000) {
 // Kalau waktu habis dan yang ada cuma ack, tetap kembalikan ack itu (lebih baik
 // daripada tidak ada informasi apa pun) sambil biarkan cron checkPendingOrders
 // menyusuri hasil aslinya nanti.
-async function waitForFinalReply(reader, targetBareJid, expectedRefToken, expectedPrefix, timeoutMs = 25000) {
+// firstReplyIsFinal: dipakai untuk perintah non-transaksi (mis. "Saldo.PIN")
+// yang balasannya TIDAK mengandung kata kunci final seperti "sukses"/"gagal"
+// (lihat FINAL_REPLY_KEYWORDS) — kalau tidak diberi jalur ini, fungsi akan
+// menunggu penuh sampai timeout tiap kali dipanggil walau balasan yang benar
+// sudah masuk dari detik pertama, karena tidak pernah cocok kata kunci apapun.
+async function waitForFinalReply(reader, targetBareJid, expectedRefToken, expectedPrefix, timeoutMs = 25000, firstReplyIsFinal = false) {
   let buffer = "";
   const decoder = new TextDecoder();
   const deadline = Date.now() + timeoutMs;
@@ -151,7 +156,7 @@ async function waitForFinalReply(reader, targetBareJid, expectedRefToken, expect
     const replies = extractAllReplies(buffer, targetBareJid, expectedRefToken, expectedPrefix);
     if (replies.length) {
       latest = replies[replies.length - 1];
-      if (latest.isError || FINAL_REPLY_KEYWORDS.test(latest.text)) {
+      if (latest.isError || firstReplyIsFinal || FINAL_REPLY_KEYWORDS.test(latest.text)) {
         return latest; // ini sudah hasil final (atau bounce/error), berhenti sekarang
       }
       // else: baru ack "akan diproses" — lanjut dengar, mungkin ada balasan susulan
@@ -173,8 +178,12 @@ async function waitForFinalReply(reader, targetBareJid, expectedRefToken, expect
  * @param {string} opts.password  - password akun OrderKuota Anda
  * @param {string} opts.to        - tujuan pesan, mis. "okeconnect@gojabber.com"
  * @param {string} opts.body      - isi perintah, mis. "TSEL5.081234.PIN.R#REF123"
+ * @param {boolean} [opts.firstReplyIsFinal] - anggap balasan PERTAMA yang cocok
+ *   dari target sebagai final, walau tidak mengandung kata kunci "sukses/gagal"
+ *   dst. Dipakai untuk perintah non-transaksi seperti cek saldo ("Saldo.PIN"),
+ *   supaya tidak menunggu penuh sampai timeout tiap kali dipanggil.
  */
-export async function sendJabberCommand({ jid, password, to, body }) {
+export async function sendJabberCommand({ jid, password, to, body, firstReplyIsFinal = false }) {
   const [localpart, jabberHost] = jid.split("@");
   // Login ke server tempat akun Jabber Anda sendiri terdaftar (mis. jabbim.com),
   // BUKAN ke server tujuan pesan (okeconnect@gojabber.com) — dua server ini beda,
@@ -290,7 +299,7 @@ export async function sendJabberCommand({ jid, password, to, body }) {
     // OkeConnect selalu mengulang persis "KODE.NOMOR" di awal balasannya.
     const bodySegments = body.split(".");
     const expectedPrefix = bodySegments.length >= 2 ? `${bodySegments[0]}.${bodySegments[1]}` : null;
-    const parsed = await waitForFinalReply(reader, targetBareJid, expectedRefToken, expectedPrefix, 25000);
+    const parsed = await waitForFinalReply(reader, targetBareJid, expectedRefToken, expectedPrefix, 25000, firstReplyIsFinal);
     if (parsed.isError) {
       throw new Error(parsed.text);
     }
