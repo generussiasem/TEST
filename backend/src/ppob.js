@@ -114,7 +114,7 @@ export async function cekTagihan(env, { productCode, target }) {
  * baru ketahuan sukses lewat CRON (tanpa kasir di depan layar) tetap otomatis
  * tercatat pakai harga default — itu ditangani terpisah di index.js.
  */
-export async function placePpobOrder(env, { productCode, target, paidMethod = "tunai", contactId = null, batchId = null }) {
+export async function placePpobOrder(env, { productCode, target, paidMethod = "tunai", contactId = null, batchId = null, telegramChatId = "" }) {
   const product = await env.DB.prepare("SELECT * FROM products WHERE code = ?")
     .bind(productCode)
     .first();
@@ -143,11 +143,15 @@ export async function placePpobOrder(env, { productCode, target, paidMethod = "t
     ? cfg.buildPascaBayarBody(productCode, target, cfg.pin, refId)
     : cfg.buildPrabayarBody(productCode, target, cfg.pin, refId);
 
+  // telegramChatId diisi kalau order ini dibuat dari Mini App (chat karyawan
+  // sendiri) — supaya kalau balasan provider telat dan baru selesai lewat
+  // cron, karyawan tetap dapat notifikasi balik ke Telegram-nya, bukan harus
+  // ingat cek manual (lihat recheckOrder di index.js).
   await env.DB.prepare(
     `INSERT INTO ppob_orders (ref_id, telegram_chat_id, product_code, target, cost_price, sell_price, wallet_id, status, paid_method, contact_id, batch_id, provider, request_body)
-     VALUES (?, '', ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`
   )
-    .bind(refId, productCode, target, product.cost_price, product.sell_price, wallet ? wallet.id : null, paidMethod, contactId, batchId, cfg.provider, body)
+    .bind(refId, String(telegramChatId || ""), productCode, target, product.cost_price, product.sell_price, wallet ? wallet.id : null, paidMethod, contactId, batchId, cfg.provider, body)
     .run();
 
   let status = "pending";
@@ -446,13 +450,23 @@ export async function syncPpobPrices(env) {
   let blockedDeleted = 0;
   let blockedKeptInactive = 0;
   if (existingBlocked.length) {
-    const idPlaceholders = existingBlocked.map(() => "?").join(",");
-    const { results: usageRows } = await env.DB.prepare(
-      `SELECT product_id, COUNT(*) AS n FROM transaction_items WHERE product_id IN (${idPlaceholders}) GROUP BY product_id`
-    )
-      .bind(...existingBlocked.map((r) => r.id))
-      .all();
-    const usedProductIds = new Set(usageRows.map((r) => r.product_id));
+    // D1 membatasi maksimal 100 bound parameter PER QUERY (bukan per batch
+    // call) — query ini SEBELUMNYA tidak di-chunk sama sekali, jadi begitu
+    // produk yang kena kata kunci blokir > 100 item, langsung gagal dengan
+    // "D1_ERROR: too many SQL variables". Sekarang di-chunk per 90 id
+    // (dengan margin dari batas 100) sama seperti loop DELETE/UPDATE di bawah.
+    const CHECK_CHUNK = 90;
+    const usedProductIds = new Set();
+    for (let i = 0; i < existingBlocked.length; i += CHECK_CHUNK) {
+      const chunkRows = existingBlocked.slice(i, i + CHECK_CHUNK);
+      const idPlaceholders = chunkRows.map(() => "?").join(",");
+      const { results: usageRows } = await env.DB.prepare(
+        `SELECT product_id, COUNT(*) AS n FROM transaction_items WHERE product_id IN (${idPlaceholders}) GROUP BY product_id`
+      )
+        .bind(...chunkRows.map((r) => r.id))
+        .all();
+      usageRows.forEach((r) => usedProductIds.add(r.product_id));
+    }
 
     const toDeleteIds = existingBlocked.filter((r) => !usedProductIds.has(r.id)).map((r) => r.id);
     const toKeepInactive = existingBlocked.filter((r) => usedProductIds.has(r.id)).map((r) => r.code);

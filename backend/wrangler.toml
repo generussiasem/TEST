@@ -29,7 +29,10 @@ keep_vars = true
 # 0 */6 * * *  -> sinkron saldo dompet distributor ke angka ASLI OkeConnect
 #                 (perintah "Saldo.PIN" via Jabber, lihat checkDistributorBalance
 #                 di ppob.js) — jam 00:00, 06:00, 12:00, 18:00 UTC.
-crons = ["*/5 * * * *", "0 3 * * *", "0 23 * * *", "0 */6 * * *"]
+# 0 17 * * *   -> catat snapshot harian Pertumbuhan Modal, PERSIS jam 00:00 WIB
+#                 (17:00 UTC = 00:00 WIB) — pas pergantian hari toko, lihat
+#                 catatSnapshotModalHarian di modal.js.
+crons = ["*/5 * * * *", "0 3 * * *", "0 23 * * *", "0 */6 * * *", "0 17 * * *"]
 
 [[d1_databases]]
 binding = "DB"

@@ -44,7 +44,7 @@ miniapp.use("*", async (c, next) => {
       403
     );
   }
-  c.set("employee", { employeeId: employee.id, role: employee.role, name: employee.name });
+  c.set("employee", { employeeId: employee.id, role: employee.role, name: employee.name, telegramId: employee.telegram_id });
   await next();
 });
 
@@ -167,8 +167,11 @@ miniapp.post("/ppob/cek", async (c) => {
 miniapp.post("/ppob/order", async (c) => {
   const { productCode, target, paidMethod, contactId } = await c.req.json();
   if (!productCode || !target) return c.json({ ok: false, error: "productCode dan target wajib diisi" }, 400);
+  const employee = c.get("employee");
   try {
-    const result = await placePpobOrder(c.env, { productCode, target, paidMethod, contactId });
+    // telegramChatId = chat karyawan ini sendiri, supaya kalau balasan provider
+    // telat (Mini App sudah berhenti polling), cron tetap bisa mengabari balik.
+    const result = await placePpobOrder(c.env, { productCode, target, paidMethod, contactId, telegramChatId: employee.telegramId });
     return c.json({ ok: true, ...result });
   } catch (err) {
     return c.json({ ok: false, error: err.message }, 400);

@@ -4,7 +4,9 @@ CREATE TABLE IF NOT EXISTS store_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1), -- selalu 1 baris
   store_name TEXT NOT NULL DEFAULT 'Toko Saya',
   address TEXT,
-  logo_url TEXT
+  logo_url TEXT,
+  modal_awal INTEGER,          -- titik nol Pertumbuhan Modal, diisi otomatis dari snapshot hari pertama fitur aktif
+  modal_awal_tanggal TEXT      -- tanggal snapshot yang dipakai sbg modal_awal
 );
 INSERT OR IGNORE INTO store_settings (id, store_name) VALUES (1, 'Toko Saya');
 
@@ -174,6 +176,18 @@ CREATE TABLE IF NOT EXISTS bot_sessions (
 CREATE TABLE IF NOT EXISTS ppob_blocked_keywords (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   keyword TEXT UNIQUE NOT NULL,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Snapshot harian aset bersih untuk fitur Pertumbuhan Modal (lihat modal.js).
+-- Tidak backfill data lama — mulai dihitung maju sejak fitur ini aktif.
+CREATE TABLE IF NOT EXISTS modal_snapshots (
+  tanggal TEXT PRIMARY KEY, -- format YYYY-MM-DD
+  kas_dompet INTEGER NOT NULL DEFAULT 0,
+  nilai_stok INTEGER NOT NULL DEFAULT 0,
+  piutang INTEGER NOT NULL DEFAULT 0,
+  hutang INTEGER NOT NULL DEFAULT 0,
+  aset_bersih INTEGER NOT NULL DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now'))
 );
 

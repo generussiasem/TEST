@@ -5,6 +5,7 @@ import { sendTelegramMessage } from "./telegram.js";
 import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, syncPpobPrices, getProviderConfig, finalizePpobOrder, checkDistributorBalance } from "./ppob.js";
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
 import { getEmployeeByChatId, handleLinkCommand, sendMainMenu, handleAdminCallback, handleAdminSessionMessage } from "./bot-admin.js";
+import { hitungAsetBersih, catatSnapshotModalHarian } from "./modal.js";
 import miniappRouter from "./miniapp.js";
 import { renderMiniAppPage } from "./miniapp-page.js";
 
@@ -76,6 +77,70 @@ app.post("/api/auth/login", async (c) => {
 
 app.get("/api/auth/me", async (c) => c.json(c.get("employee")));
 
+// Profil akun sendiri (termasuk username, yang TIDAK ikut disimpan di token).
+app.get("/api/auth/profile", async (c) => {
+  const employee = c.get("employee");
+  const row = await c.env.DB.prepare(
+    "SELECT id, name, username, role FROM employees WHERE id = ?"
+  )
+    .bind(employee.employeeId)
+    .first();
+  if (!row) return c.json({ ok: false, error: "Akun tidak ditemukan" }, 404);
+  return c.json(row);
+});
+
+// Ubah username dan/atau password AKUN SENDIRI. Wajib isi password lama sbg
+// verifikasi — supaya kalau ada yang memakai perangkat kasir yang tertinggal
+// dalam keadaan login, dia tetap tidak bisa membajak akunnya.
+//
+// Catatan: token sesi bersifat stateless (lihat auth.js), jadi token lama yang
+// terlanjur beredar TETAP berlaku sampai kedaluwarsa sendiri (12 jam) walau
+// password sudah diganti. Kalau password diganti karena bocor/dicurigai
+// disalahgunakan, ganti juga AUTH_SECRET di Worker supaya semua token lama
+// (milik semua karyawan) langsung hangus.
+app.put("/api/auth/credentials", async (c) => {
+  const employee = c.get("employee");
+  const { current_password, new_username, new_password } = await c.req.json();
+
+  if (!current_password) {
+    return c.json({ ok: false, error: "Password saat ini wajib diisi" }, 400);
+  }
+  if (!new_username && !new_password) {
+    return c.json({ ok: false, error: "Isi username baru atau password baru" }, 400);
+  }
+  if (new_password && new_password.length < 8) {
+    return c.json({ ok: false, error: "Password baru minimal 8 karakter" }, 400);
+  }
+
+  const row = await c.env.DB.prepare("SELECT * FROM employees WHERE id = ?")
+    .bind(employee.employeeId)
+    .first();
+  if (!row) return c.json({ ok: false, error: "Akun tidak ditemukan" }, 404);
+  if (!(await verifyPassword(current_password, row.password_hash))) {
+    return c.json({ ok: false, error: "Password saat ini salah" }, 401);
+  }
+
+  const username = (new_username || "").trim();
+  if (username && username !== row.username) {
+    const taken = await c.env.DB.prepare(
+      "SELECT id FROM employees WHERE username = ? AND id != ?"
+    )
+      .bind(username, row.id)
+      .first();
+    if (taken) return c.json({ ok: false, error: "Username sudah dipakai karyawan lain" }, 409);
+    await c.env.DB.prepare("UPDATE employees SET username = ? WHERE id = ?").bind(username, row.id).run();
+  }
+
+  if (new_password) {
+    const password_hash = await hashPassword(new_password);
+    await c.env.DB.prepare("UPDATE employees SET password_hash = ? WHERE id = ?")
+      .bind(password_hash, row.id)
+      .run();
+  }
+
+  return c.json({ ok: true });
+});
+
 // ---------------------------------------------------------------------------
 // PENGATURAN TOKO & KARYAWAN (khusus admin)
 // ---------------------------------------------------------------------------
@@ -91,6 +156,50 @@ app.put("/api/store-settings", requireAdmin, async (c) => {
     "UPDATE store_settings SET store_name = ?, address = ?, logo_url = ? WHERE id = 1"
   )
     .bind(store_name, address || null, logo_url || null)
+    .run();
+  return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// PERTUMBUHAN MODAL — aset bersih (kas+dompet, stok, piutang, hutang) harian
+// ---------------------------------------------------------------------------
+
+app.get("/api/modal", async (c) => {
+  const settings = await c.env.DB.prepare(
+    "SELECT modal_awal, modal_awal_tanggal FROM store_settings WHERE id = 1"
+  ).first();
+  const modalSaatIni = await hitungAsetBersih(c.env);
+  const { results: snapshots } = await c.env.DB.prepare(
+    "SELECT * FROM modal_snapshots ORDER BY tanggal ASC LIMIT 366"
+  ).all();
+
+  const modalAwal = settings?.modal_awal ?? null;
+  const pertumbuhanNominal = modalAwal === null ? null : modalSaatIni.asetBersih - modalAwal;
+  const pertumbuhanPersen = modalAwal ? (pertumbuhanNominal / modalAwal) * 100 : null;
+
+  return c.json({
+    modalAwal,
+    modalAwalTanggal: settings?.modal_awal_tanggal ?? null,
+    modalSaatIni: modalSaatIni.asetBersih,
+    rincianSaatIni: modalSaatIni,
+    pertumbuhanNominal,
+    pertumbuhanPersen,
+    snapshots,
+  });
+});
+
+// Koreksi manual Modal Awal (titik nol) lewat halaman Pengaturan. Kalau
+// belum pernah ada snapshot sama sekali (cron harian belum sempat jalan),
+// tanggalnya diisi hari ini juga supaya tidak menggantung kosong.
+app.put("/api/modal-awal", requireAdmin, async (c) => {
+  const { modal_awal } = await c.req.json();
+  if (typeof modal_awal !== "number" || Number.isNaN(modal_awal)) {
+    return c.json({ ok: false, error: "modal_awal harus berupa angka" }, 400);
+  }
+  const settings = await c.env.DB.prepare("SELECT modal_awal_tanggal FROM store_settings WHERE id = 1").first();
+  const tanggal = settings?.modal_awal_tanggal || new Date().toISOString().slice(0, 10);
+  await c.env.DB.prepare("UPDATE store_settings SET modal_awal = ?, modal_awal_tanggal = ? WHERE id = 1")
+    .bind(modal_awal, tanggal)
     .run();
   return c.json({ ok: true });
 });
@@ -115,7 +224,22 @@ app.post("/api/employees", requireAdmin, async (c) => {
 
 app.put("/api/employees/:id", requireAdmin, async (c) => {
   const id = c.req.param("id");
-  const { name, role, active, password } = await c.req.json();
+  const { name, username, role, active, password } = await c.req.json();
+
+  // Username boleh diubah admin, tapi harus tetap unik (kolomnya UNIQUE di
+  // schema — dicek duluan di sini biar pesan errornya jelas, bukan error SQL).
+  const target = await c.env.DB.prepare("SELECT id, username FROM employees WHERE id = ?").bind(id).first();
+  if (!target) return c.json({ ok: false, error: "Karyawan tidak ditemukan" }, 404);
+
+  const newUsername = (username || "").trim();
+  if (newUsername && newUsername !== target.username) {
+    const taken = await c.env.DB.prepare("SELECT id FROM employees WHERE username = ? AND id != ?")
+      .bind(newUsername, id)
+      .first();
+    if (taken) return c.json({ ok: false, error: "Username sudah dipakai karyawan lain" }, 409);
+    await c.env.DB.prepare("UPDATE employees SET username = ? WHERE id = ?").bind(newUsername, id).run();
+  }
+
   if (password) {
     const password_hash = await hashPassword(password);
     await c.env.DB.prepare(
@@ -1446,6 +1570,14 @@ export default {
       ctx.waitUntil(cleanupOldData(env));
     } else if (event.cron === "0 23 * * *") {
       ctx.waitUntil(syncPpobPrices(env));
+    } else if (event.cron === "0 17 * * *") {
+      // 17:00 UTC = 00:00 WIB — pas pergantian hari toko, catat snapshot
+      // aset bersih untuk fitur Pertumbuhan Modal (lihat modal.js).
+      ctx.waitUntil(
+        catatSnapshotModalHarian(env).catch((err) =>
+          console.error("[cron] catatSnapshotModalHarian gagal:", err.message)
+        )
+      );
     } else if (event.cron === "0 */6 * * *") {
       // Sinkron saldo dompet distributor PPOB ke angka ASLI dari OkeConnect
       // (perintah "Saldo.PIN") tiap 6 jam — lihat checkDistributorBalance di

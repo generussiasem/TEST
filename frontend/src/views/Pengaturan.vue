@@ -9,15 +9,32 @@ const error = ref("");
 const okMsg = ref("");
 const walletMsg = ref("");
 const editingWallet = ref(null);
+const modal = ref(null);
+const modalAwalForm = ref(0);
+const modalMsg = ref("");
 
 function rupiah(n) {
   return "Rp" + Number(n || 0).toLocaleString("id-ID");
 }
 
 async function load() {
-  const [s, w] = await Promise.all([api.get("/api/store-settings"), api.get("/api/wallets")]);
+  const [s, w, m] = await Promise.all([api.get("/api/store-settings"), api.get("/api/wallets"), api.get("/api/modal")]);
   settings.value = s;
   wallets.value = w;
+  modal.value = m;
+  modalAwalForm.value = m.modalAwal ?? 0;
+}
+
+async function simpanModalAwal() {
+  error.value = "";
+  modalMsg.value = "";
+  try {
+    await api.put("/api/modal-awal", { modal_awal: Number(modalAwalForm.value) });
+    modalMsg.value = "Modal Awal disimpan.";
+    await load();
+  } catch (err) {
+    error.value = err.message;
+  }
 }
 
 async function saveSettings() {
@@ -92,6 +109,20 @@ onMounted(load);
           <div class="field"><label>Nama Toko</label><input v-model="settings.store_name" required /></div>
           <div class="field"><label>Alamat</label><input v-model="settings.address" /></div>
           <div class="field"><label>URL Logo</label><input v-model="settings.logo_url" placeholder="https://…" /></div>
+          <button class="btn" type="submit">Simpan</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-bottom: 12px">Modal Awal</h3>
+        <div v-if="modalMsg" class="ok-box">{{ modalMsg }}</div>
+        <p class="muted" style="font-size: 13px; margin-bottom: 12px">
+          Titik nol pembanding untuk halaman <RouterLink to="/modal">Pertumbuhan Modal</RouterLink>. Diisi otomatis dari
+          hasil hitung aset bersih hari pertama fitur ini aktif<span v-if="modal?.modalAwalTanggal"> ({{ modal.modalAwalTanggal }})</span>
+          — ubah di sini kalau perlu dikoreksi.
+        </p>
+        <form @submit.prevent="simpanModalAwal">
+          <div class="field"><label>Nilai Modal Awal (Rp)</label><input v-model.number="modalAwalForm" type="number" /></div>
           <button class="btn" type="submit">Simpan</button>
         </form>
       </div>

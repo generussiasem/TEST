@@ -15,6 +15,8 @@ const routes = [
   { path: "/mutasi", name: "mutasi", component: () => import("./views/Mutasi.vue") },
   { path: "/shift", name: "shift", component: () => import("./views/Shift.vue") },
   { path: "/laporan", name: "laporan", component: () => import("./views/Laporan.vue") },
+  { path: "/modal", name: "modal", component: () => import("./views/Modal.vue") },
+  { path: "/akun", name: "akun", component: () => import("./views/AkunSaya.vue") },
   {
     path: "/karyawan",
     name: "karyawan",

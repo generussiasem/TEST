@@ -34,7 +34,12 @@ function startEdit(e) {
 async function saveEdit() {
   error.value = "";
   try {
-    const body = { name: editing.value.name, role: editing.value.role, active: !!editing.value.active };
+    const body = {
+      name: editing.value.name,
+      username: editing.value.username,
+      role: editing.value.role,
+      active: !!editing.value.active,
+    };
     if (newPassword.value) body.password = newPassword.value;
     await api.put(`/api/employees/${editing.value.id}`, body);
     editing.value = null;
@@ -131,7 +136,7 @@ onMounted(load);
             <tr>
               <template v-if="editing && editing.id === e.id">
                 <td><input v-model="editing.name" /></td>
-                <td class="muted">{{ e.username }}</td>
+                <td><input v-model="editing.username" style="width: 120px" /></td>
                 <td>
                   <select v-model="editing.role">
                     <option value="kasir">Kasir</option>

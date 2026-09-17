@@ -42,6 +42,8 @@ const navItems = computed(() => {
     { to: "/mutasi", label: "Mutasi Akun" },
     { to: "/shift", label: "Tutup Shift" },
     { to: "/laporan", label: "Laporan" },
+    { to: "/modal", label: "Pertumbuhan Modal" },
+    { to: "/akun", label: "Akun Saya" },
   ];
   if (isAdmin()) {
     items.push({ to: "/karyawan", label: "Karyawan" });
