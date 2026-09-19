@@ -13,26 +13,16 @@ compatibility_date = "2026-09-09"
 # di-inject ulang tiap deploy, bukan disimpan manual di dashboard Cloudflare).
 keep_vars = true
 
-# Cron untuk cek ulang transaksi PPOB yang masih "pending" (misal balasan Jabber telat),
-# ditambah jadwal harian jam 03:00 UTC untuk pembersihan riwayat >1 tahun,
-# jadwal tiap 8 jam untuk sinkron otomatis harga PPOB, dan jadwal tiap 6 jam
-# untuk sinkron saldo dompet distributor (lihat scheduled() di index.js —
-# event.cron dipakai untuk membedakan semuanya).
+# Satu cron saja (tiap 5 menit) supaya hemat kuota akun Workers Free (maks 5 cron
+# per AKUN, bukan per Worker). Semua jadwal lain dibedakan di scheduled() (index.js)
+# berdasarkan jam UTC dari event.scheduledTime:
+#   tiap 5 menit        -> cek ulang status order PPOB yang masih pending
+#   03:00 UTC (10 WIB)  -> bersih-bersih data lama (>1 tahun)
+#   23:00 UTC (06 WIB)  -> sinkron harga PPOB OkeConnect, sekali sehari
+#   00/06/12/18 UTC     -> sinkron saldo dompet distributor (Saldo.PIN via Jabber)
+#   17:00 UTC (00 WIB)  -> snapshot harian Pertumbuhan Modal (modal.js)
 [triggers]
-# */5 * * * *  -> cek ulang status order PPOB yang masih pending (tiap 5 menit)
-# 0 3 * * *    -> bersih-bersih data lama (jam 10 pagi WIB)
-# 0 23 * * *   -> sinkron harga PPOB OkeConnect, SEKALI SEHARI jam 06:00 WIB
-#                 (23:00 UTC = 06:00 WIB, karena WIB = UTC+7). Sengaja tidak
-#                 sering-sering — sinkron sekarang cuma menulis baris yang
-#                 berubah (lihat syncPpobPrices di ppob.js), tapi tetap ada
-#                 biaya baca+kirim ke API OkeConnect tiap kali jalan.
-# 0 */6 * * *  -> sinkron saldo dompet distributor ke angka ASLI OkeConnect
-#                 (perintah "Saldo.PIN" via Jabber, lihat checkDistributorBalance
-#                 di ppob.js) — jam 00:00, 06:00, 12:00, 18:00 UTC.
-# 0 17 * * *   -> catat snapshot harian Pertumbuhan Modal, PERSIS jam 00:00 WIB
-#                 (17:00 UTC = 00:00 WIB) — pas pergantian hari toko, lihat
-#                 catatSnapshotModalHarian di modal.js.
-crons = ["*/5 * * * *", "0 3 * * *", "0 23 * * *", "0 */6 * * *", "0 17 * * *"]
+crons = ["*/5 * * * *"]
 
 [[d1_databases]]
 binding = "DB"

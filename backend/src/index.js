@@ -1566,31 +1566,44 @@ async function cleanupOldData(env) {
 export default {
   fetch: app.fetch,
   async scheduled(event, env, ctx) {
-    if (event.cron === "0 3 * * *") {
+    // Hanya ada SATU cron (*/5 * * * *) di wrangler.toml; jadwal lain dibedakan
+    // dari waktu jadwal (UTC) supaya hemat kuota cron akun Workers Free.
+    const t = new Date(event.scheduledTime);
+    const jam = t.getUTCHours();
+    const tepatJam = t.getUTCMinutes() === 0;
+
+    // Tiap 5 menit: cek ulang order PPOB pending. Tugas berbasis Jabber dijalankan
+    // berurutan dalam satu waitUntil supaya tidak ada dua login XMPP bersamaan.
+    ctx.waitUntil(
+      (async () => {
+        await checkPendingOrders(env).catch((err) =>
+          console.error("[cron] checkPendingOrders gagal:", err.message)
+        );
+        // 00, 06, 12, 18 UTC: sinkron saldo dompet distributor (Saldo.PIN).
+        // Dibungkus catch: kalau Jabber gangguan, jangan ganggu tugas lain.
+        if (tepatJam && jam % 6 === 0) {
+          await checkDistributorBalance(env).catch((err) =>
+            console.error("[cron] checkDistributorBalance gagal:", err.message)
+          );
+        }
+      })()
+    );
+
+    // 03:00 UTC: bersih-bersih data lama
+    if (tepatJam && jam === 3) {
       ctx.waitUntil(cleanupOldData(env));
-    } else if (event.cron === "0 23 * * *") {
+    }
+    // 23:00 UTC = 06:00 WIB: sinkron harga PPOB
+    if (tepatJam && jam === 23) {
       ctx.waitUntil(syncPpobPrices(env));
-    } else if (event.cron === "0 17 * * *") {
-      // 17:00 UTC = 00:00 WIB — pas pergantian hari toko, catat snapshot
-      // aset bersih untuk fitur Pertumbuhan Modal (lihat modal.js).
+    }
+    // 17:00 UTC = 00:00 WIB: snapshot aset bersih (Pertumbuhan Modal)
+    if (tepatJam && jam === 17) {
       ctx.waitUntil(
         catatSnapshotModalHarian(env).catch((err) =>
           console.error("[cron] catatSnapshotModalHarian gagal:", err.message)
         )
       );
-    } else if (event.cron === "0 */6 * * *") {
-      // Sinkron saldo dompet distributor PPOB ke angka ASLI dari OkeConnect
-      // (perintah "Saldo.PIN") tiap 6 jam — lihat checkDistributorBalance di
-      // ppob.js. Dibungkus try/catch: kalau Jabber sedang gangguan/timeout,
-      // biarkan lewat saja, jangan sampai bikin scheduled() ini gagal total
-      // dan mengganggu jadwal cron lain yang kebetulan jalan bersamaan.
-      ctx.waitUntil(
-        checkDistributorBalance(env).catch((err) =>
-          console.error("[cron] checkDistributorBalance gagal:", err.message)
-        )
-      );
-    } else {
-      ctx.waitUntil(checkPendingOrders(env));
     }
   },
 };
