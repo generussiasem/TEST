@@ -183,3 +183,38 @@ npm run deploy
   setelah 5 menit tanpa balasan (`SESSION_TIMEOUT_MINUTES` di `bot-admin.js`)
   — kalau karyawan telat balas, bot akan minta kirim `/menu` lagi daripada
   salah mengartikan pesan berikutnya sebagai nominal.
+
+## Pembayaran hutang ke dompet & Titipan pelanggan
+
+Pembayaran hutang sekarang tercatat ke **dompet** (saldo, arus kas, laporan
+shift ikut benar), dan pelanggan bisa **menitipkan** kelebihan uang untuk
+transaksi berikutnya.
+
+**Urutan deploy (penting):**
+1. Jalankan `migrations/2026-09-add-titipan-bayar-hutang.sql` di D1 **lebih
+   dulu** (Console D1 atau `wrangler d1 execute kasir-ppob-db --remote --file=...`).
+   Kode baru langsung memakai kolom-kolom itu.
+2. Baru push/deploy kode.
+
+**Aturan:**
+- Bayar hutang: wajib pilih dompet. Kalau uang diterima melebihi hutang,
+  kasir WAJIB memilih *kembalikan tunai* atau *titipkan* (tidak pernah otomatis).
+- Titipan = kewajiban ke pelanggan, mengurangi aset bersih (Pertumbuhan Modal).
+- Metode bayar **Titipan** ada di Kasir dan konfirmasi PPOB (sisa bisa tunai/utang).
+- Transaksi `debt_in` / `debt_out` bukan penjualan: tidak masuk omzet/laba.
+- Menghapus catatan cicilan/titipan membatalkan seluruh pembayarannya
+  (dompet dikembalikan).
+
+## Penjualan PPOB masuk ke dompet
+
+Saat konfirmasi order PPOB (web, mini app, bot), kasir **memilih dompet
+tempat uang diterima** di setiap transaksi (Kas/Bank/E-Wallet). Efeknya:
+dompet penerima **+harga jual**, saldo distributor **−modal**. Order yang
+dibayar Utang tidak perlu dompet (uang masuk nanti lewat Bayar Hutang), dan
+bagian yang ditutup titipan juga tidak menambah dompet.
+
+- Cron tidak lagi mencatat otomatis order PPOB tunai yang baru ketahuan sukses
+  (karena belum ada dompet yang dipilih) — order menunggu konfirmasi kasir,
+  dan bot memberi tahu. Order Utang tetap dicatat otomatis.
+- Transaksi PPOB **lama** tidak dikoreksi: uangnya tidak pernah tercatat masuk.
+  Sesuaikan saldo dompet sekali secara manual (Modal Masuk atau Mutasi).

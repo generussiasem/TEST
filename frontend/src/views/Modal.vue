@@ -71,7 +71,7 @@ onMounted(load);
     <div class="page-head">
       <div>
         <h1>Pertumbuhan Modal</h1>
-        <p>Aset bersih toko (kas + dompet + stok + piutang − hutang), dicatat tiap hari</p>
+        <p>Aset bersih toko (kas + dompet + stok + piutang − hutang − titipan pelanggan), dicatat tiap hari</p>
       </div>
     </div>
 
@@ -134,6 +134,10 @@ onMounted(load);
             <tr>
               <td>Hutang ke Supplier</td>
               <td class="num" style="text-align: right; color: var(--red)">-{{ rupiah(data.rincianSaatIni.hutang) }}</td>
+            </tr>
+            <tr v-if="data.rincianSaatIni.titipan">
+              <td>Titipan Pelanggan (uang milik pelanggan)</td>
+              <td class="num" style="text-align: right; color: var(--red)">-{{ rupiah(data.rincianSaatIni.titipan) }}</td>
             </tr>
           </tbody>
         </table>

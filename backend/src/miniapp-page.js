@@ -137,7 +137,7 @@ async function loadContacts(q) {
     listEl.innerHTML = rows.map((c) =>
       '<div class="list-item" data-id="' + c.id + '">' +
         '<div class="row"><b>' + esc(c.name) + '</b>' +
-        '<span class="badge">' + (c.total_debt > 0 ? rupiah(c.total_debt) : "Lunas") + '</span></div>' +
+        '<span class="badge">' + (c.total_debt > 0 ? rupiah(c.total_debt) : (c.deposit > 0 ? "Titipan " + rupiah(c.deposit) : "Lunas")) + '</span></div>' +
         (c.phone ? '<div class="muted">' + esc(c.phone) + '</div>' : "") +
       '</div>'
     ).join("");
@@ -183,7 +183,7 @@ async function showContactDetail(contactId) {
     const riwayatHtml = data.riwayat.length
       ? data.riwayat.map((d) =>
           '<div class="list-item"><div class="row"><span>' +
-          (d.type === "cicilan" ? "Bayar" : d.type === "utang" ? "Utang" : "Piutang") +
+          ({ cicilan: "Bayar", utang: "Utang", piutang: "Piutang", titip: "Titip", pakai_titip: "Pakai Titipan", tarik_titip: "Tarik Titipan" }[d.type] || d.type) +
           '</span><b>' + rupiah(d.amount) + '</b></div>' +
           '<div class="muted">' + new Date(d.date).toLocaleDateString("id-ID") + (d.note ? " — " + esc(d.note) : "") + '</div></div>'
         ).join("")
@@ -195,9 +195,11 @@ async function showContactDetail(contactId) {
         '<h2>' + esc(c.name) + '</h2>' +
         (c.phone ? '<p class="muted">' + esc(c.phone) + '</p>' : "") +
         '<div class="row"><span>Sisa Hutang</span><b>' + rupiah(c.total_debt) + '</b></div>' +
+        (c.deposit > 0 ? '<div class="row"><span>Saldo Titipan</span><b>' + rupiah(c.deposit) + '</b></div>' : '') +
       '</div>' +
       '<div class="card">' +
         '<button class="btn" id="btnBayar">💵 Bayar / Cicil Hutang</button>' +
+        '<button class="btn secondary" id="btnTitip">💰 Titip Uang</button>' +
         '<button class="btn secondary" id="btnCatatBaru">➕ Catat Hutang Baru</button>' +
       '</div>' +
       '<div class="card"><b>Riwayat Terakhir</b>' + riwayatHtml + '</div>';
@@ -205,32 +207,86 @@ async function showContactDetail(contactId) {
     document.getElementById("backLink").addEventListener("click", renderHutangTab);
     document.getElementById("btnBayar").addEventListener("click", () => showDebtForm(c, "cicilan"));
     document.getElementById("btnCatatBaru").addEventListener("click", () => showDebtForm(c, "piutang"));
+    document.getElementById("btnTitip").addEventListener("click", () => showDebtForm(c, "titip"));
   } catch (err) {
     body.innerHTML = '<div class="error">' + esc(err.message) + '</div>';
   }
 }
 
-function showDebtForm(contact, type) {
+async function showDebtForm(contact, type) {
   const body = document.getElementById("tabBody");
-  const title = type === "cicilan" ? "Bayar / Cicil Hutang" : "Catat Hutang Baru";
+  const isPay = type === "cicilan";
+  const needsWallet = type === "cicilan" || type === "titip";
+  const isSupplier = contact.type === "supplier";
+  const title = type === "cicilan" ? "Bayar / Cicil Hutang" : type === "titip" ? "Titip Uang" : "Catat Hutang Baru";
+  const amountLabel = type === "cicilan" ? "Uang diterima (Rp)" : "Nominal (Rp)";
+
+  let wallets = [];
+  if (needsWallet) {
+    body.innerHTML = '<div class="spinner">Memuat...</div>';
+    try { wallets = await api("/wallets"); } catch (err) { body.innerHTML = '<div class="error">' + esc(err.message) + '</div>'; return; }
+  }
+  const walletOpts = wallets.map((w) => '<option value="' + w.id + '">' + esc(w.name) + '</option>').join("");
+  const sisaHutang = Math.max(Number(contact.total_debt) || 0, 0);
+
   body.innerHTML =
     '<span class="back-link" id="backLink">&larr; Kembali</span>' +
     '<div class="card">' +
       '<h2>' + title + '</h2>' +
       '<p class="muted">' + esc(contact.name) + ' — sisa hutang saat ini: ' + rupiah(contact.total_debt) + '</p>' +
-      '<label>Nominal (Rp)</label><input id="debtAmount" type="number" inputmode="numeric" placeholder="mis. 50000" />' +
+      '<label>' + amountLabel + '</label><input id="debtAmount" type="number" inputmode="numeric" placeholder="mis. 50000" />' +
+      (needsWallet
+        ? '<label>Dompet tempat uang diterima</label><select id="debtWallet"><option value="">Pilih dompet...</option>' + walletOpts + '</select>'
+        : '') +
+      '<div id="excessBox" class="hidden">' +
+        '<p class="muted" id="excessText"></p>' +
+        '<div class="pill-row">' +
+          '<div class="pill" data-kel="kembalikan">Kembalikan tunai</div>' +
+          '<div class="pill" data-kel="titipkan">Titipkan</div>' +
+        '</div>' +
+      '</div>' +
       '<label>Catatan (opsional)</label><input id="debtNote" placeholder="mis. bayar sebagian" />' +
       '<div id="debtMsg"></div>' +
-      '<button class="btn' + (type === "cicilan" ? "" : " secondary") + '" id="saveDebt">Simpan</button>' +
+      '<button class="btn' + (type === "piutang" ? " secondary" : "") + '" id="saveDebt">Simpan</button>' +
     '</div>';
   document.getElementById("backLink").addEventListener("click", () => showContactDetail(contact.id));
+
+  // Kelebihan bayar (khusus bayar hutang pelanggan): kasir WAJIB memilih.
+  let kelebihan = null;
+  let lebih = 0;
+  const excessBox = document.getElementById("excessBox");
+  const amountEl = document.getElementById("debtAmount");
+  function refreshExcess() {
+    const uang = Number(amountEl.value) || 0;
+    lebih = isPay && !isSupplier ? Math.max(uang - sisaHutang, 0) : 0;
+    if (lebih > 0) {
+      const untukHutang = uang - lebih;
+      document.getElementById("excessText").textContent =
+        "Uang diterima " + rupiah(uang) + (untukHutang > 0 ? ", melunasi " + rupiah(untukHutang) : ", pelanggan tidak punya hutang") +
+        ". Sisa " + rupiah(lebih) + " mau diapakan?";
+      excessBox.classList.remove("hidden");
+    } else {
+      excessBox.classList.add("hidden");
+      kelebihan = null;
+      excessBox.querySelectorAll(".pill").forEach((el) => el.classList.remove("active"));
+    }
+  }
+  amountEl.addEventListener("input", refreshExcess);
+  excessBox.querySelectorAll(".pill").forEach((el) => el.addEventListener("click", () => {
+    kelebihan = el.dataset.kel;
+    excessBox.querySelectorAll(".pill").forEach((x) => x.classList.toggle("active", x === el));
+  }));
+
   document.getElementById("saveDebt").addEventListener("click", async () => {
-    const amount = Number(document.getElementById("debtAmount").value);
+    const amount = Number(amountEl.value);
     const note = document.getElementById("debtNote").value.trim();
     const msgEl = document.getElementById("debtMsg");
     if (!amount || amount <= 0) { msgEl.innerHTML = '<div class="error">Nominal tidak valid</div>'; return; }
+    const walletId = needsWallet ? Number(document.getElementById("debtWallet").value) : null;
+    if (needsWallet && !walletId) { msgEl.innerHTML = '<div class="error">Pilih dompet dulu</div>'; return; }
+    if (lebih > 0 && !kelebihan) { msgEl.innerHTML = '<div class="error">Pilih dulu: kembalikan tunai atau titipkan</div>'; return; }
     try {
-      await api("/debts", { method: "POST", body: JSON.stringify({ contactId: contact.id, type, amount, note }) });
+      await api("/debts", { method: "POST", body: JSON.stringify({ contactId: contact.id, type, amount, note, walletId, kelebihan }) });
       haptic("ok");
       showContactDetail(contact.id);
     } catch (err) {
@@ -379,9 +435,16 @@ async function showOrderStatus(refId, product) {
   poll();
 }
 
-function renderConfirmForm(order, product) {
+async function renderConfirmForm(order, product) {
   const body = document.getElementById("tabBody");
   const defaultPrice = order.sell_price || product.sell_price || 0;
+  // Order yang dibayar Utang tidak ada uang masuk; selain itu kasir memilih dompet penerima.
+  const perluDompet = order.paid_method !== "utang";
+  let wallets = [];
+  if (perluDompet) {
+    try { wallets = await api("/wallets"); } catch (err) { body.innerHTML = '<div class="error">' + esc(err.message) + '</div>'; return; }
+  }
+  const walletOpts = wallets.map((w) => '<option value="' + w.id + '">' + esc(w.name) + '</option>').join("");
   body.innerHTML =
     '<div class="card">' +
       '<h2>✅ Order Sukses</h2>' +
@@ -389,6 +452,9 @@ function renderConfirmForm(order, product) {
       '<p class="muted">Balasan provider: ' + esc(order.raw_reply || "-") + '</p>' +
       '<label>Harga Jual Final (Rp)</label>' +
       '<input id="confirmPrice" type="number" value="' + defaultPrice + '" />' +
+      (perluDompet
+        ? '<label>Uang diterima di dompet</label><select id="confirmWallet"><option value="">Pilih dompet...</option>' + walletOpts + '</select>'
+        : '<p class="muted">Dibayar utang — belum ada uang masuk.</p>') +
       '<div id="confirmMsg"></div>' +
       '<button class="btn" id="confirmBtn">Konfirmasi & Catat</button>' +
     '</div>';
@@ -396,8 +462,10 @@ function renderConfirmForm(order, product) {
     const sellPrice = Number(document.getElementById("confirmPrice").value);
     const msgEl = document.getElementById("confirmMsg");
     if (!sellPrice || sellPrice <= 0) { msgEl.innerHTML = '<div class="error">Harga tidak valid</div>'; return; }
+    const receiveWalletId = perluDompet ? Number(document.getElementById("confirmWallet").value) : null;
+    if (perluDompet && !receiveWalletId) { msgEl.innerHTML = '<div class="error">Pilih dompet tempat uang diterima</div>'; return; }
     try {
-      await api("/ppob-orders/" + order.ref_id + "/konfirmasi", { method: "POST", body: JSON.stringify({ sellPrice }) });
+      await api("/ppob-orders/" + order.ref_id + "/konfirmasi", { method: "POST", body: JSON.stringify({ sellPrice, receiveWalletId }) });
       haptic("ok");
       const body2 = document.getElementById("tabBody");
       body2.innerHTML = '<div class="card"><div class="success">✅ Dicatat dengan harga ' + rupiah(sellPrice) + '. Sudah masuk laporan web.</div><button class="btn secondary" id="doneBtn">Selesai</button></div>';

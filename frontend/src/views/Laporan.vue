@@ -49,7 +49,7 @@ const otherIncomeMsg = ref("");
 const capitalForm = ref({ direction: "capital_in", category: "Setoran Modal", amount: 0, wallet_id: "", note: "" });
 const capitalMsg = ref("");
 
-const typeLabel = { sale: "Penjualan", purchase: "Pembelian Stok", expense: "Biaya", mutation: "Mutasi Akun", capital_in: "Modal Masuk", capital_out: "Modal Keluar" };
+const typeLabel = { sale: "Penjualan", purchase: "Pembelian Stok", expense: "Biaya", mutation: "Mutasi Akun", capital_in: "Modal Masuk", capital_out: "Modal Keluar", debt_in: "Terima Bayar Hutang/Titipan", debt_out: "Bayar Utang/Tarik Titipan" };
 
 function rupiah(n) {
   return "Rp" + Number(n || 0).toLocaleString("id-ID");
@@ -395,7 +395,7 @@ onMounted(async () => {
               <td class="muted" style="font-size: 12.5px">{{ new Date(t.date).toLocaleString("id-ID") }}</td>
               <td>{{ typeLabel[t.type] || t.type }}</td>
               <td>{{ t.category || "—" }}</td>
-              <td class="num" :style="{ color: t.type === 'sale' || t.type === 'capital_in' ? 'var(--till-deep)' : 'var(--red)' }">{{ rupiah(t.amount) }}</td>
+              <td class="num" :style="{ color: t.type === 'sale' || t.type === 'capital_in' || t.type === 'debt_in' ? 'var(--till-deep)' : 'var(--red)' }">{{ rupiah(t.amount) }}</td>
               <td class="muted">{{ t.note || "—" }}</td>
               <td style="white-space: nowrap">
                 <button class="btn ghost" style="padding: 4px 10px; margin-right: 6px" @click="startEdit(t)">Ubah</button>

@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS contacts (
   phone TEXT,
   type TEXT NOT NULL DEFAULT 'pelanggan', -- pelanggan | supplier
   total_debt INTEGER NOT NULL DEFAULT 0,
+  deposit INTEGER NOT NULL DEFAULT 0, -- saldo TITIPAN pelanggan (mis. kembalian yang dititipkan); kewajiban toko ke pelanggan
   created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -102,7 +103,7 @@ CREATE INDEX IF NOT EXISTS idx_shifts_status ON shifts(status);
 CREATE TABLE IF NOT EXISTS transactions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   date TEXT NOT NULL DEFAULT (datetime('now')),
-  type TEXT NOT NULL, -- sale | purchase | expense | mutation | capital_in | capital_out
+  type TEXT NOT NULL, -- sale | purchase | expense | mutation | capital_in | capital_out | debt_in | debt_out (debt_in/out = uang masuk/keluar dompet karena bayar hutang/titipan, BUKAN penjualan)
   category TEXT,
   wallet_id INTEGER REFERENCES wallets(id),      -- utk mutation: akun ASAL
   to_wallet_id INTEGER REFERENCES wallets(id),   -- cuma diisi kalau type='mutation': akun TUJUAN
@@ -113,6 +114,7 @@ CREATE TABLE IF NOT EXISTS transactions (
   contact_id INTEGER REFERENCES contacts(id),
   employee_id INTEGER REFERENCES employees(id), -- kasir yang input
   shift_id INTEGER REFERENCES shifts(id), -- shift kasir yang sedang berjalan saat transaksi dibuat (kalau ada)
+  deposit_used INTEGER NOT NULL DEFAULT 0, -- bagian dari amount (type='sale') yang dibayar pakai saldo titipan pelanggan (tidak menambah dompet)
   created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_transactions_shift ON transactions(shift_id);
@@ -131,9 +133,11 @@ CREATE TABLE IF NOT EXISTS debts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   contact_id INTEGER NOT NULL REFERENCES contacts(id),
   date TEXT NOT NULL DEFAULT (datetime('now')),
-  type TEXT NOT NULL, -- utang | piutang | cicilan
+  type TEXT NOT NULL, -- utang | piutang | cicilan | titip | pakai_titip | tarik_titip
   amount INTEGER NOT NULL,
-  note TEXT
+  note TEXT,
+  wallet_id INTEGER,      -- dompet tempat uang pembayaran/titipan diterima atau dikeluarkan (tanpa FK, sengaja)
+  transaction_id INTEGER  -- transaksi dompet/penjualan yang tertaut (tanpa FK supaya cron bersih-bersih 1 tahun tidak error)
 );
 
 -- Transaksi PPOB via Jabber (OkeConnect)
@@ -187,6 +191,7 @@ CREATE TABLE IF NOT EXISTS modal_snapshots (
   nilai_stok INTEGER NOT NULL DEFAULT 0,
   piutang INTEGER NOT NULL DEFAULT 0,
   hutang INTEGER NOT NULL DEFAULT 0,
+  titipan INTEGER NOT NULL DEFAULT 0,
   aset_bersih INTEGER NOT NULL DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now'))
 );

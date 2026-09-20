@@ -9,7 +9,8 @@ const cart = ref([]); // { product, qty }
 const barcodeInput = ref("");
 const search = ref("");
 const walletId = ref(null);
-const paidMethod = ref("tunai"); // tunai | utang
+const paidMethod = ref("tunai"); // tunai | utang | titipan
+const sisaMethod = ref("tunai"); // khusus titipan: cara bayar SISA kalau titipan kurang — tunai | utang
 const contactId = ref(null);
 const error = ref("");
 const okMsg = ref("");
@@ -23,6 +24,17 @@ function rupiah(n) {
 
 const total = computed(() => cart.value.reduce((s, l) => s + l.product.sell_price * l.qty, 0));
 const cost = computed(() => cart.value.reduce((s, l) => s + l.product.cost_price * l.qty, 0));
+
+// Bayar pakai titipan: titipan menutup sebagian/seluruh total, sisanya (kalau ada) tunai/utang.
+const selectedContact = computed(() => contacts.value.find((x) => x.id === contactId.value) || null);
+const titipanTersedia = computed(() => Math.max(Number(selectedContact.value?.deposit) || 0, 0));
+const titipanDipakai = computed(() => (paidMethod.value === "titipan" ? Math.min(titipanTersedia.value, total.value) : 0));
+const titipanSisa = computed(() => (paidMethod.value === "titipan" ? total.value - titipanDipakai.value : 0));
+
+function pilihMetode(m) {
+  paidMethod.value = m;
+  error.value = "";
+}
 
 const searchResults = computed(() => {
   if (!search.value.trim()) return [];
@@ -83,6 +95,20 @@ async function checkout() {
     error.value = "Pilih kontak dulu untuk pembayaran Utang.";
     return;
   }
+  if (paidMethod.value === "titipan") {
+    if (!contactId.value) {
+      error.value = "Pilih pelanggan dulu untuk pembayaran pakai titipan.";
+      return;
+    }
+    if (titipanTersedia.value <= 0) {
+      error.value = `${selectedContact.value?.name} tidak punya saldo titipan.`;
+      return;
+    }
+    if (titipanSisa.value > 0 && sisaMethod.value === "tunai" && !walletId.value) {
+      error.value = "Pilih akun untuk membayar sisa tunai.";
+      return;
+    }
+  }
   error.value = "";
   okMsg.value = "";
   submitting.value = true;
@@ -93,14 +119,19 @@ async function checkout() {
       cost: cost.value,
       paidMethod: paidMethod.value,
       contactName: contactId.value ? contacts.value.find((x) => x.id === contactId.value)?.name : null,
+      titipanDipakai: titipanDipakai.value,
+      titipanSisa: titipanSisa.value,
+      sisaMethod: sisaMethod.value,
       date: new Date().toLocaleString("id-ID"),
     };
+    const bayarSisaTunai = paidMethod.value === "titipan" && titipanSisa.value > 0 && sisaMethod.value === "tunai";
     await api.post("/api/transactions", {
       type: "sale",
       category: "Penjualan Warung",
-      wallet_id: paidMethod.value === "tunai" ? walletId.value : null,
-      contact_id: paidMethod.value === "utang" ? contactId.value : null,
+      wallet_id: paidMethod.value === "tunai" || bayarSisaTunai ? walletId.value : null,
+      contact_id: paidMethod.value === "utang" || paidMethod.value === "titipan" ? contactId.value : null,
       paid_method: paidMethod.value,
+      sisa_method: paidMethod.value === "titipan" ? sisaMethod.value : undefined,
       items: cart.value.map((l) => ({ product_id: l.product.id, qty: l.qty })),
     });
     okMsg.value = `Transaksi berhasil dicatat — total ${rupiah(total.value)}.`;
@@ -125,6 +156,11 @@ function bagikanWA() {
   for (const it of r.items) text += `${it.name} x${it.qty} — ${rupiah(it.sell_price * it.qty)}\n`;
   text += `\n*Total: ${rupiah(r.total)}*`;
   if (r.paidMethod === "utang") text += `\n(Utang atas nama ${r.contactName})`;
+  if (r.paidMethod === "titipan") {
+    text += `\n(Dibayar titipan ${rupiah(r.titipanDipakai)} a.n. ${r.contactName}`;
+    if (r.titipanSisa > 0) text += `, sisa ${rupiah(r.titipanSisa)} ${r.sisaMethod === "utang" ? "jadi utang" : "dibayar tunai"}`;
+    text += ")";
+  }
   window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
 }
 
@@ -173,8 +209,9 @@ onMounted(async () => {
         <div class="field">
           <label>Metode Bayar</label>
           <div style="display: flex; gap: 8px">
-            <button class="btn" :class="{ ghost: paidMethod !== 'tunai' }" style="flex: 1; justify-content: center" @click="paidMethod = 'tunai'">Tunai/Bank</button>
-            <button class="btn" :class="{ ghost: paidMethod !== 'utang' }" style="flex: 1; justify-content: center" @click="paidMethod = 'utang'">Utang</button>
+            <button class="btn" :class="{ ghost: paidMethod !== 'tunai' }" style="flex: 1; justify-content: center" @click="pilihMetode('tunai')">Tunai/Bank</button>
+            <button class="btn" :class="{ ghost: paidMethod !== 'utang' }" style="flex: 1; justify-content: center" @click="pilihMetode('utang')">Utang</button>
+            <button class="btn" :class="{ ghost: paidMethod !== 'titipan' }" style="flex: 1; justify-content: center" @click="pilihMetode('titipan')">Titipan</button>
           </div>
         </div>
 
@@ -184,13 +221,40 @@ onMounted(async () => {
             <option v-for="w in wallets" :key="w.id" :value="w.id">{{ w.name }}</option>
           </select>
         </div>
-        <div v-else class="field">
+        <div v-else-if="paidMethod === 'utang'" class="field">
           <label>Kontak (wajib)</label>
           <select v-model.number="contactId">
             <option :value="null" disabled>— pilih pelanggan —</option>
             <option v-for="c in contacts" :key="c.id" :value="c.id">{{ c.name }}</option>
           </select>
         </div>
+        <template v-else>
+          <div class="field">
+            <label>Pelanggan (wajib)</label>
+            <select v-model.number="contactId">
+              <option :value="null" disabled>— pilih pelanggan —</option>
+              <option v-for="c in contacts" :key="c.id" :value="c.id">{{ c.name }}{{ c.deposit > 0 ? ` — titipan ${rupiah(c.deposit)}` : "" }}</option>
+            </select>
+          </div>
+          <div v-if="selectedContact" class="muted" style="font-size: 13px; margin-bottom: 10px">
+            <template v-if="titipanTersedia <= 0">{{ selectedContact.name }} tidak punya saldo titipan.</template>
+            <template v-else>
+              Titipan {{ rupiah(titipanTersedia) }} → dipakai <strong>{{ rupiah(titipanDipakai) }}</strong>
+              <template v-if="titipanSisa > 0"> · kurang <strong>{{ rupiah(titipanSisa) }}</strong></template>
+              <template v-else> · sisa titipan {{ rupiah(titipanTersedia - titipanDipakai) }}</template>
+            </template>
+          </div>
+          <div v-if="titipanSisa > 0 && titipanTersedia > 0" class="field">
+            <label>Sisa {{ rupiah(titipanSisa) }} dibayar</label>
+            <div style="display: flex; gap: 8px">
+              <button type="button" class="btn" :class="{ ghost: sisaMethod !== 'tunai' }" style="flex: 1; justify-content: center" @click="sisaMethod = 'tunai'">Tunai/Bank</button>
+              <button type="button" class="btn" :class="{ ghost: sisaMethod !== 'utang' }" style="flex: 1; justify-content: center" @click="sisaMethod = 'utang'">Jadi Utang</button>
+            </div>
+            <select v-if="sisaMethod === 'tunai'" v-model.number="walletId" style="margin-top: 8px">
+              <option v-for="w in wallets" :key="w.id" :value="w.id">{{ w.name }}</option>
+            </select>
+          </div>
+        </template>
       </div>
 
       <div class="ticket">
@@ -246,6 +310,10 @@ onMounted(async () => {
       <hr />
       <div class="receipt-row"><strong>TOTAL</strong><strong>{{ rupiah(lastReceipt.total) }}</strong></div>
       <div v-if="lastReceipt.paidMethod === 'utang'" style="margin-top: 6px">Utang a.n. {{ lastReceipt.contactName }}</div>
+      <div v-if="lastReceipt.paidMethod === 'titipan'" style="margin-top: 6px">
+        Dibayar titipan {{ rupiah(lastReceipt.titipanDipakai) }} a.n. {{ lastReceipt.contactName }}
+        <span v-if="lastReceipt.titipanSisa > 0">· sisa {{ rupiah(lastReceipt.titipanSisa) }} {{ lastReceipt.sisaMethod === "utang" ? "jadi utang" : "tunai" }}</span>
+      </div>
       <div style="text-align: center; margin-top: 10px">Terima kasih!</div>
     </div>
   </div>

@@ -1,5 +1,6 @@
 import { sendTelegramMessage, editTelegramMessage, answerCallbackQuery } from "./telegram.js";
 import { finalizePpobOrder } from "./ppob.js";
+import { bayarHutang } from "./debt.js";
 
 // ---------------------------------------------------------------------------
 // BOT ADMIN/KASIR — menu Telegram bergaya "tombol" (bukan cuma command teks)
@@ -111,21 +112,21 @@ export async function sendMainMenu(env, chatId, employee) {
 async function renderHutangList(env, page) {
   const offset = page * PAGE_SIZE;
   const { results } = await env.DB.prepare(
-    "SELECT id, name, total_debt FROM contacts WHERE total_debt > 0 ORDER BY total_debt DESC LIMIT ? OFFSET ?"
+    "SELECT id, name, total_debt, deposit FROM contacts WHERE total_debt > 0 OR deposit > 0 ORDER BY total_debt DESC, deposit DESC LIMIT ? OFFSET ?"
   )
     .bind(PAGE_SIZE + 1, offset)
     .all();
   const hasMore = results.length > PAGE_SIZE;
   const rows = results.slice(0, PAGE_SIZE);
 
-  const keyboard = rows.map((cst) => [{ text: `👤 ${cst.name} — ${rupiah(cst.total_debt)}`, callback_data: `h:s:${cst.id}` }]);
+  const keyboard = rows.map((cst) => [{ text: `👤 ${cst.name} — ${cst.total_debt > 0 ? rupiah(cst.total_debt) : `titipan ${rupiah(cst.deposit)}`}`, callback_data: `h:s:${cst.id}` }]);
   const navRow = [];
   if (page > 0) navRow.push({ text: "⬅️ Sebelumnya", callback_data: `h:l:${page - 1}` });
   if (hasMore) navRow.push({ text: "Berikutnya ➡️", callback_data: `h:l:${page + 1}` });
   if (navRow.length) keyboard.push(navRow);
   keyboard.push([{ text: "🏠 Menu Utama", callback_data: "m:main" }]);
 
-  const text = rows.length ? "*Pelanggan dengan hutang:*" : "Tidak ada pelanggan dengan hutang saat ini. 🎉";
+  const text = rows.length ? "*Pelanggan dengan hutang/titipan:*" : "Tidak ada pelanggan dengan hutang saat ini. 🎉";
   return { text, reply_markup: { inline_keyboard: keyboard } };
 }
 
@@ -137,8 +138,8 @@ async function renderHutangDetail(env, contactId) {
   const { results: riwayat } = await env.DB.prepare("SELECT * FROM debts WHERE contact_id = ? ORDER BY date DESC LIMIT 5")
     .bind(contactId)
     .all();
-  const typeLabel = { utang: "Utang", piutang: "Piutang", cicilan: "Bayar" };
-  let text = `*${contact.name}*${contact.phone ? ` (${contact.phone})` : ""}\nSisa Hutang: *${rupiah(contact.total_debt)}*\n\n_Riwayat terakhir:_\n`;
+  const typeLabel = { utang: "Utang", piutang: "Piutang", cicilan: "Bayar", titip: "Titip", pakai_titip: "Pakai titipan", tarik_titip: "Tarik titipan" };
+  let text = `*${contact.name}*${contact.phone ? ` (${contact.phone})` : ""}\nSisa Hutang: *${rupiah(contact.total_debt)}*${contact.deposit > 0 ? `\nSaldo Titipan: *${rupiah(contact.deposit)}*` : ""}\n\n_Riwayat terakhir:_\n`;
   text += riwayat.length
     ? riwayat
         .map(
@@ -204,6 +205,54 @@ async function renderPpobConfirm(env, refId) {
   return { text, reply_markup: { inline_keyboard: keyboard } };
 }
 
+// Langkah sebelum mencatat order PPOB dari bot: kalau dibayar tunai, kasir
+// memilih DOMPET tempat uangnya diterima (lewat tombol). Order yang dibayar
+// Utang langsung dicatat (tidak ada uang masuk).
+async function lanjutKonfirmasiPpob(env, chatId, { refId, sellPrice, employeeId }) {
+  const order = await env.DB.prepare("SELECT * FROM ppob_orders WHERE ref_id = ?").bind(refId).first();
+  if (!order) throw new Error("Order tidak ditemukan");
+  const menuBtn = { inline_keyboard: [[{ text: "🏠 Menu Utama", callback_data: "m:main" }]] };
+  if (order.paid_method === "utang") {
+    await finalizePpobOrder(env, { refId, sellPrice, employeeId });
+    await clearSession(env, chatId);
+    return { text: `✅ Dicatat dengan harga ${rupiah(sellPrice)} (utang). Struk *${refId}* sudah masuk laporan.`, reply_markup: menuBtn };
+  }
+  const { results: wallets } = await env.DB.prepare(
+    "SELECT id, name FROM wallets WHERE type != 'distributor_ppob' ORDER BY id"
+  ).all();
+  if (!wallets.length) throw new Error("Belum ada dompet (Tunai/Bank/E-Wallet). Tambahkan dulu lewat halaman Akun di web.");
+  await setSession(env, chatId, "awaiting_ppob_wallet", { refId, sellPrice });
+  return {
+    text: `Harga jual ${rupiah(sellPrice)}. Uang diterima di dompet mana?`,
+    reply_markup: {
+      inline_keyboard: [
+        ...wallets.map((w) => [{ text: `👛 ${w.name}`, callback_data: `p:w:${w.id}` }]),
+        [{ text: "❌ Batal", callback_data: `p:s:${refId}` }],
+      ],
+    },
+  };
+}
+
+// Eksekusi akhir pembayaran hutang dari bot (logika sama dengan web/mini app: debt.js).
+async function selesaikanBayarHutang(env, chatId, employee, { contactId, nominal, walletId, kelebihan }) {
+  const r = await bayarHutang(env, {
+    contactId,
+    amount: nominal,
+    walletId,
+    kelebihan,
+    note: "Dicatat via bot Telegram",
+    employeeId: employee.id,
+  });
+  await clearSession(env, chatId);
+  const wallet = await env.DB.prepare("SELECT name FROM wallets WHERE id = ?").bind(walletId).first();
+  let text = `✅ Pembayaran ${rupiah(nominal)} dari *${r.contact?.name}* dicatat ke *${wallet?.name || "dompet"}*.`;
+  if (r.titipkan) text += `\n💰 ${rupiah(r.lebih)} dititipkan.`;
+  if (r.dikembalikan) text += `\n💵 Kembalian ${rupiah(r.dikembalikan)} dikembalikan tunai.`;
+  text += `\nSisa hutang: ${rupiah(r.contact?.total_debt)}.`;
+  if (r.contact?.deposit > 0) text += ` Saldo titipan: ${rupiah(r.contact.deposit)}.`;
+  return { text, reply_markup: { inline_keyboard: [[{ text: "🏠 Menu Utama", callback_data: "m:main" }]] } };
+}
+
 // ---------------------------------------------------------------------------
 // ROUTER: tombol ditekan (callback_query)
 // ---------------------------------------------------------------------------
@@ -250,6 +299,40 @@ export async function handleAdminCallback(env, callbackQuery) {
           reply_markup: { inline_keyboard: [[{ text: "❌ Batal", callback_data: `h:s:${arg}` }]] },
         };
       }
+    } else if (ns === "h" && action === "w") {
+      // Kasir memilih DOMPET tempat uang pembayaran diterima
+      const session = await getSession(env, chatId);
+      if (!session || session.state !== "awaiting_debt_wallet") {
+        throw new Error("Sesi pembayaran sudah kedaluwarsa. Mulai lagi dari menu Hutang.");
+      }
+      const { contactId, nominal } = session.data;
+      const contact = await env.DB.prepare("SELECT * FROM contacts WHERE id = ?").bind(contactId).first();
+      if (!contact) throw new Error("Kontak tidak ditemukan");
+      const sisa = Math.max(Number(contact.total_debt) || 0, 0);
+      const lebih = contact.type === "supplier" ? 0 : Math.max(nominal - sisa, 0);
+      if (lebih > 0) {
+        // Uang diterima melebihi hutang: kasir WAJIB memilih, tidak pernah otomatis.
+        await setSession(env, chatId, "awaiting_debt_excess", { contactId, nominal, walletId: Number(arg) });
+        payload = {
+          text: `Uang diterima ${rupiah(nominal)}, sisa hutang ${rupiah(sisa)}.\nAda kelebihan *${rupiah(lebih)}* — mau diapakan?`,
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "💵 Kembalikan tunai", callback_data: "h:k:kembalikan" }],
+              [{ text: "💰 Titipkan untuk transaksi berikutnya", callback_data: "h:k:titipkan" }],
+              [{ text: "❌ Batal", callback_data: `h:s:${contactId}` }],
+            ],
+          },
+        };
+      } else {
+        payload = await selesaikanBayarHutang(env, chatId, employee, { contactId, nominal, walletId: Number(arg) });
+      }
+    } else if (ns === "h" && action === "k") {
+      const session = await getSession(env, chatId);
+      if (!session || session.state !== "awaiting_debt_excess") {
+        throw new Error("Sesi pembayaran sudah kedaluwarsa. Mulai lagi dari menu Hutang.");
+      }
+      const { contactId, nominal, walletId } = session.data;
+      payload = await selesaikanBayarHutang(env, chatId, employee, { contactId, nominal, walletId, kelebihan: arg });
     } else if (ns === "p" && action === "l") {
       payload = await renderPpobList(env, Number(arg) || 0);
     } else if (ns === "p" && action === "s") {
@@ -259,9 +342,19 @@ export async function handleAdminCallback(env, callbackQuery) {
       if (!order) throw new Error("Order tidak ditemukan");
       const product = await env.DB.prepare("SELECT * FROM products WHERE code = ?").bind(order.product_code).first();
       const defaultPrice = order.sell_price || product?.sell_price || 0;
-      await finalizePpobOrder(env, { refId: arg, sellPrice: defaultPrice });
+      payload = await lanjutKonfirmasiPpob(env, chatId, { refId: arg, sellPrice: defaultPrice, employeeId: employee.id });
+    } else if (ns === "p" && action === "w") {
+      // Kasir memilih DOMPET tempat uang pembayaran PPOB diterima
+      const session = await getSession(env, chatId);
+      if (!session || session.state !== "awaiting_ppob_wallet") {
+        throw new Error("Sesi konfirmasi sudah kedaluwarsa. Buka lagi dari menu Konfirmasi Order PPOB.");
+      }
+      const { refId, sellPrice } = session.data;
+      await finalizePpobOrder(env, { refId, sellPrice, receiveWalletId: Number(arg), employeeId: employee.id });
+      await clearSession(env, chatId);
+      const w = await env.DB.prepare("SELECT name FROM wallets WHERE id = ?").bind(Number(arg)).first();
       payload = {
-        text: `✅ Dicatat dengan harga ${rupiah(defaultPrice)}. Struk *${arg}* sudah masuk laporan.`,
+        text: `✅ Dicatat dengan harga ${rupiah(sellPrice)}, uang masuk ke *${w?.name || "dompet"}*. Struk *${refId}* sudah masuk laporan.`,
         reply_markup: { inline_keyboard: [[{ text: "🏠 Menu Utama", callback_data: "m:main" }]] },
       };
     } else if (ns === "p" && action === "edit") {
@@ -312,18 +405,34 @@ export async function handleAdminSessionMessage(env, chatId, text) {
       await sendTelegramMessage(token, chatId, "Nominal tidak valid. Kirim angka saja, mis. 50000.");
       return true;
     }
-    await env.DB.prepare("INSERT INTO debts (contact_id, type, amount, note) VALUES (?, 'cicilan', ?, ?)")
-      .bind(contactId, nominal, "Dicatat via bot Telegram")
-      .run();
-    await env.DB.prepare("UPDATE contacts SET total_debt = total_debt - ? WHERE id = ?").bind(nominal, contactId).run();
-    await clearSession(env, chatId);
-    const contact = await env.DB.prepare("SELECT * FROM contacts WHERE id = ?").bind(contactId).first();
-    await sendTelegramMessage(
-      token,
-      chatId,
-      `✅ Pembayaran ${rupiah(nominal)} dari *${contact?.name}* dicatat. Sisa hutang: ${rupiah(contact?.total_debt)}.`,
-      { reply_markup: { inline_keyboard: [[{ text: "🏠 Menu Utama", callback_data: "m:main" }]] } }
-    );
+    // Langkah berikutnya: pilih DOMPET tempat uang diterima (lewat tombol).
+    const { results: wallets } = await env.DB.prepare(
+      "SELECT id, name FROM wallets WHERE type != 'distributor_ppob' ORDER BY id"
+    ).all();
+    if (!wallets.length) {
+      await clearSession(env, chatId);
+      await sendTelegramMessage(token, chatId, "⚠️ Belum ada dompet (Tunai/Bank/E-Wallet). Tambahkan dulu lewat halaman Akun di web.");
+      return true;
+    }
+    await setSession(env, chatId, "awaiting_debt_wallet", { contactId, nominal });
+    await sendTelegramMessage(token, chatId, `Uang ${rupiah(nominal)} diterima di dompet mana?`, {
+      reply_markup: {
+        inline_keyboard: [
+          ...wallets.map((w) => [{ text: `👛 ${w.name}`, callback_data: `h:w:${w.id}` }]),
+          [{ text: "❌ Batal", callback_data: `h:s:${contactId}` }],
+        ],
+      },
+    });
+    return true;
+  }
+
+  if (session.state === "awaiting_ppob_wallet") {
+    await sendTelegramMessage(token, chatId, "Silakan pilih dompet lewat tombol di atas, atau kirim /menu untuk batal.");
+    return true;
+  }
+
+  if (session.state === "awaiting_debt_wallet" || session.state === "awaiting_debt_excess") {
+    await sendTelegramMessage(token, chatId, "Silakan pilih lewat tombol di atas, atau kirim /menu untuk batal.");
     return true;
   }
 
@@ -333,13 +442,12 @@ export async function handleAdminSessionMessage(env, chatId, text) {
       await sendTelegramMessage(token, chatId, "Harga tidak valid. Kirim angka saja, mis. 12000.");
       return true;
     }
-    await clearSession(env, chatId);
     try {
-      await finalizePpobOrder(env, { refId, sellPrice: nominal });
-      await sendTelegramMessage(token, chatId, `✅ Dicatat dengan harga ${rupiah(nominal)}. Struk *${refId}* sudah masuk laporan.`, {
-        reply_markup: { inline_keyboard: [[{ text: "🏠 Menu Utama", callback_data: "m:main" }]] },
-      });
+      const emp = await getEmployeeByChatId(env, chatId);
+      const p = await lanjutKonfirmasiPpob(env, chatId, { refId, sellPrice: nominal, employeeId: emp?.id });
+      await sendTelegramMessage(token, chatId, p.text, { reply_markup: p.reply_markup });
     } catch (err) {
+      await clearSession(env, chatId);
       await sendTelegramMessage(token, chatId, `⚠️ Gagal: ${err.message}`);
     }
     return true;

@@ -1,4 +1,5 @@
 import { sendJabberCommand } from "./jabber.js";
+import { rencanaPakaiTitipan, stmtsPakaiTitipan } from "./debt.js";
 
 // ---------------------------------------------------------------------------
 // Konfigurasi provider PPOB (jalur Jabber). Hanya OkeConnect yang didukung —
@@ -190,23 +191,80 @@ export async function placePpobOrder(env, { productCode, target, paidMethod = "t
  * tagihan asli beda-beda tiap transaksi, dibaca dari balasan OkeConnect,
  * BUKAN harga tetap seperti pulsa/kuota. Untuk prabayar, costTotal selalu
  * ikut product.cost_price apa adanya (tidak pernah bisa diedit manual). */
-export async function recordPpobSale(env, { product, wallet, refId, target, sellPrice, costTotal, paidMethod = "tunai", contactId = null }) {
+export async function recordPpobSale(env, { product, wallet, refId, target, sellPrice, costTotal, paidMethod = "tunai", contactId = null, sisaMethod = "tunai", receiveWalletId = null, employeeId = null }) {
   const finalSellPrice = sellPrice != null ? sellPrice : product.sell_price;
   const finalCostTotal = isPostpaid(product) && costTotal != null ? costTotal : product.cost_price;
 
-  const walletIdForTx = paidMethod === "utang" ? null : wallet ? wallet.id : null;
+  // Bayar pakai titipan pelanggan: bagian yang ditutup titipan tidak menambah
+  // apa pun ke dompet (uangnya sudah masuk saat dititipkan). Kalau titipan
+  // kurang, sisanya dibayar tunai atau jadi piutang (sisaMethod).
+  let plan = null;
+  if (paidMethod === "titipan") {
+    plan = await rencanaPakaiTitipan(env, { contactId, total: finalSellPrice, sisaMethod });
+  }
+  const depositUsed = plan ? plan.pakai : 0;
+  const piutangBaru = paidMethod === "utang" ? finalSellPrice : plan && plan.sisaMethod === "utang" ? plan.sisa : 0;
+
+  // Uang TUNAI yang benar-benar diterima dari pelanggan (di luar titipan & piutang)
+  // — ini yang masuk ke dompet pilihan kasir (Kas/Bank/E-Wallet).
+  const kasMasuk = plan
+    ? plan.sisa > 0 && plan.sisaMethod === "tunai"
+      ? plan.sisa
+      : 0
+    : paidMethod === "utang"
+    ? 0
+    : finalSellPrice;
+  let receiveWallet = null;
+  if (kasMasuk > 0) {
+    if (!receiveWalletId) {
+      throw new Error("Pilih dompet tempat uang pembayaran diterima (Kas/Bank/E-Wallet).");
+    }
+    receiveWallet = await env.DB.prepare("SELECT * FROM wallets WHERE id = ?").bind(receiveWalletId).first();
+    if (!receiveWallet) throw new Error("Dompet penerima tidak ditemukan.");
+    if (receiveWallet.type === "distributor_ppob") {
+      throw new Error("Dompet saldo distributor tidak bisa jadi tempat uang pembayaran diterima. Pilih Kas/Bank/E-Wallet.");
+    }
+  }
+
+  // Pola sama dengan jasa transfer: wallet_id = dompet tempat uang MASUK,
+  // cost_wallet_id = dompet sumber modal (saldo distributor). Dengan begitu arus
+  // kas, laporan shift, dan penghapusan transaksi otomatis benar.
+  // Tempelkan kasir & shift yang sedang berjalan supaya uang PPOB ikut kehitung
+  // di Laporan Shift (kas opname).
+  const openShift = employeeId
+    ? await env.DB.prepare("SELECT id FROM shifts WHERE employee_id = ? AND status = 'open'").bind(employeeId).first()
+    : null;
   const txResult = await env.DB.prepare(
-    `INSERT INTO transactions (type, category, wallet_id, amount, cost_total, note, contact_id)
-     VALUES ('sale', 'PPOB', ?, ?, ?, ?, ?)`
+    `INSERT INTO transactions (type, category, wallet_id, cost_wallet_id, amount, cost_total, note, contact_id, deposit_used, employee_id, shift_id)
+     VALUES ('sale', 'PPOB', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
-      walletIdForTx,
+      receiveWallet ? receiveWallet.id : null,
+      wallet ? wallet.id : null,
       finalSellPrice,
       finalCostTotal,
       `PPOB ${product.code} ke ${target} (ref ${refId})`,
-      paidMethod === "utang" ? contactId : null
+      paidMethod === "utang" || paidMethod === "titipan" ? contactId : null,
+      depositUsed,
+      employeeId || null,
+      openShift ? openShift.id : null
     )
     .run();
+
+  if (receiveWallet && kasMasuk > 0) {
+    await env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?").bind(kasMasuk, receiveWallet.id).run();
+  }
+
+  if (plan && depositUsed > 0) {
+    await env.DB.batch(
+      stmtsPakaiTitipan(env, {
+        contactId,
+        pakai: depositUsed,
+        transactionId: txResult.meta?.last_row_id,
+        note: `Titipan dipakai untuk PPOB ${product.code} ke ${target} (ref ${refId})`,
+      })
+    );
+  }
 
   // Saldo distributor OkeConnect tetap terpotong sejumlah MODAL, terlepas
   // pelanggan bayar tunai atau ngutang — karena uang ke OkeConnect memang
@@ -219,14 +277,14 @@ export async function recordPpobSale(env, { product, wallet, refId, target, sell
 
   // Kalau dibayar Utang: yang jadi piutang cuma bagian HARGA JUAL yang belum
   // diterima dari pelanggan (modal sudah keluar duluan seperti di atas).
-  if (paidMethod === "utang" && contactId) {
+  if (piutangBaru > 0 && contactId) {
     await env.DB.prepare(
       `INSERT INTO debts (contact_id, type, amount, note) VALUES (?, 'piutang', ?, ?)`
     )
-      .bind(contactId, finalSellPrice, `PPOB ${product.code} ke ${target} (ref ${refId})`)
+      .bind(contactId, piutangBaru, `PPOB ${product.code} ke ${target} (ref ${refId})`)
       .run();
     await env.DB.prepare("UPDATE contacts SET total_debt = total_debt + ? WHERE id = ?")
-      .bind(finalSellPrice, contactId)
+      .bind(piutangBaru, contactId)
       .run();
   }
 
@@ -239,7 +297,7 @@ export async function recordPpobSale(env, { product, wallet, refId, target, sell
  * DAN bot Telegram admin/kasir (menu "Konfirmasi Order PPOB") — supaya kedua
  * jalur itu benar-benar satu logika yang sama, bukan diduplikasi & bisa beda
  * perilaku. Lempar Error kalau order tidak valid/sudah final. */
-export async function finalizePpobOrder(env, { refId, sellPrice, costTotal, tokenCode, paidMethod, contactId }) {
+export async function finalizePpobOrder(env, { refId, sellPrice, costTotal, tokenCode, paidMethod, contactId, sisaMethod, receiveWalletId, employeeId }) {
   if (sellPrice === undefined || sellPrice === null) {
     throw new Error("sellPrice wajib diisi");
   }
@@ -256,8 +314,8 @@ export async function finalizePpobOrder(env, { refId, sellPrice, costTotal, toke
 
   const finalPaidMethod = paidMethod || order.paid_method || "tunai";
   const finalContactId = contactId ?? order.contact_id ?? null;
-  if (finalPaidMethod === "utang" && !finalContactId) {
-    throw new Error("Pembayaran Utang wajib pilih kontak");
+  if ((finalPaidMethod === "utang" || finalPaidMethod === "titipan") && !finalContactId) {
+    throw new Error(`Pembayaran ${finalPaidMethod === "utang" ? "Utang" : "Titipan"} wajib pilih kontak`);
   }
 
   const { transactionId, costTotal: appliedCostTotal } = await recordPpobSale(env, {
@@ -269,6 +327,9 @@ export async function finalizePpobOrder(env, { refId, sellPrice, costTotal, toke
     costTotal,
     paidMethod: finalPaidMethod,
     contactId: finalContactId,
+    sisaMethod,
+    receiveWalletId,
+    employeeId,
   });
 
   // Harga jual yang barusan dikonfirmasi jadi default baru produk ini utk

@@ -6,6 +6,7 @@ import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, syncPpobP
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
 import { getEmployeeByChatId, handleLinkCommand, sendMainMenu, handleAdminCallback, handleAdminSessionMessage } from "./bot-admin.js";
 import { hitungAsetBersih, catatSnapshotModalHarian } from "./modal.js";
+import { DebtError, bayarHutang, titipUang, tarikTitipan, catatHutangManual, rencanaPakaiTitipan, stmtsPakaiTitipan, balikkanCatatanTertaut, debtEffect } from "./debt.js";
 import miniappRouter from "./miniapp.js";
 import { renderMiniAppPage } from "./miniapp-page.js";
 
@@ -463,9 +464,9 @@ app.put("/api/contacts/:id", async (c) => {
 
 app.delete("/api/contacts/:id", async (c) => {
   const id = c.req.param("id");
-  const contact = await c.env.DB.prepare("SELECT total_debt FROM contacts WHERE id = ?").bind(id).first();
-  if (contact && contact.total_debt) {
-    return c.json({ ok: false, error: "Tidak bisa hapus — kontak ini masih punya sisa hutang/piutang. Selesaikan dulu di menu Hutang Piutang." }, 400);
+  const contact = await c.env.DB.prepare("SELECT total_debt, deposit FROM contacts WHERE id = ?").bind(id).first();
+  if (contact && (contact.total_debt || contact.deposit)) {
+    return c.json({ ok: false, error: "Tidak bisa hapus — kontak ini masih punya sisa hutang/piutang atau saldo titipan. Selesaikan dulu di menu Hutang Piutang." }, 400);
   }
   await c.env.DB.prepare("DELETE FROM contacts WHERE id = ?").bind(id).run();
   return c.json({ ok: true });
@@ -624,11 +625,15 @@ app.post("/api/transactions", async (c) => {
     items = [], // [{ product_id, qty }]
     amount, // dipakai kalau tidak ada items (mis. expense manual / mutasi)
     cost_total: manualCostTotal, // khusus type='sale' tanpa items + cost_wallet_id: nominal pokok/modal
-    paid_method = "tunai", // "tunai" (isi wallet_id) | "utang" (wajib contact_id, wallet_id diabaikan)
+    paid_method = "tunai", // "tunai" (isi wallet_id) | "utang" (wajib contact_id, wallet_id diabaikan) | "titipan" (wajib contact_id; pakai saldo titipan pelanggan)
+    sisa_method = "tunai", // khusus paid_method="titipan": cara bayar SISA kalau titipan kurang — "tunai" (isi wallet_id) | "utang"
   } = await c.req.json();
 
-  if (paid_method === "utang" && !contact_id) {
-    return c.json({ ok: false, error: "Pembayaran Utang wajib pilih kontak" }, 400);
+  if ((paid_method === "utang" || paid_method === "titipan") && !contact_id) {
+    return c.json({ ok: false, error: `Pembayaran ${paid_method === "utang" ? "Utang" : "Titipan"} wajib pilih kontak` }, 400);
+  }
+  if (paid_method === "titipan" && type !== "sale") {
+    return c.json({ ok: false, error: "Pembayaran pakai titipan hanya untuk penjualan" }, 400);
   }
 
   // Mutasi antar akun: tidak ada items/stok/laba, cuma pindah saldo dari satu
@@ -708,9 +713,37 @@ app.post("/api/transactions", async (c) => {
     }
   }
 
+  // Bayar pakai titipan: uangnya SUDAH masuk dompet saat pelanggan menitipkan,
+  // jadi bagian ini tidak menambah dompet lagi. Kalau titipan kurang, sisanya
+  // dibayar tunai (dompet bertambah sebesar sisa saja) atau jadi piutang.
+  let plan = null;
+  if (paid_method === "titipan") {
+    try {
+      plan = await rencanaPakaiTitipan(c.env, { contactId: contact_id, total, sisaMethod: sisa_method });
+    } catch (err) {
+      if (err instanceof DebtError) return c.json({ ok: false, error: err.message }, 400);
+      throw err;
+    }
+    if (plan.sisa > 0 && plan.sisaMethod === "tunai" && !wallet_id) {
+      return c.json(
+        { ok: false, error: `Titipan ${plan.contact.name} hanya cukup Rp${plan.pakai.toLocaleString("id-ID")}. Pilih dompet untuk sisa Rp${plan.sisa.toLocaleString("id-ID")}, atau jadikan sisanya utang.` },
+        400
+      );
+    }
+  }
+  const depositUsed = plan ? plan.pakai : 0;
+  const piutangBaru = paid_method === "utang" ? total : plan && plan.sisa > 0 && plan.sisaMethod === "utang" ? plan.sisa : 0;
+
   // Bayar Utang: uang belum masuk kas sama sekali, jadi wallet_id dikosongkan
   // (stok tetap berkurang & laporan laba tetap kehitung seperti biasa).
-  const effectiveWalletId = paid_method === "utang" ? null : wallet_id;
+  const effectiveWalletId =
+    paid_method === "utang"
+      ? null
+      : plan
+      ? plan.sisa > 0 && plan.sisaMethod === "tunai"
+        ? wallet_id
+        : null
+      : wallet_id;
 
   // Tempelkan shift_id kasir yang sedang login (kalau ada shift yang masih
   // terbuka), supaya transaksi ini ikut kehitung di Laporan Shift-nya nanti.
@@ -721,8 +754,8 @@ app.post("/api/transactions", async (c) => {
     : null;
 
   const insertResult = await c.env.DB.prepare(
-    `INSERT INTO transactions (type, category, wallet_id, cost_wallet_id, amount, cost_total, note, contact_id, employee_id, shift_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO transactions (type, category, wallet_id, cost_wallet_id, amount, cost_total, note, contact_id, employee_id, shift_id, deposit_used)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       type,
@@ -734,7 +767,8 @@ app.post("/api/transactions", async (c) => {
       note || null,
       contact_id || null,
       employee ? employee.employeeId : null,
-      openShift ? openShift.id : null
+      openShift ? openShift.id : null,
+      depositUsed
     )
     .run();
   const transactionId = insertResult.meta.last_row_id;
@@ -759,8 +793,10 @@ app.post("/api/transactions", async (c) => {
   }
 
   if (effectiveWalletId) {
-    // penjualan & modal masuk nambah kas; pembelian/biaya/modal keluar ngurangin
-    const delta = type === "sale" || type === "capital_in" ? total : -total;
+    // penjualan & modal masuk nambah kas; pembelian/biaya/modal keluar ngurangin.
+    // Untuk penjualan yang sebagian dibayar titipan, dompet cuma bertambah
+    // sebesar bagian tunainya (titipan sudah masuk dompet waktu dititipkan).
+    const delta = type === "sale" ? total - depositUsed : type === "capital_in" ? total : -total;
     await c.env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?")
       .bind(delta, effectiveWalletId)
       .run();
@@ -775,20 +811,34 @@ app.post("/api/transactions", async (c) => {
       .run();
   }
 
+  // Bayar pakai titipan: potong saldo titipan & catat riwayatnya (tertaut ke
+  // transaksi ini supaya ikut terbalik kalau transaksinya dihapus).
+  if (plan && depositUsed > 0) {
+    await c.env.DB.batch(
+      stmtsPakaiTitipan(c.env, {
+        contactId: contact_id,
+        pakai: depositUsed,
+        transactionId,
+        note: `Titipan dipakai untuk transaksi kasir #${transactionId}`,
+      })
+    );
+  }
+
   // Bayar Utang (cuma berlaku utk penjualan): otomatis catat sbg piutang,
-  // tanpa perlu kasir isi manual dobel di menu Hutang Piutang.
-  if (paid_method === "utang" && type === "sale" && contact_id) {
+  // tanpa perlu kasir isi manual dobel di menu Hutang Piutang. Kalau bayar
+  // pakai titipan tapi kurang dan sisanya diutangkan, yang jadi piutang cuma sisanya.
+  if (piutangBaru > 0 && type === "sale" && contact_id) {
     await c.env.DB.prepare(
       `INSERT INTO debts (contact_id, type, amount, note) VALUES (?, 'piutang', ?, ?)`
     )
-      .bind(contact_id, total, note || `Transaksi kasir #${transactionId}`)
+      .bind(contact_id, piutangBaru, note || `Transaksi kasir #${transactionId}`)
       .run();
     await c.env.DB.prepare("UPDATE contacts SET total_debt = total_debt + ? WHERE id = ?")
-      .bind(total, contact_id)
+      .bind(piutangBaru, contact_id)
       .run();
   }
 
-  return c.json({ ok: true, transactionId, total, costTotal });
+  return c.json({ ok: true, transactionId, total, costTotal, depositUsed, piutang: piutangBaru });
 });
 
 // Edit transaksi (cuma field ringan: kategori, catatan, kontak — TIDAK mengubah
@@ -808,23 +858,29 @@ app.put("/api/transactions/:id", requireAdmin, async (c) => {
 
 // Hapus transaksi — otomatis balikkan efek saldo dompet & stok produk yang
 // sempat berubah karena transaksi ini, supaya laporan tetap akurat.
-app.delete("/api/transactions/:id", requireAdmin, async (c) => {
-  const id = c.req.param("id");
-  const t = await c.env.DB.prepare("SELECT * FROM transactions WHERE id = ?").bind(id).first();
-  if (!t) return c.json({ ok: false, error: "Transaksi tidak ditemukan" }, 404);
+// Hapus satu transaksi + balikkan semua efeknya (saldo dompet, stok, catatan
+// hutang/titipan yang tertaut). Return false kalau transaksinya tidak ada.
+async function hapusTransaksi(env, id) {
+  const t = await env.DB.prepare("SELECT * FROM transactions WHERE id = ?").bind(id).first();
+  if (!t) return false;
 
   if (t.type === "mutation") {
     // Balikkan mutasi: kembalikan saldo akun asal, tarik lagi dari akun tujuan.
     if (t.wallet_id) {
-      await c.env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?").bind(t.amount, t.wallet_id).run();
+      await env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?").bind(t.amount, t.wallet_id).run();
     }
     if (t.to_wallet_id) {
-      await c.env.DB.prepare("UPDATE wallets SET balance = balance - ? WHERE id = ?").bind(t.amount, t.to_wallet_id).run();
+      await env.DB.prepare("UPDATE wallets SET balance = balance - ? WHERE id = ?").bind(t.amount, t.to_wallet_id).run();
     }
   } else if (t.wallet_id) {
     // balikkan: kebalikan dari efek saat dibuat (lihat delta di POST /api/transactions)
-    const delta = t.type === "sale" || t.type === "capital_in" ? t.amount : -t.amount;
-    await c.env.DB.prepare("UPDATE wallets SET balance = balance - ? WHERE id = ?")
+    const delta =
+      t.type === "sale"
+        ? t.amount - (t.deposit_used || 0)
+        : t.type === "capital_in" || t.type === "debt_in"
+        ? t.amount
+        : -t.amount;
+    await env.DB.prepare("UPDATE wallets SET balance = balance - ? WHERE id = ?")
       .bind(delta, t.wallet_id)
       .run();
   }
@@ -833,25 +889,36 @@ app.delete("/api/transactions/:id", requireAdmin, async (c) => {
   // — berlaku baik yang wallet_id-nya terisi (tunai) maupun kosong (utang),
   // karena modal tetap dikurangi di kedua kasus saat transaksi dibuat.
   if (t.type === "sale" && t.cost_wallet_id && t.cost_total > 0) {
-    await c.env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?")
+    await env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?")
       .bind(t.cost_total, t.cost_wallet_id)
       .run();
   }
 
-  const { results: items } = await c.env.DB.prepare(
+  const { results: items } = await env.DB.prepare(
     "SELECT * FROM transaction_items WHERE transaction_id = ?"
   )
     .bind(id)
     .all();
   for (const it of items) {
     if (t.type === "sale") {
-      await c.env.DB.prepare("UPDATE products SET stock = stock + ? WHERE id = ?").bind(it.qty, it.product_id).run();
+      await env.DB.prepare("UPDATE products SET stock = stock + ? WHERE id = ?").bind(it.qty, it.product_id).run();
     } else if (t.type === "purchase") {
-      await c.env.DB.prepare("UPDATE products SET stock = stock - ? WHERE id = ?").bind(it.qty, it.product_id).run();
+      await env.DB.prepare("UPDATE products SET stock = stock - ? WHERE id = ?").bind(it.qty, it.product_id).run();
     }
   }
-  await c.env.DB.prepare("DELETE FROM transaction_items WHERE transaction_id = ?").bind(id).run();
-  await c.env.DB.prepare("DELETE FROM transactions WHERE id = ?").bind(id).run();
+  // Balikkan catatan hutang/titipan yang tertaut ke transaksi ini (pembayaran
+  // hutang, titipan masuk/ditarik, titipan yang dipakai belanja).
+  await balikkanCatatanTertaut(env, id);
+
+  await env.DB.prepare("DELETE FROM transaction_items WHERE transaction_id = ?").bind(id).run();
+  await env.DB.prepare("DELETE FROM transactions WHERE id = ?").bind(id).run();
+  return true;
+}
+
+app.delete("/api/transactions/:id", requireAdmin, async (c) => {
+  const id = c.req.param("id");
+  const found = await hapusTransaksi(c.env, id);
+  if (!found) return c.json({ ok: false, error: "Transaksi tidak ditemukan" }, 404);
   return c.json({ ok: true });
 });
 
@@ -872,54 +939,138 @@ app.get("/api/debts", async (c) => {
   return c.json(results);
 });
 
-// type: "utang" (kita berhutang ke supplier) | "piutang" (pelanggan hutang ke kita) | "cicilan" (pembayaran, mengurangi)
+// Bungkus pemanggilan fungsi debt.js: DebtError -> 400 dengan pesan yang jelas.
+async function jalankanHutang(c, fn) {
+  try {
+    const result = await fn();
+    return c.json({ ok: true, ...result });
+  } catch (err) {
+    if (err instanceof DebtError) {
+      return c.json({ ok: false, error: err.message, code: err.code || undefined }, 400);
+    }
+    throw err;
+  }
+}
+
+// Catat piutang/utang MANUAL (tanpa uang bergerak). Pembayaran hutang TIDAK
+// lewat sini lagi — pakai /api/debts/bayar supaya dompetnya ikut tercatat.
 app.post("/api/debts", async (c) => {
   const { contact_id, type, amount, note } = await c.req.json();
-  await c.env.DB.prepare("INSERT INTO debts (contact_id, type, amount, note) VALUES (?, ?, ?, ?)")
-    .bind(contact_id, type, amount, note || null)
-    .run();
-
-  const delta = type === "cicilan" ? -amount : amount;
-  await c.env.DB.prepare("UPDATE contacts SET total_debt = total_debt + ? WHERE id = ?")
-    .bind(delta, contact_id)
-    .run();
-
-  return c.json({ ok: true });
+  return jalankanHutang(c, async () => {
+    await catatHutangManual(c.env, { contactId: contact_id, type, amount, note });
+    return {};
+  });
 });
 
-// Edit catatan hutang/piutang — otomatis balikkan efek lama ke total_debt
-// kontak, lalu terapkan efek baru (mis. salah ketik nominal/jenis).
+// Bayar hutang. amount = UANG YANG DITERIMA (atau dibayar ke supplier).
+// Kalau melebihi sisa hutang pelanggan, wajib kirim kelebihan = "kembalikan"
+// atau "titipkan" — server tidak pernah memilihkan.
+app.post("/api/debts/bayar", async (c) => {
+  const employee = c.get("employee");
+  const { contact_id, amount, wallet_id, kelebihan, note } = await c.req.json();
+  return jalankanHutang(c, async () => {
+    const r = await bayarHutang(c.env, {
+      contactId: contact_id,
+      amount,
+      walletId: wallet_id,
+      kelebihan,
+      note,
+      employeeId: employee ? employee.employeeId : null,
+    });
+    return r;
+  });
+});
+
+// Pelanggan menitipkan uang (tanpa hutang).
+app.post("/api/debts/titip", async (c) => {
+  const employee = c.get("employee");
+  const { contact_id, amount, wallet_id, note } = await c.req.json();
+  return jalankanHutang(c, () =>
+    titipUang(c.env, { contactId: contact_id, amount, walletId: wallet_id, note, employeeId: employee ? employee.employeeId : null })
+  );
+});
+
+// Pelanggan mengambil titipannya kembali sebagai uang tunai.
+app.post("/api/debts/tarik", async (c) => {
+  const employee = c.get("employee");
+  const { contact_id, amount, wallet_id, note } = await c.req.json();
+  return jalankanHutang(c, () =>
+    tarikTitipan(c.env, { contactId: contact_id, amount, walletId: wallet_id, note, employeeId: employee ? employee.employeeId : null })
+  );
+});
+
+// Edit catatan hutang/piutang manual — otomatis balikkan efek lama ke
+// total_debt kontak, lalu terapkan efek baru (mis. salah ketik nominal/jenis).
+// Catatan yang tertaut ke dompet/transaksi (pembayaran hutang, titipan) hanya
+// boleh diubah catatannya — nominal & jenisnya terkunci karena memengaruhi
+// saldo dompet; hapus lalu catat ulang kalau salah.
 app.put("/api/debts/:id", async (c) => {
   const id = c.req.param("id");
   const old = await c.env.DB.prepare("SELECT * FROM debts WHERE id = ?").bind(id).first();
   if (!old) return c.json({ ok: false, error: "Data tidak ditemukan" }, 404);
   const { type, amount, note } = await c.req.json();
 
-  const oldDelta = old.type === "cicilan" ? -old.amount : old.amount;
-  await c.env.DB.prepare("UPDATE contacts SET total_debt = total_debt - ? WHERE id = ?")
-    .bind(oldDelta, old.contact_id)
-    .run();
-  const newDelta = type === "cicilan" ? -amount : amount;
-  await c.env.DB.prepare("UPDATE contacts SET total_debt = total_debt + ? WHERE id = ?")
-    .bind(newDelta, old.contact_id)
-    .run();
+  const terkunci = old.transaction_id != null || ["titip", "pakai_titip", "tarik_titip"].includes(old.type);
+  if (terkunci) {
+    if (type !== old.type || Number(amount) !== Number(old.amount)) {
+      return c.json(
+        { ok: false, error: "Catatan ini tertaut ke dompet/transaksi, jadi jenis dan nominalnya tidak bisa diubah. Hapus lalu catat ulang yang benar." },
+        400
+      );
+    }
+    await c.env.DB.prepare("UPDATE debts SET note = ? WHERE id = ?").bind(note || null, id).run();
+    return c.json({ ok: true });
+  }
 
-  await c.env.DB.prepare("UPDATE debts SET type = ?, amount = ?, note = ? WHERE id = ?")
-    .bind(type, amount, note || null, id)
-    .run();
+  if (type !== old.type && type !== "utang" && type !== "piutang") {
+    return c.json({ ok: false, error: 'Untuk pembayaran hutang gunakan form "Bayar Hutang" (wajib pilih dompet).' }, 400);
+  }
+  if (!(Number(amount) > 0)) return c.json({ ok: false, error: "Nominal harus lebih dari 0" }, 400);
+
+  const oldEff = debtEffect(old.type, old.amount);
+  const newEff = debtEffect(type, amount);
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE contacts SET total_debt = total_debt - ? + ?, deposit = deposit - ? + ? WHERE id = ?").bind(
+      oldEff.debt,
+      newEff.debt,
+      oldEff.deposit,
+      newEff.deposit,
+      old.contact_id
+    ),
+    c.env.DB.prepare("UPDATE debts SET type = ?, amount = ?, note = ? WHERE id = ?").bind(type, amount, note || null, id),
+  ]);
   return c.json({ ok: true });
 });
 
-// Hapus catatan hutang/piutang — otomatis balikkan efeknya ke total_debt kontak.
+// Hapus catatan hutang/piutang — otomatis balikkan efeknya ke saldo kontak.
+// Kalau catatannya tertaut ke pembayaran hutang/titipan (ada transaksi
+// dompetnya), seluruh transaksi itu ikut dibatalkan (dompet dikembalikan).
 app.delete("/api/debts/:id", async (c) => {
   const id = c.req.param("id");
   const d = await c.env.DB.prepare("SELECT * FROM debts WHERE id = ?").bind(id).first();
   if (!d) return c.json({ ok: false, error: "Data tidak ditemukan" }, 404);
-  const delta = d.type === "cicilan" ? -d.amount : d.amount;
-  await c.env.DB.prepare("UPDATE contacts SET total_debt = total_debt - ? WHERE id = ?")
-    .bind(delta, d.contact_id)
-    .run();
-  await c.env.DB.prepare("DELETE FROM debts WHERE id = ?").bind(id).run();
+
+  if (d.transaction_id != null) {
+    const tx = await c.env.DB.prepare("SELECT id, type FROM transactions WHERE id = ?").bind(d.transaction_id).first();
+    if (tx && (tx.type === "debt_in" || tx.type === "debt_out")) {
+      // Batalkan seluruh pembayaran (cicilan + titipan-nya sekaligus, dompet dikembalikan).
+      await hapusTransaksi(c.env, tx.id);
+      return c.json({ ok: true, dibatalkanTransaksi: tx.id });
+    }
+    if (tx) {
+      return c.json(
+        { ok: false, error: `Titipan ini terpakai di transaksi kasir #${tx.id}. Hapus transaksi penjualannya untuk membatalkan.` },
+        400
+      );
+    }
+    // transaksi sudah tidak ada (mis. dibersihkan cron 1 tahun) -> lanjut hapus catatan saja
+  }
+
+  const eff = debtEffect(d.type, d.amount);
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE contacts SET total_debt = total_debt - ?, deposit = deposit - ? WHERE id = ?").bind(eff.debt, eff.deposit, d.contact_id),
+    c.env.DB.prepare("DELETE FROM debts WHERE id = ?").bind(id),
+  ]);
   return c.json({ ok: true });
 });
 
@@ -936,11 +1087,12 @@ app.get("/api/reports/cashflow", async (c) => {
   const { results } = await c.env.DB.prepare(
     `SELECT w.id AS wallet_id, w.name AS wallet_name,
             COALESCE(SUM(CASE
-              WHEN t.wallet_id = w.id AND t.type IN ('sale','capital_in') THEN t.amount
+              WHEN t.wallet_id = w.id AND t.type = 'sale' THEN t.amount - t.deposit_used
+              WHEN t.wallet_id = w.id AND t.type IN ('capital_in','debt_in') THEN t.amount
               WHEN t.to_wallet_id = w.id AND t.type = 'mutation' THEN t.amount
               ELSE 0 END), 0) AS masuk,
             COALESCE(SUM(CASE
-              WHEN t.wallet_id = w.id AND t.type IN ('purchase','expense','mutation','capital_out') THEN t.amount
+              WHEN t.wallet_id = w.id AND t.type IN ('purchase','expense','mutation','capital_out','debt_out') THEN t.amount
               WHEN t.cost_wallet_id = w.id AND t.type = 'sale' THEN t.cost_total
               ELSE 0 END), 0) AS keluar
      FROM wallets w
@@ -1000,7 +1152,7 @@ async function computeShiftBreakdown(db, shift) {
   const row = await db
     .prepare(
       `SELECT
-        COALESCE(SUM(CASE WHEN type = 'sale' AND wallet_id = ? THEN amount ELSE 0 END), 0) AS total_penjualan,
+        COALESCE(SUM(CASE WHEN type = 'sale' AND wallet_id = ? THEN amount - deposit_used ELSE 0 END), 0) AS total_penjualan,
         COALESCE(SUM(CASE WHEN type = 'purchase' AND wallet_id = ? THEN amount ELSE 0 END), 0) AS total_pembelian,
         COALESCE(SUM(CASE WHEN type = 'expense' AND wallet_id = ? THEN amount ELSE 0 END), 0) AS total_pengeluaran,
         COALESCE(SUM(CASE WHEN type = 'mutation' AND wallet_id = ? THEN amount ELSE 0 END), 0) AS mutasi_keluar,
@@ -1008,10 +1160,14 @@ async function computeShiftBreakdown(db, shift) {
         COALESCE(SUM(CASE WHEN type = 'capital_in' AND wallet_id = ? THEN amount ELSE 0 END), 0) AS modal_masuk,
         COALESCE(SUM(CASE WHEN type = 'capital_out' AND wallet_id = ? THEN amount ELSE 0 END), 0) AS modal_keluar,
         COALESCE(SUM(CASE WHEN type = 'sale' AND cost_wallet_id = ? THEN cost_total ELSE 0 END), 0) AS modal_dipakai,
+        COALESCE(SUM(CASE WHEN type = 'debt_in' AND wallet_id = ? THEN amount ELSE 0 END), 0) AS bayar_hutang_masuk,
+        COALESCE(SUM(CASE WHEN type = 'debt_out' AND wallet_id = ? THEN amount ELSE 0 END), 0) AS bayar_hutang_keluar,
         COUNT(*) AS jumlah_transaksi
        FROM transactions WHERE shift_id = ?`
     )
     .bind(
+      shift.wallet_id,
+      shift.wallet_id,
       shift.wallet_id,
       shift.wallet_id,
       shift.wallet_id,
@@ -1031,7 +1187,9 @@ async function computeShiftBreakdown(db, shift) {
     row.mutasi_masuk +
     row.modal_masuk -
     row.modal_keluar -
-    row.modal_dipakai;
+    row.modal_dipakai +
+    row.bayar_hutang_masuk -
+    row.bayar_hutang_keluar;
   return { ...row, net_movement };
 }
 
@@ -1266,9 +1424,10 @@ app.post("/api/ppob/cek", async (c) => {
 // tagihan asli) sebelum permanen tercatat ke laporan.
 app.post("/api/ppob-orders/:refId/konfirmasi", async (c) => {
   const refId = c.req.param("refId");
-  const { sellPrice, costTotal, tokenCode, paidMethod, contactId } = await c.req.json();
+  const { sellPrice, costTotal, tokenCode, paidMethod, contactId, sisaMethod, receiveWalletId } = await c.req.json();
+  const employee = c.get("employee");
   try {
-    const result = await finalizePpobOrder(c.env, { refId, sellPrice, costTotal, tokenCode, paidMethod, contactId });
+    const result = await finalizePpobOrder(c.env, { refId, sellPrice, costTotal, tokenCode, paidMethod, contactId, sisaMethod, receiveWalletId, employeeId: employee ? employee.employeeId : null });
     return c.json({ ok: true, ...result });
   } catch (err) {
     return c.json({ ok: false, error: err.message }, 400);
@@ -1451,7 +1610,10 @@ async function recheckOrder(env, order, { autoRecord } = {}) {
     .bind(status, reply, order.id)
     .run();
 
-  if (status === "sukses" && autoRecord) {
+  // Jalur otomatis (tanpa kasir) HANYA mencatat order yang dibayar Utang —
+  // tidak ada uang yang perlu masuk dompet. Order tunai dibiarkan menunggu
+  // konfirmasi kasir supaya kasir memilih dompet tempat uangnya diterima.
+  if (status === "sukses" && autoRecord && order.paid_method === "utang") {
     const product = await env.DB.prepare("SELECT * FROM products WHERE code = ?")
       .bind(order.product_code)
       .first();
@@ -1464,7 +1626,7 @@ async function recheckOrder(env, order, { autoRecord } = {}) {
         wallet,
         refId: order.ref_id,
         target: order.target,
-        paidMethod: order.paid_method,
+        paidMethod: "utang",
         contactId: order.contact_id,
       });
       await env.DB.prepare("UPDATE ppob_orders SET finalized = 1 WHERE id = ?").bind(order.id).run();
@@ -1475,7 +1637,10 @@ async function recheckOrder(env, order, { autoRecord } = {}) {
     await sendTelegramMessage(
       env.TELEGRAM_BOT_TOKEN,
       order.telegram_chat_id,
-      `Update ${order.ref_id}: ${status}\n${reply}`
+      `Update ${order.ref_id}: ${status}\n${reply}` +
+        (status === "sukses" && !(autoRecord && order.paid_method === "utang")
+          ? '\n\nOrder ini belum dicatat ke dompet — konfirmasi lewat menu "Konfirmasi Order PPOB" (pilih dompet penerima) atau di web.'
+          : "")
     );
   }
 
@@ -1538,11 +1703,11 @@ async function cleanupOldData(env) {
   }
 
   // 2. Hutang piutang lebih tua dari 1 tahun DAN kontaknya sudah lunas
-  //    (total_debt = 0) — yang masih ada sisa hutang TIDAK disentuh berapa
+  //    (total_debt = 0 dan tidak ada saldo titipan) — yang masih ada sisa hutang TIDAK disentuh berapa
   //    pun umurnya, karena riwayatnya masih relevan untuk penagihan.
   const delDebts = await env.DB.prepare(
     `DELETE FROM debts WHERE date < datetime('now', '-1 year')
-       AND contact_id IN (SELECT id FROM contacts WHERE total_debt = 0)`
+       AND contact_id IN (SELECT id FROM contacts WHERE total_debt = 0 AND deposit = 0)`
   ).run();
   result.debts = delDebts.meta?.changes ?? 0;
 

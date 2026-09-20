@@ -31,7 +31,30 @@ const error = ref("");
 
 // Kotak konfirmasi harga jual (dipakai bersama utk semua order sukses postpaid)
 const confirmTarget = ref(null);
-const confirmForm = ref({ sellPrice: 0, costTotal: 0, paidMethod: "tunai", contactId: null });
+const receiveWallets = ref([]); // dompet penerima uang (bukan saldo distributor)
+const lastReceiveWalletId = ref(null); // dompet yang terakhir dipilih, jadi default transaksi berikutnya
+const confirmForm = ref({ sellPrice: 0, costTotal: 0, paidMethod: "tunai", contactId: null, sisaMethod: "tunai", receiveWalletId: null });
+// Bayar pakai titipan: titipan menutup sebagian/seluruh harga jual, sisanya tunai/utang.
+const titipanInfo = computed(() => {
+  if (confirmForm.value.paidMethod !== "titipan") return null;
+  const c = contacts.value.find((x) => x.id === confirmForm.value.contactId);
+  if (!c) return null;
+  const tersedia = Math.max(Number(c.deposit) || 0, 0);
+  const harga = Number(confirmForm.value.sellPrice) || 0;
+  const dipakai = Math.min(tersedia, harga);
+  return { tersedia, dipakai, sisa: harga - dipakai };
+});
+
+// Dompet tempat uang pembayaran diterima (dipilih kasir tiap transaksi).
+// Tidak perlu kalau dibayar Utang, atau kalau titipan menutup seluruh harga.
+const perluDompet = computed(() => {
+  const m = confirmForm.value.paidMethod;
+  if (m === "tunai") return true;
+  if (m === "titipan") return !!titipanInfo.value && titipanInfo.value.tersedia > 0 && titipanInfo.value.sisa > 0 && confirmForm.value.sisaMethod === "tunai";
+  return false;
+});
+const uangMasuk = computed(() => (confirmForm.value.paidMethod === "titipan" ? titipanInfo.value?.sisa || 0 : Number(confirmForm.value.sellPrice) || 0));
+
 const confirming = ref(false);
 const lastReceipt = ref(null);
 
@@ -123,14 +146,16 @@ function isPostpaidCode(code) {
 }
 
 async function load() {
-  const [p, o, c] = await Promise.all([
+  const [p, o, c, w] = await Promise.all([
     api.get("/api/products"),
     api.get("/api/ppob-orders"),
     api.get("/api/contacts?type=pelanggan"),
+    api.get("/api/wallets"),
   ]);
   products.value = p;
   orders.value = o;
   contacts.value = c;
+  receiveWallets.value = w.filter((x) => x.type !== "distributor_ppob");
   if (route.query.code) {
     const match = products.value.find((x) => x.code === route.query.code);
     if (match) {
@@ -219,8 +244,10 @@ function openConfirm(o) {
   confirmForm.value = {
     sellPrice: o.sell_price || 0,
     costTotal: o.cost_price || 0,
-    paidMethod: o.paid_method || "tunai",
+    paidMethod: o.paid_method === "utang" ? "utang" : "tunai",
     contactId: o.contact_id || null,
+    sisaMethod: "tunai",
+    receiveWalletId: lastReceiveWalletId.value || receiveWallets.value[0]?.id || null,
   };
   openedId.value = null;
 }
@@ -231,6 +258,20 @@ async function submitKonfirmasi() {
     error.value = "Pilih kontak dulu untuk pembayaran Utang.";
     return;
   }
+  if (perluDompet.value && !confirmForm.value.receiveWalletId) {
+    error.value = "Pilih dompet tempat uang pembayaran diterima.";
+    return;
+  }
+  if (confirmForm.value.paidMethod === "titipan") {
+    if (!confirmForm.value.contactId) {
+      error.value = "Pilih pelanggan dulu untuk pembayaran pakai titipan.";
+      return;
+    }
+    if (!titipanInfo.value || titipanInfo.value.tersedia <= 0) {
+      error.value = "Pelanggan ini tidak punya saldo titipan.";
+      return;
+    }
+  }
   error.value = "";
   confirming.value = true;
   try {
@@ -238,8 +279,11 @@ async function submitKonfirmasi() {
       sellPrice: confirmForm.value.sellPrice,
       costTotal: confirmForm.value.costTotal,
       paidMethod: confirmForm.value.paidMethod,
-      contactId: confirmForm.value.paidMethod === "utang" ? confirmForm.value.contactId : null,
+      contactId: confirmForm.value.paidMethod === "utang" || confirmForm.value.paidMethod === "titipan" ? confirmForm.value.contactId : null,
+      sisaMethod: confirmForm.value.paidMethod === "titipan" ? confirmForm.value.sisaMethod : undefined,
+      receiveWalletId: perluDompet.value ? confirmForm.value.receiveWalletId : undefined,
     });
+    if (perluDompet.value) lastReceiveWalletId.value = confirmForm.value.receiveWalletId;
     lastReceipt.value = {
       refId: confirmTarget.value.refId,
       productCode: confirmTarget.value.productCode,
@@ -247,6 +291,9 @@ async function submitKonfirmasi() {
       sellPrice: confirmForm.value.sellPrice,
       paidMethod: confirmForm.value.paidMethod,
       contactName: confirmForm.value.contactId ? contacts.value.find((x) => x.id === confirmForm.value.contactId)?.name : null,
+      titipanDipakai: confirmForm.value.paidMethod === "titipan" ? titipanInfo.value?.dipakai || 0 : 0,
+      titipanSisa: confirmForm.value.paidMethod === "titipan" ? titipanInfo.value?.sisa || 0 : 0,
+      sisaMethod: confirmForm.value.sisaMethod,
       date: new Date().toLocaleString("id-ID"),
     };
     confirmTarget.value = null;
@@ -266,6 +313,11 @@ function bagikanWA() {
   const r = lastReceipt.value;
   let text = `*Struk Tagihan*\n${r.date}\n\n${r.productCode}\nTarget: ${r.target}\n\n*Total: ${rupiah(r.sellPrice)}*`;
   if (r.paidMethod === "utang") text += `\n(Utang atas nama ${r.contactName})`;
+  if (r.paidMethod === "titipan") {
+    text += `\n(Dibayar titipan ${rupiah(r.titipanDipakai)} a.n. ${r.contactName}`;
+    if (r.titipanSisa > 0) text += `, sisa ${rupiah(r.titipanSisa)} ${r.sisaMethod === "utang" ? "jadi utang" : "dibayar tunai"}`;
+    text += ")";
+  }
   window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
 }
 
@@ -383,6 +435,7 @@ onMounted(load);
           <div style="display: flex; gap: 8px">
             <button type="button" class="btn" :class="{ ghost: confirmForm.paidMethod !== 'tunai' }" style="flex: 1; justify-content: center" @click="confirmForm.paidMethod = 'tunai'">Tunai/Bank</button>
             <button type="button" class="btn" :class="{ ghost: confirmForm.paidMethod !== 'utang' }" style="flex: 1; justify-content: center" @click="confirmForm.paidMethod = 'utang'">Utang</button>
+            <button type="button" class="btn" :class="{ ghost: confirmForm.paidMethod !== 'titipan' }" style="flex: 1; justify-content: center" @click="confirmForm.paidMethod = 'titipan'">Titipan</button>
           </div>
         </div>
         <div v-if="confirmForm.paidMethod === 'utang'" class="field">
@@ -390,6 +443,37 @@ onMounted(load);
           <select v-model.number="confirmForm.contactId">
             <option :value="null" disabled>— pilih pelanggan —</option>
             <option v-for="c in contacts" :key="c.id" :value="c.id">{{ c.name }}</option>
+          </select>
+        </div>
+        <template v-if="confirmForm.paidMethod === 'titipan'">
+          <div class="field">
+            <label>Pelanggan (wajib)</label>
+            <select v-model.number="confirmForm.contactId">
+              <option :value="null" disabled>— pilih pelanggan —</option>
+              <option v-for="c in contacts" :key="c.id" :value="c.id">{{ c.name }}{{ c.deposit > 0 ? ` — titipan ${rupiah(c.deposit)}` : "" }}</option>
+            </select>
+          </div>
+          <div v-if="titipanInfo" class="muted" style="font-size: 13px; margin-bottom: 10px">
+            <template v-if="titipanInfo.tersedia <= 0">Pelanggan ini tidak punya saldo titipan.</template>
+            <template v-else>
+              Titipan {{ rupiah(titipanInfo.tersedia) }} → dipakai <strong>{{ rupiah(titipanInfo.dipakai) }}</strong>
+              <template v-if="titipanInfo.sisa > 0"> · kurang <strong>{{ rupiah(titipanInfo.sisa) }}</strong></template>
+            </template>
+          </div>
+          <div v-if="titipanInfo && titipanInfo.sisa > 0 && titipanInfo.tersedia > 0" class="field">
+            <label>Sisa {{ rupiah(titipanInfo.sisa) }} dibayar</label>
+            <div style="display: flex; gap: 8px">
+              <button type="button" class="btn" :class="{ ghost: confirmForm.sisaMethod !== 'tunai' }" style="flex: 1; justify-content: center" @click="confirmForm.sisaMethod = 'tunai'">Tunai/Bank</button>
+              <button type="button" class="btn" :class="{ ghost: confirmForm.sisaMethod !== 'utang' }" style="flex: 1; justify-content: center" @click="confirmForm.sisaMethod = 'utang'">Jadi Utang</button>
+            </div>
+          </div>
+        </template>
+
+        <div v-if="perluDompet" class="field">
+          <label>Uang {{ rupiah(uangMasuk) }} diterima di dompet</label>
+          <select v-model.number="confirmForm.receiveWalletId">
+            <option :value="null" disabled>— pilih dompet —</option>
+            <option v-for="w in receiveWallets" :key="w.id" :value="w.id">{{ w.name }}</option>
           </select>
         </div>
 
@@ -417,6 +501,7 @@ onMounted(load);
       <hr />
       <div class="receipt-row"><strong>TOTAL</strong><strong>{{ rupiah(lastReceipt.sellPrice) }}</strong></div>
       <div v-if="lastReceipt.paidMethod === 'utang'" style="margin-top: 6px">Utang a.n. {{ lastReceipt.contactName }}</div>
+      <div v-if="lastReceipt.paidMethod === 'titipan'" style="margin-top: 6px">Dibayar titipan {{ rupiah(lastReceipt.titipanDipakai) }} a.n. {{ lastReceipt.contactName }}</div>
       <div style="text-align: center; margin-top: 10px">Terima kasih!</div>
     </div>
 

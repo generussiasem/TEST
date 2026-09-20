@@ -113,7 +113,7 @@ async function bagikanTagihan(c) {
   error.value = "";
   try {
     const riwayat = await api.get(`/api/debts?contact_id=${c.id}`);
-    const typeLabel = { utang: "Utang", piutang: "Piutang", cicilan: "Bayar" };
+    const typeLabel = { utang: "Utang", piutang: "Piutang", cicilan: "Bayar", titip: "Titip", pakai_titip: "Pakai titipan", tarik_titip: "Tarik titipan" };
     let text = `*Tagihan ${c.name}*\n\n`;
     if (riwayat.length) {
       for (const d of riwayat.slice(0, 10)) {
@@ -122,6 +122,7 @@ async function bagikanTagihan(c) {
       text += "\n";
     }
     text += `*Sisa Tagihan: ${rupiah(c.total_debt)}*`;
+    if (c.deposit > 0) text += `\nSaldo titipan: ${rupiah(c.deposit)}`;
     const waNumber = formatWaNumber(c.phone);
     window.open(`https://wa.me/${waNumber}?text=${encodeURIComponent(text)}`, "_blank");
   } catch (err) {
@@ -173,7 +174,7 @@ onMounted(load);
             <th>Nama</th>
             <th>No. HP</th>
             <th>Tipe</th>
-            <th>Saldo Hutang/Piutang</th>
+            <th>Hutang / Titipan</th>
             <th></th>
           </tr>
         </thead>
@@ -199,9 +200,12 @@ onMounted(load);
                 <td>{{ c.name }}</td>
                 <td class="num">{{ c.phone || "—" }}</td>
                 <td style="text-transform: capitalize">{{ c.type }}</td>
-                <td class="num" :style="{ color: c.total_debt > 0 ? 'var(--red)' : 'inherit' }">{{ rupiah(c.total_debt) }}</td>
+                <td class="num" :style="{ color: c.total_debt > 0 ? 'var(--red)' : 'inherit' }">
+                  {{ rupiah(c.total_debt) }}
+                  <div v-if="c.deposit > 0" style="font-size: 12px; color: var(--till-deep)">Titipan {{ rupiah(c.deposit) }}</div>
+                </td>
                 <td style="white-space: nowrap">
-                  <button v-if="c.total_debt" class="btn ghost" style="padding: 4px 10px; margin-right: 6px" @click="bagikanTagihan(c)">
+                  <button v-if="c.total_debt > 0" class="btn ghost" style="padding: 4px 10px; margin-right: 6px" @click="bagikanTagihan(c)">
                     📤 Bagikan Tagihan
                   </button>
                   <button class="btn ghost" style="padding: 4px 10px; margin-right: 6px" @click="toggleIds(c)">

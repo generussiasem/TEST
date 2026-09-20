@@ -9,6 +9,7 @@
 //                             terealisasi)
 // + piutang                   (total_debt kontak bertipe 'pelanggan')
 // - hutang                    (total_debt kontak bertipe 'supplier')
+// - titipan pelanggan        (contacts.deposit — uangnya ada di kas tapi milik pelanggan)
 //
 // "Modal Awal" adalah titik nol pembanding: diambil OTOMATIS dari hasil
 // hitungan aset bersih pada hari pertama fitur ini aktif (snapshot harian
@@ -18,20 +19,24 @@
 // ---------------------------------------------------------------------------
 
 export async function hitungAsetBersih(env) {
-  const [walletRow, stokRow, piutangRow, hutangRow] = await Promise.all([
+  const [walletRow, stokRow, piutangRow, hutangRow, titipanRow] = await Promise.all([
     env.DB.prepare("SELECT COALESCE(SUM(balance), 0) AS total FROM wallets").first(),
     env.DB.prepare("SELECT COALESCE(SUM(stock * cost_price), 0) AS total FROM products WHERE active = 1").first(),
     env.DB.prepare("SELECT COALESCE(SUM(total_debt), 0) AS total FROM contacts WHERE type = 'pelanggan'").first(),
     env.DB.prepare("SELECT COALESCE(SUM(total_debt), 0) AS total FROM contacts WHERE type = 'supplier'").first(),
+    env.DB.prepare("SELECT COALESCE(SUM(deposit), 0) AS total FROM contacts").first(),
   ]);
 
   const kasDompet = walletRow.total;
   const nilaiStok = stokRow.total;
   const piutang = piutangRow.total;
   const hutang = hutangRow.total;
-  const asetBersih = kasDompet + nilaiStok + piutang - hutang;
+  // Titipan pelanggan = uang yang sudah ada di kas/dompet tapi BUKAN milik toko
+  // (kewajiban kepada pelanggan), jadi mengurangi aset bersih seperti hutang.
+  const titipan = titipanRow.total;
+  const asetBersih = kasDompet + nilaiStok + piutang - hutang - titipan;
 
-  return { kasDompet, nilaiStok, piutang, hutang, asetBersih };
+  return { kasDompet, nilaiStok, piutang, hutang, titipan, asetBersih };
 }
 
 // Dipanggil oleh cron harian (lihat scheduled() di index.js). Mencatat 1 baris
@@ -39,19 +44,20 @@ export async function hitungAsetBersih(env) {
 // (modal_awal belum diisi sama sekali), otomatis jadikan sebagai Modal Awal.
 export async function catatSnapshotModalHarian(env) {
   const tanggal = new Date().toISOString().slice(0, 10);
-  const { kasDompet, nilaiStok, piutang, hutang, asetBersih } = await hitungAsetBersih(env);
+  const { kasDompet, nilaiStok, piutang, hutang, titipan, asetBersih } = await hitungAsetBersih(env);
 
   await env.DB.prepare(
-    `INSERT INTO modal_snapshots (tanggal, kas_dompet, nilai_stok, piutang, hutang, aset_bersih)
-     VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO modal_snapshots (tanggal, kas_dompet, nilai_stok, piutang, hutang, titipan, aset_bersih)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(tanggal) DO UPDATE SET
        kas_dompet = excluded.kas_dompet,
        nilai_stok = excluded.nilai_stok,
        piutang = excluded.piutang,
        hutang = excluded.hutang,
+       titipan = excluded.titipan,
        aset_bersih = excluded.aset_bersih`
   )
-    .bind(tanggal, kasDompet, nilaiStok, piutang, hutang, asetBersih)
+    .bind(tanggal, kasDompet, nilaiStok, piutang, hutang, titipan, asetBersih)
     .run();
 
   const settings = await env.DB.prepare("SELECT modal_awal FROM store_settings WHERE id = 1").first();

@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { verifyTelegramInitData } from "./telegram-miniapp-auth.js";
 import { placePpobOrder, cekTagihan, finalizePpobOrder } from "./ppob.js";
+import { DebtError, bayarHutang, titipUang, catatHutangManual } from "./debt.js";
 
 // ---------------------------------------------------------------------------
 // MINI APP TELEGRAM — dipasang di /api/miniapp/* (dipisah dari /api/* biasa
@@ -68,12 +69,12 @@ miniapp.get("/contacts", async (c) => {
   const q = (c.req.query("q") || "").trim();
   const { results } = q
     ? await c.env.DB.prepare(
-        "SELECT id, name, phone, total_debt FROM contacts WHERE name LIKE ? OR phone LIKE ? ORDER BY name LIMIT 20"
+        "SELECT id, name, phone, type, total_debt, deposit FROM contacts WHERE name LIKE ? OR phone LIKE ? ORDER BY name LIMIT 20"
       )
         .bind(`%${q}%`, `%${q}%`)
         .all()
     : await c.env.DB.prepare(
-        "SELECT id, name, phone, total_debt FROM contacts ORDER BY total_debt DESC, name LIMIT 20"
+        "SELECT id, name, phone, type, total_debt, deposit FROM contacts ORDER BY total_debt DESC, name LIMIT 20"
       ).all();
   return c.json(results);
 });
@@ -100,30 +101,40 @@ miniapp.post("/contacts", async (c) => {
   return c.json({ ok: true, contact });
 });
 
-// Catat hutang baru ATAU bayar/cicil hutang — satu endpoint, dibedakan lewat
-// "type" (sama seperti POST /api/debts di dashboard web):
-//   type = "piutang" -> pelanggan berhutang ke toko (menambah total_debt)
-//   type = "cicilan" -> pembayaran, mengurangi total_debt
-export async function recordDebtEntry(env, { contactId, type, amount, note }) {
-  if (!contactId || !amount || amount <= 0) throw new Error("contactId dan amount (angka > 0) wajib diisi");
-  if (!["utang", "piutang", "cicilan"].includes(type)) throw new Error('type harus "utang", "piutang", atau "cicilan"');
-  await env.DB.prepare("INSERT INTO debts (contact_id, type, amount, note) VALUES (?, ?, ?, ?)")
-    .bind(contactId, type, amount, note || null)
-    .run();
-  const delta = type === "cicilan" ? -amount : amount;
-  await env.DB.prepare("UPDATE contacts SET total_debt = total_debt + ? WHERE id = ?").bind(delta, contactId).run();
-  return env.DB.prepare("SELECT * FROM contacts WHERE id = ?").bind(contactId).first();
-}
+// Dompet tempat uang pembayaran hutang/titipan diterima (dompet saldo
+// distributor PPOB sengaja tidak ikut — itu bukan tempat uang pelanggan).
+miniapp.get("/wallets", async (c) => {
+  const { results } = await c.env.DB.prepare(
+    "SELECT id, name, type FROM wallets WHERE type != 'distributor_ppob' ORDER BY id"
+  ).all();
+  return c.json(results);
+});
 
+// Catat hutang baru, bayar hutang, atau titip uang — dibedakan lewat "type":
+//   "piutang" -> pelanggan berhutang ke toko (menambah total_debt), tanpa dompet
+//   "cicilan" -> BAYAR hutang: wajib walletId; kalau uang diterima melebihi sisa
+//                hutang, wajib "kelebihan" = "kembalikan" | "titipkan"
+//   "titip"   -> pelanggan menitipkan uang: wajib walletId
+// Logikanya sama persis dengan dashboard web (debt.js).
 miniapp.post("/debts", async (c) => {
-  const { contactId, type, amount, note } = await c.req.json();
+  const { contactId, type, amount, note, walletId, kelebihan } = await c.req.json();
   const employee = c.get("employee");
   const noteFinal = note ? `${note} (via mini app oleh ${employee.name})` : `via mini app oleh ${employee.name}`;
   try {
-    const contact = await recordDebtEntry(c.env, { contactId, type, amount, note: noteFinal });
+    let contact;
+    if (type === "cicilan") {
+      const r = await bayarHutang(c.env, { contactId, amount, walletId, kelebihan, note: noteFinal, employeeId: employee.employeeId });
+      contact = r.contact;
+    } else if (type === "titip") {
+      const r = await titipUang(c.env, { contactId, amount, walletId, note: noteFinal, employeeId: employee.employeeId });
+      contact = r.contact;
+    } else {
+      contact = await catatHutangManual(c.env, { contactId, type, amount, note: noteFinal });
+    }
     return c.json({ ok: true, contact });
   } catch (err) {
-    return c.json({ ok: false, error: err.message }, 400);
+    if (err instanceof DebtError) return c.json({ ok: false, error: err.message }, 400);
+    throw err;
   }
 });
 
@@ -190,9 +201,9 @@ miniapp.get("/ppob-orders/:refId", async (c) => {
 // yang dikonfirmasi lewat mini app langsung sinkron ke laporan web juga.
 miniapp.post("/ppob-orders/:refId/konfirmasi", async (c) => {
   const refId = c.req.param("refId");
-  const { sellPrice, costTotal, tokenCode, paidMethod, contactId } = await c.req.json();
+  const { sellPrice, costTotal, tokenCode, paidMethod, contactId, receiveWalletId } = await c.req.json();
   try {
-    const result = await finalizePpobOrder(c.env, { refId, sellPrice, costTotal, tokenCode, paidMethod, contactId });
+    const result = await finalizePpobOrder(c.env, { refId, sellPrice, costTotal, tokenCode, paidMethod, contactId, receiveWalletId, employeeId: c.get("employee").employeeId });
     return c.json({ ok: true, ...result });
   } catch (err) {
     return c.json({ ok: false, error: err.message }, 400);
