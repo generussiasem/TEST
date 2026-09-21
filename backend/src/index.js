@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { sendJabberCommand } from "./jabber.js";
 import { sendTelegramMessage } from "./telegram.js";
-import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, syncPpobPrices, getProviderConfig, finalizePpobOrder, checkDistributorBalance } from "./ppob.js";
+import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, syncPpobPrices, getProviderConfig, finalizePpobOrder, checkDistributorBalance } from "./ppob.js";
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
 import { getEmployeeByChatId, handleLinkCommand, sendMainMenu, handleAdminCallback, handleAdminSessionMessage } from "./bot-admin.js";
 import { hitungAsetBersih, catatSnapshotModalHarian } from "./modal.js";
@@ -1325,17 +1325,29 @@ app.put("/api/ppob-orders/:refId", requireAdmin, async (c) => {
   const { status, raw_reply, target } = await c.req.json();
 
   if (order.status === "sukses" && status !== "sukses") {
-    const { results: txs } = await c.env.DB.prepare("SELECT * FROM transactions WHERE note LIKE ?")
-      .bind(`%${refId}%`)
+    // Batalkan pencatatan penjualannya dengan pembalikan penuh: dompet penerima
+    // dikurangi harga jual, saldo distributor dikembalikan sebesar modal, titipan
+    // yang terpakai dikembalikan (semua lewat hapusTransaksi).
+    const { results: txs } = await c.env.DB.prepare("SELECT id FROM transactions WHERE note LIKE ?")
+      .bind(`%(ref ${refId})%`)
       .all();
     for (const t of txs) {
-      if (t.wallet_id) {
-        await c.env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?")
-          .bind(t.cost_total, t.wallet_id)
-          .run();
-      }
-      await c.env.DB.prepare("DELETE FROM transactions WHERE id = ?").bind(t.id).run();
+      await hapusTransaksi(c.env, t.id);
     }
+    // Piutang yang tercipta dari order ini (dibayar Utang / sisa titipan diutangkan)
+    const { results: piutang } = await c.env.DB.prepare(
+      "SELECT * FROM debts WHERE type = 'piutang' AND transaction_id IS NULL AND note LIKE ?"
+    )
+      .bind(`%(ref ${refId})%`)
+      .all();
+    for (const d of piutang) {
+      await c.env.DB.batch([
+        c.env.DB.prepare("UPDATE contacts SET total_debt = total_debt - ? WHERE id = ?").bind(d.amount, d.contact_id),
+        c.env.DB.prepare("DELETE FROM debts WHERE id = ?").bind(d.id),
+      ]);
+    }
+    // Supaya kalau nanti status dikoreksi balik ke sukses, order bisa dikonfirmasi ulang.
+    await c.env.DB.prepare("UPDATE ppob_orders SET finalized = 0 WHERE ref_id = ?").bind(refId).run();
   }
 
   await c.env.DB.prepare(
@@ -1347,7 +1359,7 @@ app.put("/api/ppob-orders/:refId", requireAdmin, async (c) => {
   return c.json({ ok: true });
 });
 
-// Tombol manual "Cek Ulang Status" di menu detail transaksi — kirim CEK.R#
+// Tombol manual "Cek Ulang Status" di menu detail transaksi — kirim perintah CEK (lihat recheckOrder)
 // ke OkeConnect kapan saja, tidak terikat jadwal cron otomatis.
 app.post("/api/ppob-orders/:refId/cek-ulang", async (c) => {
   const refId = c.req.param("refId");
@@ -1588,7 +1600,7 @@ app.post("/telegram/webhook", async (c) => {
 // (menghindari kebutuhan koneksi Jabber yang nyala 24 jam terus-menerus)
 // ---------------------------------------------------------------------------
 
-// Cek ulang SATU order ke OkeConnect (via CEK.R#) dan update status/raw_reply.
+// Cek ulang SATU order ke OkeConnect (via CEK.NOMOR) dan update status/raw_reply.
 // Dipakai baik oleh cron (otomatis, sekali saja per order) maupun endpoint
 // manual (tombol "Cek Ulang Status"). autoRecord=true (jalur cron, kasir TIDAK
 // di depan layar) akan langsung catat transaksi pakai harga default begitu
@@ -1598,11 +1610,29 @@ app.post("/telegram/webhook", async (c) => {
 async function recheckOrder(env, order, { autoRecord } = {}) {
   const cfg = getProviderConfig(env, order.provider);
 
-  // OkeConnect: command khusus "CEK.R#{ID}" (TODO: belum dikonfirmasi CS,
-  // ada varian berakhiran 'A' untuk ID pelanggan — lihat catatan lama).
-  const body = `CEK.R#${order.ref_id}`;
-  const reply = await sendJabberCommand({ jid: cfg.jid, password: cfg.password, to: cfg.target, body });
-  const status = detectPpobStatus(reply);
+  // OkeConnect: perintah cek status "CEK.{nomor tujuan}" (format dari pengguna:
+  // "Cek.085741114833"). Format bisa diganti tanpa ubah kode lewat variabel
+  // JABBER_CEK_TEMPLATE, mis. "CEK.R#{ref}". Placeholder: {ref} {product} {target} {pin}.
+  const template = env.JABBER_CEK_TEMPLATE || "CEK.{target}";
+  const body = template
+    .replaceAll("{ref}", order.ref_id)
+    .replaceAll("{product}", order.product_code || "")
+    .replaceAll("{target}", order.target || "")
+    .replaceAll("{pin}", cfg.pin || "");
+  // Balasan diterima kalau memuat ref order ATAU nomor tujuan (format "CEK.NOMOR"
+  // belum tentu membalas dengan ref). Kalau template memuat {ref}, cukup ref.
+  const expectTokens = template.includes("{ref}") ? [order.ref_id] : [order.ref_id, order.target].filter(Boolean);
+  const rawReply = await sendJabberCommand({ jid: cfg.jid, password: cfg.password, to: cfg.target, body, expectTokens });
+
+  // Balasan "CEK.NOMOR" berisi daftar transaksi ke nomor itu (tanpa ref order).
+  // Order dicocokkan lewat ref (kalau ada) atau kode produk + nomor + tanggal +
+  // jam (lihat cocokkanBalasanCek). Kalau tidak bisa dicocokkan dengan yakin,
+  // status TIDAK diubah — kasir memeriksa balasannya lalu memakai "Ubah Status".
+  const cocok = cocokkanBalasanCek(order, rawReply);
+  const reply = cocok.matched
+    ? rawReply
+    : `[Balasan ini tidak bisa dicocokkan otomatis dengan order ${order.ref_id} (${cocok.reason}) — periksa manual lalu pakai "Ubah Status"]\n${rawReply}`;
+  const status = cocok.matched ? cocok.status : order.status;
 
   await env.DB.prepare(
     "UPDATE ppob_orders SET status = ?, raw_reply = ?, updated_at = datetime('now'), auto_checked = 1 WHERE id = ?"

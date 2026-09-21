@@ -45,6 +45,10 @@ function xmlEscape(str) {
 // dan "from"-nya pun tetap JID tujuan — padahal itu tandanya pesan GAGAL
 // terkirim ke OkeConnect, bukan balasan sukses.
 function extractAllReplies(buffer, targetBareJid, expectedRefToken, expectedPrefix) {
+  // expectedRefToken boleh satu string atau daftar token (balasan diterima kalau
+  // memuat SALAH SATU). Daftar dipakai untuk perintah cek status berformat
+  // "CEK.NOMOR" yang balasannya belum tentu memuat ref order.
+  const expectedTokens = [].concat(expectedRefToken || []).filter(Boolean);
   const regex = /<message\b([^>]*)>([\s\S]*?)<\/message>/g;
   const out = [];
   let m;
@@ -81,11 +85,11 @@ function extractAllReplies(buffer, targetBareJid, expectedRefToken, expectedPref
     // kirim (expectedPrefix) — jauh lebih spesifik daripada asal terima semua
     // balasan dari target yang sama, jadi resiko "ketuker" transaksi lain yang
     // kebetulan jalan bersamaan tetap kecil.
-    const matchesRef = expectedRefToken && text.includes(expectedRefToken);
+    const matchesRef = expectedTokens.some((t) => text.includes(t));
     const matchesPrefix = expectedPrefix && text.startsWith(expectedPrefix);
-    if (!isError && expectedRefToken && !matchesRef && !matchesPrefix) {
+    if (!isError && expectedTokens.length && !matchesRef && !matchesPrefix) {
       console.log(
-        `[jabber-debug] diabaikan: body tidak mengandung ref token "${expectedRefToken}" maupun prefix "${expectedPrefix}" — kemungkinan balasan transaksi lain. Isi: ${text.slice(0, 200)}`
+        `[jabber-debug] diabaikan: body tidak mengandung token "${expectedTokens.join(" / ")}" maupun prefix "${expectedPrefix}" — kemungkinan balasan transaksi lain. Isi: ${text.slice(0, 200)}`
       );
       continue; // balasan ini untuk transaksi/permintaan LAIN — bukan punya kita, abaikan
     }
@@ -168,7 +172,8 @@ async function waitForFinalReply(reader, targetBareJid, expectedRefToken, expect
   // kosong (server sama sekali tidak kirim apa-apa) atau ada sesuatu masuk
   // tapi bukan berupa <message> (mis. cuma whitespace keep-alive, atau iq lain).
   console.log("[jabber-debug] TIMEOUT — buffer mentah 300 char terakhir:", buffer.slice(-300) || "(buffer kosong sama sekali)");
-  throw new Error(`Timeout menunggu balasan XMPP dari ${targetBareJid} untuk ref ${expectedRefToken}, tidak ada pesan yang cocok diterima`);
+  const tokenLabel = [].concat(expectedRefToken || []).join(" / ") || "(tanpa token)";
+  throw new Error(`Timeout menunggu balasan XMPP dari ${targetBareJid} untuk ref ${tokenLabel}, tidak ada pesan yang cocok diterima`);
 }
 
 /**
@@ -183,7 +188,7 @@ async function waitForFinalReply(reader, targetBareJid, expectedRefToken, expect
  *   dst. Dipakai untuk perintah non-transaksi seperti cek saldo ("Saldo.PIN"),
  *   supaya tidak menunggu penuh sampai timeout tiap kali dipanggil.
  */
-export async function sendJabberCommand({ jid, password, to, body, firstReplyIsFinal = false }) {
+export async function sendJabberCommand({ jid, password, to, body, firstReplyIsFinal = false, expectTokens = null }) {
   const [localpart, jabberHost] = jid.split("@");
   // Login ke server tempat akun Jabber Anda sendiri terdaftar (mis. jabbim.com),
   // BUKAN ke server tujuan pesan (okeconnect@gojabber.com) — dua server ini beda,
@@ -264,7 +269,13 @@ export async function sendJabberCommand({ jid, password, to, body, firstReplyIsF
     } catch (_) {
       // Server modern (RFC 6120) sudah tidak mewajibkan session, boleh diabaikan.
     }
-    await send(`<presence/>`);
+    // PRIORITY 127 (maksimum): OkeConnect membalas ke JID akun (tanpa resource),
+    // dan server XMPP meneruskan pesan ke resource dengan priority TERTINGGI.
+    // Tanpa ini, kalau akun yang sama juga sedang login di klien lain (Pidgin,
+    // aplikasi HP, dsb.) atau di sesi Worker lain (cron), balasan bisa jatuh ke
+    // sana dan sesi ini timeout walau order sebenarnya sudah diproses provider
+    // (kejadian nyata: balasan "akan diproses" tiba di klien lain, Worker timeout).
+    await send(`<presence><priority>127</priority></presence>`);
 
     // 4c. Matikan Message Carbons (XEP-0280) kalau server mendukungnya — supaya
     // server tidak mengirim balik salinan pesan kita sendiri ke resource ini,
@@ -292,7 +303,9 @@ export async function sendJabberCommand({ jid, password, to, body, firstReplyIsF
     // yang barusan kita kirim (bukan balasan transaksi lain yang nyasar).
     const targetBareJid = to.split("/")[0];
     const refTokenMatch = body.match(/R#([A-Za-z0-9]+)/);
-    const expectedRefToken = refTokenMatch ? refTokenMatch[1] : null;
+    // expectTokens (opsional) menggantikan token R# dari body — dipakai perintah
+    // cek status "CEK.NOMOR" yang tidak mengandung R# di body-nya.
+    const expectedRefToken = expectTokens && expectTokens.length ? expectTokens : refTokenMatch ? refTokenMatch[1] : null;
     // Fallback kalau balasan tidak menyertakan ref ID (mis. gagal langsung
     // karena saldo kurang) — "KODE.NOMOR" adalah dua segmen pertama body kita
     // sendiri (format semua provider di ppob.js: KODE.NOMOR.PIN[...]), dan

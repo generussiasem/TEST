@@ -38,6 +38,76 @@ export function detectPpobStatus(reply) {
   return "pending";
 }
 
+// ---------------------------------------------------------------------------
+// Mencocokkan balasan perintah "CEK.NOMOR" dengan SATU order kita.
+//
+// Contoh balasan OkeConnect (tanpa ref order!):
+//   @21/09/2026 - OK310547
+//   FIBN7.085741114833 16:36 Sukses SN :04291288217899834259.
+// Yaitu header tanggal, lalu satu baris per transaksi: KODE.TUJUAN JAM Status SN.
+// Karena tidak ada ref, order dicocokkan lewat KODE produk + TUJUAN + tanggal +
+// jam (harus berdekatan dengan waktu order dibuat). Kalau balasan memuat ref
+// order (format lain), ref dipakai lebih dulu. Kalau tidak bisa dicocokkan
+// dengan yakin (tidak ada baris cocok, atau lebih dari satu baris cocok dengan
+// status berbeda), status TIDAK diubah otomatis.
+// Jam di balasan diasumsikan WIB (UTC+7); created_at di database berupa UTC.
+// ---------------------------------------------------------------------------
+const CEK_WINDOW_MENIT = 60;
+
+function waktuWibOrder(order) {
+  const m = String(order.created_at || "").match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+  if (!m) return null;
+  const utcMs = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
+  const wib = new Date(utcMs + 7 * 3600 * 1000);
+  const pad = (n) => String(n).padStart(2, "0");
+  return {
+    tanggal: `${wib.getUTCFullYear()}-${pad(wib.getUTCMonth() + 1)}-${pad(wib.getUTCDate())}`,
+    menit: wib.getUTCHours() * 60 + wib.getUTCMinutes(),
+  };
+}
+
+export function cocokkanBalasanCek(order, reply) {
+  const lines = String(reply || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+
+  // 1) Balasan memuat ref order -> paling akurat
+  const refLines = lines.filter((l) => l.includes(order.ref_id));
+  if (refLines.length) {
+    return { matched: true, by: "ref", status: detectPpobStatus(refLines.join("\n")), line: refLines.join("\n") };
+  }
+
+  // 2) Format "KODE.TUJUAN JAM Status ..." dengan header tanggal "@DD/MM/YYYY"
+  const waktu = waktuWibOrder(order);
+  const digits = (s) => String(s || "").replace(/\D/g, "");
+  const kode = String(order.product_code || "").toLowerCase();
+  const tujuan = digits(order.target);
+  let tanggalSaatIni = null;
+  const kandidat = [];
+  for (const line of lines) {
+    const h = line.match(/^@\s*(\d{2})\/(\d{2})\/(\d{4})/);
+    if (h) {
+      tanggalSaatIni = `${h[3]}-${h[2]}-${h[1]}`;
+      continue;
+    }
+    const e = line.match(/^([A-Za-z0-9]+)\.(\S+)\s+(\d{1,2})[:.](\d{2})\s+(.*)$/);
+    if (!e) continue;
+    if (e[1].toLowerCase() !== kode || digits(e[2]) !== tujuan) continue;
+    if (tanggalSaatIni && waktu && tanggalSaatIni !== waktu.tanggal) continue;
+    const menit = +e[3] * 60 + +e[4];
+    const selisih = waktu ? Math.abs(menit - waktu.menit) : 0;
+    if (waktu && selisih > CEK_WINDOW_MENIT) continue;
+    kandidat.push({ line, selisih, status: detectPpobStatus(e[5]) });
+  }
+
+  if (!kandidat.length) {
+    return { matched: false, reason: "tidak ada baris dengan kode produk, nomor tujuan, tanggal, dan jam yang cocok" };
+  }
+  if (new Set(kandidat.map((k) => k.status)).size > 1) {
+    return { matched: false, reason: "ada lebih dari satu transaksi cocok dengan status berbeda" };
+  }
+  kandidat.sort((a, b) => a.selisih - b.selisih);
+  return { matched: true, by: "kode+nomor+jam", status: kandidat[0].status, line: kandidat[0].line };
+}
+
 const POSTPAID_CATEGORIES = ["TAGIHAN", "AIR PDAM"];
 
 function isPostpaid(product) {
@@ -163,7 +233,11 @@ export async function placePpobOrder(env, { productCode, target, paidMethod = "t
     status = detectPpobStatus(reply);
   } catch (err) {
     console.error("Jabber gagal untuk order", refId, ":", err.message, err.stack);
-    reply = "ERROR: " + err.message;
+    // Perintah SUDAH dikirim ke provider sebelum error ini muncul, jadi order
+    // bisa saja tetap diproses. Pesan dibuat jelas supaya kasir tidak kirim ulang.
+    reply = /^Timeout menunggu balasan/.test(err.message)
+      ? `ORDER TERSIMPAN (pending) — balasan provider belum diterima dalam 25 detik. Perintah sudah terkirim, jadi JANGAN kirim ulang. Klik "Cek Ulang Status" beberapa menit lagi. (${err.message})`
+      : "ERROR: " + err.message;
     status = "pending"; // nanti ditangkap cron checkPendingOrders
   }
 

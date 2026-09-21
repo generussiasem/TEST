@@ -218,3 +218,22 @@ bagian yang ditutup titipan juga tidak menambah dompet.
   dan bot memberi tahu. Order Utang tetap dicatat otomatis.
 - Transaksi PPOB **lama** tidak dikoreksi: uangnya tidak pernah tercatat masuk.
   Sesuaikan saldo dompet sekali secara manual (Modal Masuk atau Mutasi).
+
+## Cek status order PPOB (Jabber)
+
+Tombol **Cek Ulang Status** dan cron mengirim `CEK.{nomor tujuan}` (mis.
+`CEK.085741114833`). Format bisa diganti tanpa ubah kode lewat variabel
+`JABBER_CEK_TEMPLATE` (placeholder `{ref}` `{product}` `{target}` `{pin}`).
+
+Balasan OkeConnect berbentuk daftar tanpa ref order:
+
+    @21/09/2026 - OK310547
+    FIBN7.085741114833 16:36 Sukses SN :04291288217899834259.
+
+Order dicocokkan lewat **kode produk + nomor tujuan + tanggal + jam** (jam
+harus dalam ±60 menit dari waktu order dibuat, dianggap WIB). Kalau balasan
+memuat ref order, ref dipakai lebih dulu. Kalau tidak bisa dicocokkan dengan
+yakin (tidak ada baris cocok, atau ada beberapa baris cocok dengan status
+berbeda), status dibiarkan dan balasan diberi peringatan — periksa manual lalu
+pakai **Ubah Status** (admin). Perintah CEK hanya menampilkan transaksi pada
+tanggal di header, jadi order hari sebelumnya harus dikoreksi manual.

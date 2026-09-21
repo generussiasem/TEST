@@ -35,6 +35,9 @@ database_id = "16b154f7-7235-403e-9ddb-7dd1da4b20b7"
 #   center@mitra.orderkuota.com    -> dicoba sebagai alternatif
 # Ganti nilainya di sini lalu `wrangler deploy` untuk tes cepat tanpa ubah kode.
 JABBER_TARGET = "center@mitra.orderkuota.com"
+# Opsional: format perintah cek status order pending. Bawaan "CEK.{target}"
+# (CEK + nomor tujuan). Placeholder: {ref} {product} {target} {pin}.
+# JABBER_CEK_TEMPLATE = "CEK.{target}"
 
 # Secrets (isi lewat: wrangler secret put NAMA, ATAU dashboard Cloudflare
 # Settings -> Variables and Secrets -> tipe "Secret")
