@@ -47,3 +47,6 @@ JABBER_TARGET = "center@mitra.orderkuota.com"
 #                              harus sama dengan yang diisi di kolom "Jabber 1" Pengaturan OkeConnect
 #   JABBER_PASSWORD        -> password akun Jabber OkeConnect tersebut (bukan password OrderKuota)
 #   JABBER_PIN             -> PIN transaksi PPOB OkeConnect Anda
+#   RELAY_SECRET           -> (Opsional, untuk Relay Jabber di HP/PC) kunci rahasia panjang & acak; harus sama
+#                              dengan RELAY_SECRET di file .env program relay. Isi lewat Dashboard Cloudflare
+#                              (Settings -> Variables and Secrets), jangan ditulis di file ini.

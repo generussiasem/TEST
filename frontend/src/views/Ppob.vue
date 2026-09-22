@@ -25,6 +25,15 @@ const batchResults = ref([]); // hasil per item setelah "Proses Semua"
 
 // ---- Kotak konfirmasi harga jual (muncul stlh 1 order sukses) ----
 const confirmTarget = ref(null); // { refId, product, target, defaultSellPrice, isToken, isPostpaid }
+// Status Relay Jabber (program di HP/PC yang menangkap hasil akhir order)
+const relay = ref(null);
+async function loadRelay() {
+  try {
+    relay.value = await api.get("/api/relay/status");
+  } catch (_) {
+    relay.value = null;
+  }
+}
 const receiveWallets = ref([]); // dompet penerima uang (bukan saldo distributor)
 const lastReceiveWalletId = ref(null); // dompet yang terakhir dipilih, jadi default transaksi berikutnya
 const confirmForm = ref({ sellPrice: 0, costTotal: 0, tokenCode: "", paidMethod: "tunai", contactId: null, sisaMethod: "tunai", receiveWalletId: null });
@@ -135,6 +144,7 @@ async function load() {
   products.value = p;
   contacts.value = c;
   receiveWallets.value = w.filter((x) => x.type !== "distributor_ppob");
+  loadRelay();
   if (route.query.code) {
     const match = products.value.find((x) => x.code === route.query.code);
     if (match) {
@@ -323,6 +333,14 @@ onMounted(load);
       <div>
         <h1>Pulsa &amp; PPOB</h1>
         <p>Order dikirim ke OkeConnect lewat Jabber — bisa antre beberapa produk sekaligus</p>
+      </div>
+      <div v-if="relay && relay.configured" class="muted" style="font-size: 12.5px; text-align: right">
+        <span v-if="relay.online" style="color: var(--till-deep)">● Relay online</span>
+        <span v-else style="color: var(--red)">● Relay mati</span>
+        <div v-if="!relay.online">
+          Hasil akhir order tidak otomatis — cek HP relay
+          <template v-if="relay.secondsAgo !== null">(terakhir {{ Math.max(1, Math.round(relay.secondsAgo / 60)) }} menit lalu)</template>
+        </div>
       </div>
     </div>
 

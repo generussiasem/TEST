@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { sendJabberCommand } from "./jabber.js";
 import { sendTelegramMessage } from "./telegram.js";
-import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, syncPpobPrices, getProviderConfig, finalizePpobOrder, checkDistributorBalance } from "./ppob.js";
+import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, extractTokenCode, syncPpobPrices, getProviderConfig, finalizePpobOrder, checkDistributorBalance } from "./ppob.js";
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
 import { getEmployeeByChatId, handleLinkCommand, sendMainMenu, handleAdminCallback, handleAdminSessionMessage } from "./bot-admin.js";
 import { hitungAsetBersih, catatSnapshotModalHarian } from "./modal.js";
@@ -32,6 +32,9 @@ app.use(
 app.use("/api/*", async (c, next) => {
   if (c.req.path === "/api/auth/login" || c.req.path === "/api/setup") return next();
   if (c.req.path.startsWith("/api/miniapp/")) return next();
+  // Relay Jabber (program di HP/PC) punya kunci rahasia sendiri (RELAY_SECRET),
+  // dicek langsung di dalam route-nya — bukan login karyawan.
+  if (c.req.path === "/api/relay/jabber") return next();
   return requireAuth(c, next);
 });
 
@@ -1634,10 +1637,17 @@ async function recheckOrder(env, order, { autoRecord } = {}) {
     : `[Balasan ini tidak bisa dicocokkan otomatis dengan order ${order.ref_id} (${cocok.reason}) — periksa manual lalu pakai "Ubah Status"]\n${rawReply}`;
   const status = cocok.matched ? cocok.status : order.status;
 
+  await terapkanStatusPpob(env, order, status, reply, { autoRecord, tandaiDicek: true });
+  return { status, reply };
+}
+
+// Simpan status baru sebuah order PPOB + tindak lanjutnya. Dipakai bersama oleh
+// cek ulang (recheckOrder) dan Relay Jabber (hasil final yang datang sendiri).
+async function terapkanStatusPpob(env, order, status, reply, { autoRecord = false, tandaiDicek = false, tokenCode = null } = {}) {
   await env.DB.prepare(
-    "UPDATE ppob_orders SET status = ?, raw_reply = ?, updated_at = datetime('now'), auto_checked = 1 WHERE id = ?"
+    "UPDATE ppob_orders SET status = ?, raw_reply = ?, token_code = COALESCE(?, token_code), updated_at = datetime('now'), auto_checked = CASE WHEN ? THEN 1 ELSE auto_checked END WHERE id = ?"
   )
-    .bind(status, reply, order.id)
+    .bind(status, reply, tokenCode, tandaiDicek ? 1 : 0, order.id)
     .run();
 
   // Jalur otomatis (tanpa kasir) HANYA mencatat order yang dibayar Utang —
@@ -1673,9 +1683,122 @@ async function recheckOrder(env, order, { autoRecord } = {}) {
           : "")
     );
   }
-
-  return { status, reply };
 }
+
+// ---------------------------------------------------------------------------
+// RELAY JABBER — program kecil yang online terus (HP Android/PC, lihat folder
+// relay/) menaruh SEMUA pesan dari OkeConnect ke sini. Worker tidak bisa
+// menahan koneksi Jabber, jadi hasil akhir order (balasan kedua) yang datang
+// setelah sesi Worker selesai hanya bisa ditangkap lewat jalur ini.
+// ---------------------------------------------------------------------------
+
+function samaAmanString(a, b) {
+  const ea = new TextEncoder().encode(String(a));
+  const eb = new TextEncoder().encode(String(b));
+  if (ea.length !== eb.length) return false;
+  let diff = 0;
+  for (let i = 0; i < ea.length; i++) diff |= ea[i] ^ eb[i];
+  return diff === 0;
+}
+
+// Cocokkan satu pesan dari OkeConnect ke order-order kita, lalu perbarui statusnya.
+// Aturan pengaman: order yang sudah dicatat (finalized) tidak disentuh; status
+// final tidak diturunkan lagi jadi pending oleh pesan "akan diproses" yang telat;
+// pesan yang sama berulang tidak memicu notifikasi ganda.
+async function prosesPesanJabber(env, text) {
+  const hasil = [];
+  const terapkan = async (order, status, potongan) => {
+    if (order.finalized) return;
+    if (status === "pending" && order.status !== "pending") return;
+    if (status !== "pending" && order.status === status) return;
+    const tokenCode = status === "sukses" && !order.token_code ? extractTokenCode(potongan) : null;
+    await terapkanStatusPpob(env, order, status, potongan, { autoRecord: true, tandaiDicek: status !== "pending", tokenCode });
+    hasil.push({ ref: order.ref_id, status });
+  };
+
+  // 1) Pesan yang memuat R#ref (ack "akan diproses", hasil final, dst.)
+  const refs = [...new Set([...text.matchAll(/R#([A-Za-z0-9]+)/g)].map((m) => m[1]))];
+  let adaOrderCocok = false;
+  for (const ref of refs) {
+    let order = await env.DB.prepare("SELECT * FROM ppob_orders WHERE ref_id = ?").bind(ref).first();
+    // Order pascabayar dikirim dengan akhiran "A" (R#{ref}A)
+    if (!order && ref.endsWith("A")) {
+      order = await env.DB.prepare("SELECT * FROM ppob_orders WHERE ref_id = ?").bind(ref.slice(0, -1)).first();
+    }
+    if (!order) continue;
+    adaOrderCocok = true;
+    const baris = text.split(/\r?\n/).filter((l) => l.includes(`R#${ref}`));
+    const potongan = refs.length > 1 && baris.length ? baris.join("\n") : text;
+    await terapkan(order, detectPpobStatus(potongan), potongan);
+  }
+
+  // 2) Tanpa R#: daftar "KODE.TUJUAN JAM Status SN" (balasan perintah CEK) —
+  // cocokkan ke order yang masih pending (48 jam terakhir).
+  if (!adaOrderCocok) {
+    const { results } = await env.DB.prepare(
+      "SELECT * FROM ppob_orders WHERE status = 'pending' AND finalized = 0 AND created_at >= datetime('now', '-2 days')"
+    ).all();
+    for (const order of results) {
+      const m = cocokkanBalasanCek(order, text);
+      if (m.matched && m.by !== "ref") await terapkan(order, m.status, text);
+    }
+  }
+  return hasil;
+}
+
+app.post("/api/relay/jabber", async (c) => {
+  if (!c.env.RELAY_SECRET) {
+    return c.json({ ok: false, error: "RELAY_SECRET belum diatur di Worker" }, 503);
+  }
+  const kunci = c.req.header("x-relay-secret") || "";
+  if (!samaAmanString(kunci, c.env.RELAY_SECRET)) {
+    return c.json({ ok: false, error: "Kunci relay salah" }, 401);
+  }
+  let data;
+  try {
+    data = await c.req.json();
+  } catch (_) {
+    return c.json({ ok: false, error: "JSON tidak valid" }, 400);
+  }
+
+  if (data.type === "heartbeat") {
+    await c.env.DB.prepare(
+      `INSERT INTO app_state (key, value, updated_at) VALUES ('relay_status', ?, datetime('now'))
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+    )
+      .bind(JSON.stringify({ connected: !!data.connected, since: data.since || null, at: new Date().toISOString() }))
+      .run();
+    return c.json({ ok: true });
+  }
+
+  if (data.type === "message") {
+    const text = String(data.body || "").slice(0, 4000);
+    if (!text.trim()) return c.json({ ok: true, updated: [] });
+    const updated = await prosesPesanJabber(c.env, text);
+    console.log("[relay] pesan diproses:", JSON.stringify({ updated, body: text.slice(0, 200) }));
+    return c.json({ ok: true, updated });
+  }
+
+  return c.json({ ok: false, error: "type harus 'message' atau 'heartbeat'" }, 400);
+});
+
+// Status Relay untuk lencana di halaman PPOB (perlu login biasa).
+app.get("/api/relay/status", async (c) => {
+  const configured = !!c.env.RELAY_SECRET;
+  const row = await c.env.DB.prepare("SELECT value FROM app_state WHERE key = 'relay_status'").first();
+  let seconds = null;
+  let connected = false;
+  if (row) {
+    try {
+      const v = JSON.parse(row.value);
+      seconds = Math.round((Date.now() - new Date(v.at).getTime()) / 1000);
+      connected = !!v.connected;
+    } catch (_) {}
+  }
+  // Detak jantung dikirim tiap ~60 detik; lebih dari 3 menit tanpa kabar = mati.
+  const online = seconds !== null && seconds <= 180 && connected;
+  return c.json({ configured, seen: !!row, online, secondsAgo: seconds, connected });
+});
 
 // Cron: cek ulang SEKALI SAJA tiap order, 5 menit setelah dibuat — bukan
 // diulang tiap 5 menit selamanya. Kalau setelah cek sekali ini masih

@@ -237,3 +237,24 @@ yakin (tidak ada baris cocok, atau ada beberapa baris cocok dengan status
 berbeda), status dibiarkan dan balasan diberi peringatan — periksa manual lalu
 pakai **Ubah Status** (admin). Perintah CEK hanya menampilkan transaksi pada
 tanggal di header, jadi order hari sebelumnya harus dikoreksi manual.
+
+## Solusi "online terus" — Relay Jabber
+
+Worker hanya login sebentar per permintaan, jadi hasil akhir order (balasan
+kedua dari OkeConnect) bisa hilang begitu sesi Worker selesai. Folder
+`relay/` berisi program kecil (tanpa dependensi, cukup Node.js) yang
+dijalankan di HP Android atau PC yang menyala terus, login dengan akun
+Jabber yang sama tapi priority lebih rendah, lalu meneruskan setiap balasan
+ke Worker lewat `/api/relay/jabber`. Lihat `relay/README.md` untuk
+pemasangan lengkap.
+
+**Sebelum dipakai:**
+1. Jalankan migrasi `migrations/2026-09-add-relay-jabber.sql` di D1.
+2. Isi variabel **RELAY_SECRET** di Dashboard Cloudflare (Worker → Settings
+   → Variables and Secrets) — kunci acak panjang, sama persis dengan
+   `.env` relay.
+3. Deploy Worker, lalu pasang & jalankan relay sesuai panduannya.
+
+Order tunai tetap menunggu konfirmasi kasir (pilih dompet penerima) walau
+statusnya sudah diketahui lewat relay. Order utang tetap dicatat otomatis.
+Lencana status relay tampil di halaman **Pulsa & PPOB**.

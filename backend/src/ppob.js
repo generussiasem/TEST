@@ -118,7 +118,7 @@ function isPostpaid(product) {
 // deret 16-20 digit angka, kadang dipisah strip. BELUM ada contoh balasan
 // sukses token PLN asli, jadi ini pola tebakan yang bisa meleset; kasir
 // tetap bisa koreksi manual di kotak konfirmasi kalau salah/tidak ketemu.
-function extractTokenCode(reply) {
+export function extractTokenCode(reply) {
   if (!reply) return null;
   const match = reply.match(/\b(\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}(?:[- ]?\d{0,4})?)\b/);
   return match ? match[1] : null;
@@ -243,7 +243,9 @@ export async function placePpobOrder(env, { productCode, target, paidMethod = "t
 
   const tokenCode = status === "sukses" ? extractTokenCode(reply) : null;
   await env.DB.prepare(
-    "UPDATE ppob_orders SET status = ?, raw_reply = ?, token_code = ?, updated_at = datetime('now') WHERE ref_id = ?"
+    // AND status = 'pending': kalau Relay Jabber sudah lebih dulu menyimpan hasil
+    // final (sukses/gagal) untuk order ini, jangan ditimpa lagi oleh hasil sesi ini.
+    "UPDATE ppob_orders SET status = ?, raw_reply = ?, token_code = ?, updated_at = datetime('now') WHERE ref_id = ? AND status = 'pending'"
   )
     .bind(status, reply, tokenCode, refId)
     .run();

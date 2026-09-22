@@ -10,6 +10,13 @@ CREATE TABLE IF NOT EXISTS store_settings (
 );
 INSERT OR IGNORE INTO store_settings (id, store_name) VALUES (1, 'Toko Saya');
 
+-- Status kecil aplikasi (key-value), mis. detak jantung Relay Jabber (relay_status)
+CREATE TABLE IF NOT EXISTS app_state (
+  key TEXT PRIMARY KEY,
+  value TEXT,
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
 -- Karyawan/kasir & admin yang login ke dashboard web
 CREATE TABLE IF NOT EXISTS employees (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
