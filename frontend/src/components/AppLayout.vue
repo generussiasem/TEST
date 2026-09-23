@@ -36,6 +36,7 @@ const navItems = computed(() => {
     { to: "/katalog", label: "Katalog PPOB" },
     { to: "/ppob", label: "Pulsa & PPOB" },
     { to: "/tagihan", label: "Cek & Bayar Tagihan" },
+    { to: "/cetak-struk-eksternal", label: "Cetak Struk Tagihan" },
     { to: "/produk", label: "Produk & Stok" },
     { to: "/kontak", label: "Pelanggan & Supplier" },
     { to: "/hutang", label: "Hutang Piutang" },

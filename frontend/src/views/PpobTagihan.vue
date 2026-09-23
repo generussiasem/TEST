@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from "vue";
 import { useRoute } from "vue-router";
 import { api } from "../api.js";
+import { buatStrukPNG, bagikanAtauUnduhGambar } from "../receiptImage.js";
 
 const route = useRoute();
 
@@ -57,6 +58,8 @@ const uangMasuk = computed(() => (confirmForm.value.paidMethod === "titipan" ? t
 
 const confirming = ref(false);
 const lastReceipt = ref(null);
+const store = ref({ store_name: "Toko", address: "" });
+const bagikanStatus = ref("");
 
 function rupiah(n) {
   return "Rp" + Number(n || 0).toLocaleString("id-ID");
@@ -146,16 +149,18 @@ function isPostpaidCode(code) {
 }
 
 async function load() {
-  const [p, o, c, w] = await Promise.all([
+  const [p, o, c, w, st] = await Promise.all([
     api.get("/api/products"),
     api.get("/api/ppob-orders"),
     api.get("/api/contacts?type=pelanggan"),
     api.get("/api/wallets"),
+    api.get("/api/store-settings"),
   ]);
   products.value = p;
   orders.value = o;
   contacts.value = c;
   receiveWallets.value = w.filter((x) => x.type !== "distributor_ppob");
+  store.value = st;
   if (route.query.code) {
     const match = products.value.find((x) => x.code === route.query.code);
     if (match) {
@@ -308,6 +313,33 @@ async function submitKonfirmasi() {
 function cetakStruk() {
   window.print();
 }
+async function bagikanGambar() {
+  if (!lastReceipt.value) return;
+  bagikanStatus.value = "membuat";
+  try {
+    const r = lastReceipt.value;
+    const catatan = [`Target: ${r.target}`];
+    if (r.paidMethod === "utang") catatan.push(`Utang atas nama ${r.contactName}`);
+    if (r.paidMethod === "titipan") {
+      let t = `Dibayar titipan ${rupiah(r.titipanDipakai)} a.n. ${r.contactName}`;
+      if (r.titipanSisa > 0) t += `, sisa ${rupiah(r.titipanSisa)} ${r.sisaMethod === "utang" ? "jadi utang" : "dibayar tunai"}`;
+      catatan.push(t);
+    }
+    const blob = await buatStrukPNG({
+      storeName: store.value.store_name,
+      address: store.value.address,
+      date: r.date,
+      judul: "STRUK TAGIHAN",
+      items: [{ label: r.productCode, amount: r.sellPrice }],
+      total: r.sellPrice,
+      catatan,
+    });
+    await bagikanAtauUnduhGambar(blob, `struk-tagihan-${Date.now()}.png`, { title: "Struk Tagihan", text: `Struk tagihan ${rupiah(r.sellPrice)}` });
+  } finally {
+    bagikanStatus.value = "";
+  }
+}
+
 function bagikanWA() {
   if (!lastReceipt.value) return;
   const r = lastReceipt.value;
@@ -488,7 +520,10 @@ onMounted(load);
     <div v-if="lastReceipt" class="card no-print" style="margin: 18px 0">
       <h3 style="margin-bottom: 10px">Transaksi Terakhir: {{ lastReceipt.refId }}</h3>
       <button class="btn ghost" style="margin-right: 8px" @click="cetakStruk">🖨️ Cetak Struk</button>
-      <button class="btn ghost" @click="bagikanWA">📤 Bagikan via WhatsApp</button>
+      <button class="btn ghost" style="margin-right: 8px" :disabled="bagikanStatus === 'membuat'" @click="bagikanGambar">
+        {{ bagikanStatus === "membuat" ? "Membuat gambar..." : "🖼️ Bagikan Gambar Struk" }}
+      </button>
+      <button class="btn ghost" @click="bagikanWA">📤 Bagikan Teks (WhatsApp)</button>
     </div>
     <div v-if="lastReceipt" class="receipt-box" style="display: none">
       <div style="text-align: center; margin-bottom: 6px">

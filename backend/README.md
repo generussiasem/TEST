@@ -258,3 +258,15 @@ pemasangan lengkap.
 Order tunai tetap menunggu konfirmasi kasir (pilih dompet penerima) walau
 statusnya sudah diketahui lewat relay. Order utang tetap dicatat otomatis.
 Lencana status relay tampil di halaman **Pulsa & PPOB**.
+
+## Cetak Struk Tagihan (embed eksternal, opsional)
+
+Menu **Cetak Struk Tagihan** menampilkan alat cetak struk manual dari
+OkeConnect (`namatoko.cetakstr.uk`) lewat iframe di dalam dashboard. Ini
+sepenuhnya opsional dan di luar kendali kita — isi URL-nya di
+**Pengaturan Toko** (kolom `cetak_struk_url`); kosongkan untuk
+menyembunyikan menu ini. Tidak ada data transaksi yang mengalir otomatis
+ke/dari alat itu — isinya diisi manual oleh kasir.
+
+**Sebelum dipakai:** jalankan migrasi
+`migrations/2026-09-add-cetak-struk-url.sql` di D1.

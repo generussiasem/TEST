@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from "vue";
 import { useRoute } from "vue-router";
 import { api } from "../api.js";
+import { buatStrukPNG, buatStrukTokenPLN, parseStrukTokenPLN, bagikanAtauUnduhGambar } from "../receiptImage.js";
 
 const route = useRoute();
 
@@ -62,6 +63,8 @@ const confirming = ref(false);
 
 // ---- Struk terakhir yang dikonfirmasi ----
 const lastReceipt = ref(null);
+const store = ref({ store_name: "Toko", address: "" });
+const bagikanStatus = ref("");
 
 function rupiah(n) {
   return "Rp" + Number(n || 0).toLocaleString("id-ID");
@@ -134,16 +137,18 @@ const searchResults = computed(() => {
 });
 
 async function load() {
-  const [o, p, c, w] = await Promise.all([
+  const [o, p, c, w, st] = await Promise.all([
     api.get("/api/ppob-orders"),
     api.get("/api/products"),
     api.get("/api/contacts?type=pelanggan"),
     api.get("/api/wallets"),
+    api.get("/api/store-settings"),
   ]);
   orders.value = o;
   products.value = p;
   contacts.value = c;
   receiveWallets.value = w.filter((x) => x.type !== "distributor_ppob");
+  store.value = st;
   loadRelay();
   if (route.query.code) {
     const match = products.value.find((x) => x.code === route.query.code);
@@ -235,6 +240,7 @@ function openConfirm(o) {
     target: o.target,
     isPostpaid: isPostpaidCategory(product.category),
     isToken: looksLikeToken(product),
+    rawReply: o.raw_reply || "",
   };
   confirmForm.value = {
     sellPrice: o.sell_price || product.sell_price || 0,
@@ -290,6 +296,8 @@ async function submitKonfirmasi() {
       target: confirmTarget.value.target,
       sellPrice: confirmForm.value.sellPrice,
       tokenCode: confirmForm.value.tokenCode,
+      isToken: confirmTarget.value.isToken,
+      rawReply: confirmTarget.value.rawReply,
       paidMethod: confirmForm.value.paidMethod,
       contactName: confirmForm.value.contactId ? contacts.value.find((x) => x.id === confirmForm.value.contactId)?.name : null,
       titipanDipakai: confirmForm.value.paidMethod === "titipan" ? titipanInfo.value?.dipakai || 0 : 0,
@@ -309,6 +317,58 @@ async function submitKonfirmasi() {
 function cetakStruk() {
   window.print();
 }
+async function bagikanGambar() {
+  if (!lastReceipt.value) return;
+  bagikanStatus.value = "membuat";
+  try {
+    const r = lastReceipt.value;
+    const catatan = [];
+    if (r.paidMethod === "utang") catatan.push(`Utang atas nama ${r.contactName}`);
+    if (r.paidMethod === "titipan") {
+      let t = `Dibayar titipan ${rupiah(r.titipanDipakai)} a.n. ${r.contactName}`;
+      if (r.titipanSisa > 0) t += `, sisa ${rupiah(r.titipanSisa)} ${r.sisaMethod === "utang" ? "jadi utang" : "dibayar tunai"}`;
+      catatan.push(t);
+    }
+
+    let blob;
+    // Token listrik PLN prabayar -> struk khusus (ID PLGN, NAMA, TARIF DAYA,
+    // JUMLAH DAYA, Serial Number) dengan nama toko & alamat, mengambil detail
+    // pelanggan dari balasan asli OkeConnect kalau formatnya dikenali.
+    if (r.isToken) {
+      const p = parseStrukTokenPLN(r.rawReply);
+      blob = await buatStrukTokenPLN({
+        storeName: store.value.store_name,
+        address: store.value.address,
+        date: r.date,
+        idPlgn: r.target,
+        produkNama: r.productName,
+        denom: p.denom,
+        nama: p.nama,
+        tarif: p.tarif,
+        daya: p.daya,
+        kwh: p.kwh,
+        harga: r.sellPrice,
+        sn: r.tokenCode || p.token || "-",
+        catatan,
+      });
+    } else {
+      catatan.unshift(`Tujuan: ${r.target}`);
+      blob = await buatStrukPNG({
+        storeName: store.value.store_name,
+        address: store.value.address,
+        date: r.date,
+        judul: "STRUK PPOB",
+        items: [{ label: r.productName, amount: r.sellPrice }],
+        total: r.sellPrice,
+        catatan: [...catatan, ...(r.tokenCode ? [`Token: ${r.tokenCode}`] : [])],
+      });
+    }
+    await bagikanAtauUnduhGambar(blob, `struk-ppob-${Date.now()}.png`, { title: "Struk PPOB", text: `Struk PPOB ${rupiah(r.sellPrice)}` });
+  } finally {
+    bagikanStatus.value = "";
+  }
+}
+
 function bagikanWA() {
   if (!lastReceipt.value) return;
   const r = lastReceipt.value;
@@ -491,7 +551,10 @@ onMounted(load);
     <div v-if="lastReceipt" class="card no-print" style="margin-bottom: 18px">
       <h3 style="margin-bottom: 10px">Transaksi Terakhir: {{ lastReceipt.refId }}</h3>
       <button class="btn ghost" style="margin-right: 8px" @click="cetakStruk">🖨️ Cetak Struk</button>
-      <button class="btn ghost" @click="bagikanWA">📤 Bagikan via WhatsApp</button>
+      <button class="btn ghost" style="margin-right: 8px" :disabled="bagikanStatus === 'membuat'" @click="bagikanGambar">
+        {{ bagikanStatus === "membuat" ? "Membuat gambar..." : "🖼️ Bagikan Gambar Struk" }}
+      </button>
+      <button class="btn ghost" @click="bagikanWA">📤 Bagikan Teks (WhatsApp)</button>
     </div>
     <div v-if="lastReceipt" class="receipt-box" style="display: none">
       <div style="text-align: center; margin-bottom: 6px">

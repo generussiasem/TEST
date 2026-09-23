@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, nextTick } from "vue";
 import { api } from "../api.js";
+import { buatStrukPNG, bagikanAtauUnduhGambar } from "../receiptImage.js";
 
 const products = ref([]);
 const wallets = ref([]);
@@ -17,6 +18,8 @@ const okMsg = ref("");
 const scanRef = ref(null);
 const submitting = ref(false);
 const lastReceipt = ref(null); // { items, total, cost, paidMethod, contactName, date }
+const store = ref({ store_name: "Toko", address: "" });
+const bagikanStatus = ref(""); // "", "membuat", "gagal"
 
 function rupiah(n) {
   return "Rp" + Number(n || 0).toLocaleString("id-ID");
@@ -48,14 +51,16 @@ async function load() {
   // PENTING: type=fisik supaya produk PPOB (pulsa/token/dst) TIDAK ikut
   // muncul di pencarian Kasir — dulu ini bug, Kasir bisa "menjual" produk PPOB
   // yang harusnya cuma lewat menu PPOB tersendiri.
-  const [p, w, c] = await Promise.all([
+  const [p, w, c, st] = await Promise.all([
     api.get("/api/products?type=fisik"),
     api.get("/api/wallets"),
     api.get("/api/contacts?type=pelanggan"),
+    api.get("/api/store-settings"),
   ]);
   products.value = p;
   wallets.value = w.filter((x) => x.type !== "distributor_ppob");
   contacts.value = c;
+  store.value = st;
   if (wallets.value.length) walletId.value = wallets.value[0].id;
 }
 
@@ -147,6 +152,32 @@ async function checkout() {
 
 function cetakStruk() {
   window.print();
+}
+
+async function bagikanGambar() {
+  if (!lastReceipt.value) return;
+  bagikanStatus.value = "membuat";
+  try {
+    const r = lastReceipt.value;
+    const catatan = [];
+    if (r.paidMethod === "utang") catatan.push(`Utang atas nama ${r.contactName}`);
+    if (r.paidMethod === "titipan") {
+      let t = `Dibayar titipan ${rupiah(r.titipanDipakai)} a.n. ${r.contactName}`;
+      if (r.titipanSisa > 0) t += `, sisa ${rupiah(r.titipanSisa)} ${r.sisaMethod === "utang" ? "jadi utang" : "dibayar tunai"}`;
+      catatan.push(t);
+    }
+    const blob = await buatStrukPNG({
+      storeName: store.value.store_name,
+      address: store.value.address,
+      date: r.date,
+      items: r.items.map((it) => ({ label: it.name, qty: it.qty, amount: it.sell_price * it.qty })),
+      total: r.total,
+      catatan,
+    });
+    await bagikanAtauUnduhGambar(blob, `struk-${Date.now()}.png`, { title: "Struk Belanja", text: `Struk belanja ${rupiah(r.total)}` });
+  } finally {
+    bagikanStatus.value = "";
+  }
 }
 
 function bagikanWA() {

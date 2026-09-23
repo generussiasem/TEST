@@ -2,7 +2,7 @@
 import { ref, onMounted } from "vue";
 import { api } from "../api.js";
 
-const settings = ref({ store_name: "", address: "", logo_url: "" });
+const settings = ref({ store_name: "", address: "", logo_url: "", cetak_struk_url: "" });
 const wallets = ref([]);
 const walletForm = ref({ name: "", type: "umum", balance: 0, provider: "okeconnect" });
 const error = ref("");
@@ -109,6 +109,13 @@ onMounted(load);
           <div class="field"><label>Nama Toko</label><input v-model="settings.store_name" required /></div>
           <div class="field"><label>Alamat</label><input v-model="settings.address" /></div>
           <div class="field"><label>URL Logo</label><input v-model="settings.logo_url" placeholder="https://…" /></div>
+          <div class="field">
+            <label>URL Cetak Struk Eksternal (opsional)</label>
+            <input v-model="settings.cetak_struk_url" placeholder="https://namatoko.cetakstr.uk/" />
+            <p class="muted" style="font-size: 12.5px; margin-top: 4px">
+              Alat cetak struk tagihan dari OkeConnect. Kosongkan kalau tidak dipakai — menu "Cetak Struk Tagihan" akan tersembunyi.
+            </p>
+          </div>
           <button class="btn" type="submit">Simpan</button>
         </form>
       </div>

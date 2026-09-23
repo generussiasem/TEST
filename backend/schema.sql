@@ -6,7 +6,8 @@ CREATE TABLE IF NOT EXISTS store_settings (
   address TEXT,
   logo_url TEXT,
   modal_awal INTEGER,          -- titik nol Pertumbuhan Modal, diisi otomatis dari snapshot hari pertama fitur aktif
-  modal_awal_tanggal TEXT      -- tanggal snapshot yang dipakai sbg modal_awal
+  modal_awal_tanggal TEXT,     -- tanggal snapshot yang dipakai sbg modal_awal
+  cetak_struk_url TEXT         -- (opsional) URL alat cetak struk eksternal, mis. https://namatoko.cetakstr.uk/ (fitur OkeConnect, di luar kendali kita — bisa berubah/berhenti kapan saja)
 );
 INSERT OR IGNORE INTO store_settings (id, store_name) VALUES (1, 'Toko Saya');
 

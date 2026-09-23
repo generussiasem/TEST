@@ -155,11 +155,11 @@ app.get("/api/store-settings", async (c) => {
 });
 
 app.put("/api/store-settings", requireAdmin, async (c) => {
-  const { store_name, address, logo_url } = await c.req.json();
+  const { store_name, address, logo_url, cetak_struk_url } = await c.req.json();
   await c.env.DB.prepare(
-    "UPDATE store_settings SET store_name = ?, address = ?, logo_url = ? WHERE id = 1"
+    "UPDATE store_settings SET store_name = ?, address = ?, logo_url = ?, cetak_struk_url = ? WHERE id = 1"
   )
-    .bind(store_name, address || null, logo_url || null)
+    .bind(store_name, address || null, logo_url || null, cetak_struk_url || null)
     .run();
   return c.json({ ok: true });
 });

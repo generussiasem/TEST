@@ -10,6 +10,7 @@ const routes = [
   { path: "/katalog", name: "katalog", component: () => import("./views/Katalog.vue") },
   { path: "/ppob", name: "ppob", component: () => import("./views/Ppob.vue") },
   { path: "/tagihan", name: "tagihan", component: () => import("./views/PpobTagihan.vue") },
+  { path: "/cetak-struk-eksternal", name: "cetak-struk-eksternal", component: () => import("./views/CetakStrukEksternal.vue") },
   { path: "/kontak", name: "kontak", component: () => import("./views/Kontak.vue") },
   { path: "/hutang", name: "hutang", component: () => import("./views/Hutang.vue") },
   { path: "/mutasi", name: "mutasi", component: () => import("./views/Mutasi.vue") },
