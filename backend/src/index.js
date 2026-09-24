@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { sendJabberCommand } from "./jabber.js";
 import { sendTelegramMessage } from "./telegram.js";
-import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, extractTokenCode, syncPpobPrices, getProviderConfig, finalizePpobOrder, checkDistributorBalance } from "./ppob.js";
+import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, extractTokenCode, syncPpobPrices, getProviderConfig, finalizePpobOrder, checkDistributorBalance, parseTagihanListrikDetail } from "./ppob.js";
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
 import { getEmployeeByChatId, handleLinkCommand, sendMainMenu, handleAdminCallback, handleAdminSessionMessage } from "./bot-admin.js";
 import { hitungAsetBersih, catatSnapshotModalHarian } from "./modal.js";
@@ -852,10 +852,39 @@ app.put("/api/transactions/:id", requireAdmin, async (c) => {
   const id = c.req.param("id");
   const existing = await c.env.DB.prepare("SELECT * FROM transactions WHERE id = ?").bind(id).first();
   if (!existing) return c.json({ ok: false, error: "Transaksi tidak ditemukan" }, 404);
-  const { category, note, contact_id } = await c.req.json();
-  await c.env.DB.prepare("UPDATE transactions SET category = ?, note = ?, contact_id = ? WHERE id = ?")
-    .bind(category || null, note || null, contact_id || null, id)
+  const { category, note, contact_id, amount, cost_total } = await c.req.json();
+
+  // amount & cost_total sengaja tidak bisa diedit untuk sembarang transaksi —
+  // cuma untuk 'sale' (mis. koreksi omzet/HPP PPOB tagihan yang terlanjur
+  // salah tercatat). Kalau nilainya tidak dikirim (undefined), dibiarkan apa
+  // adanya (tidak dianggap "ganti ke 0").
+  let newAmount = existing.amount;
+  let newCostTotal = existing.cost_total;
+  if (existing.type === "sale") {
+    if (amount != null) newAmount = amount;
+    if (cost_total != null) newCostTotal = cost_total;
+  }
+
+  await c.env.DB.prepare("UPDATE transactions SET category = ?, note = ?, contact_id = ?, amount = ?, cost_total = ? WHERE id = ?")
+    .bind(category || null, note || null, contact_id || null, newAmount, newCostTotal, id)
     .run();
+
+  // Selisih omzet (amount) masuk/keluar dari dompet penerima (wallet_id) —
+  // deposit_used tidak ikut berubah di sini, jadi selisihnya murni newAmount - oldAmount.
+  if (existing.type === "sale" && existing.wallet_id && newAmount !== existing.amount) {
+    await c.env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?")
+      .bind(newAmount - existing.amount, existing.wallet_id)
+      .run();
+  }
+  // Selisih modal (cost_total) mempengaruhi saldo dompet distributor
+  // (cost_wallet_id) dengan arah TERBALIK: cost_total makin besar -> saldo
+  // distributor makin berkurang, jadi adjustment-nya (lama - baru).
+  if (existing.type === "sale" && existing.cost_wallet_id && newCostTotal !== existing.cost_total) {
+    await c.env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?")
+      .bind(existing.cost_total - newCostTotal, existing.cost_wallet_id)
+      .run();
+  }
+
   return c.json({ ok: true });
 });
 
@@ -891,7 +920,11 @@ async function hapusTransaksi(env, id) {
   // Balikkan juga modal yang sempat dikurangi dari dompet sumber (cost_wallet_id)
   // — berlaku baik yang wallet_id-nya terisi (tunai) maupun kosong (utang),
   // karena modal tetap dikurangi di kedua kasus saat transaksi dibuat.
-  if (t.type === "sale" && t.cost_wallet_id && t.cost_total > 0) {
+  // TIDAK boleh disyaratkan cost_total > 0: saat dibuat (recordPpobSale),
+  // saldo distributor dipotong `finalCostTotal` apa adanya (termasuk kalau
+  // kebetulan negatif, mis. transaksi lama sebelum fix parseTagihanListrikDetail)
+  // — jadi pembalikannya juga harus apa adanya, supaya konsisten.
+  if (t.type === "sale" && t.cost_wallet_id) {
     await env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?")
       .bind(t.cost_total, t.cost_wallet_id)
       .run();
@@ -1314,7 +1347,15 @@ app.get("/api/ppob-orders", async (c) => {
   const { results } = await c.env.DB.prepare(
     "SELECT * FROM ppob_orders ORDER BY created_at DESC LIMIT 200"
   ).all();
-  return c.json(results);
+  // Tempelkan detail hasil parsing balasan tagihan pascabayar (TTAG, modal
+  // riil dari selisih saldo, dst) supaya frontend TIDAK perlu duplikasi regex
+  // sendiri — lihat parseTagihanListrikDetail di ppob.js utk alasan lengkap.
+  // null kalau balasan bukan format tagihan pascabayar / belum ada balasan.
+  const withDetail = results.map((row) => ({
+    ...row,
+    tagihan_detail: row.status === "sukses" ? parseTagihanListrikDetail(row.raw_reply) : null,
+  }));
+  return c.json(withDetail);
 });
 
 // Koreksi manual satu order PPOB (mis. status ternyata salah tercatat, seperti
@@ -1397,6 +1438,84 @@ app.delete("/api/ppob-orders/:refId", requireAdmin, async (c) => {
 
   await c.env.DB.prepare("DELETE FROM ppob_orders WHERE ref_id = ?").bind(refId).run();
   return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// KOREKSI RETROAKTIF: transaksi tagihan pascabayar (listrik/PDAM) yang sudah
+// terlanjur tercatat SEBELUM fix parseTagihanListrikDetail, cost_total-nya
+// salah (ikut product.cost_price = komisi OkeConnect, bukan modal riil).
+// Cari ulang tiap order pascabayar yang sudah finalized, parse ulang
+// raw_reply-nya buat dapat modal riil yang benar, lalu:
+//   1. Perbaiki transactions.cost_total (otomatis membetulkan laba kotor/
+//      bersih di Laporan, karena itu dihitung on-the-fly dari cost_total).
+//   2. Betulkan saldo dompet distributor (cost_wallet_id) sebesar selisihnya
+//      — supaya efek salah kemarin (saldo distributor ikut salah kepotong/
+//      ketambah) ikut ke-reverse.
+// GET  = pratinjau (dry run, TIDAK mengubah apa pun).
+// POST = benar-benar eksekusi koreksi di atas.
+// Order yang modal-nya tidak bisa diparse dari raw_reply (format lama/beda)
+// TIDAK disentuh sama sekali — harus dicek & dikoreksi manual satu-satu.
+// ---------------------------------------------------------------------------
+async function hitungKoreksiModalTagihan(env) {
+  const { results: orders } = await env.DB.prepare(
+    `SELECT o.* FROM ppob_orders o
+     JOIN products p ON p.code = o.product_code
+     WHERE o.finalized = 1 AND o.status = 'sukses'
+       AND p.category IN ('TAGIHAN', 'AIR PDAM')
+     ORDER BY o.created_at ASC`
+  ).all();
+
+  const koreksi = [];
+  const dilewati = [];
+  for (const order of orders) {
+    const detail = parseTagihanListrikDetail(order.raw_reply);
+    if (detail.modalRiil == null) {
+      dilewati.push({ refId: order.ref_id, productCode: order.product_code, target: order.target, alasan: "modal riil tidak ketemu di raw_reply — cek manual" });
+      continue;
+    }
+    const trx = await env.DB.prepare(
+      "SELECT * FROM transactions WHERE type = 'sale' AND category = 'PPOB' AND note LIKE ?"
+    )
+      .bind(`%(ref ${order.ref_id})%`)
+      .first();
+    if (!trx) {
+      dilewati.push({ refId: order.ref_id, productCode: order.product_code, target: order.target, alasan: "transaksi tidak ketemu (mungkin sudah dihapus manual)" });
+      continue;
+    }
+    if (trx.cost_total === detail.modalRiil) continue; // sudah benar, tidak perlu dikoreksi
+
+    koreksi.push({
+      refId: order.ref_id,
+      transactionId: trx.id,
+      productCode: order.product_code,
+      target: order.target,
+      costWalletId: trx.cost_wallet_id,
+      costTotalLama: trx.cost_total,
+      costTotalBenar: detail.modalRiil,
+      selisihSaldoDompet: trx.cost_total - detail.modalRiil, // ditambahkan ke saldo dompet distributor
+    });
+  }
+  return { koreksi, dilewati };
+}
+
+app.get("/api/admin/koreksi-modal-tagihan", requireAdmin, async (c) => {
+  const { koreksi, dilewati } = await hitungKoreksiModalTagihan(c.env);
+  return c.json({ ok: true, dryRun: true, jumlahDikoreksi: koreksi.length, koreksi, dilewati });
+});
+
+app.post("/api/admin/koreksi-modal-tagihan", requireAdmin, async (c) => {
+  const { koreksi, dilewati } = await hitungKoreksiModalTagihan(c.env);
+  for (const k of koreksi) {
+    await c.env.DB.prepare("UPDATE transactions SET cost_total = ? WHERE id = ?")
+      .bind(k.costTotalBenar, k.transactionId)
+      .run();
+    if (k.costWalletId) {
+      await c.env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?")
+        .bind(k.selisihSaldoDompet, k.costWalletId)
+        .run();
+    }
+  }
+  return c.json({ ok: true, dryRun: false, jumlahDikoreksi: koreksi.length, koreksi, dilewati });
 });
 
 // Order PPOB langsung dari halaman kasir web (pola sama dengan /beli di Telegram,

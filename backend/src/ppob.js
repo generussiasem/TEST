@@ -114,6 +114,45 @@ function isPostpaid(product) {
   return POSTPAID_CATEGORIES.includes(product.category);
 }
 
+// ---------------------------------------------------------------------------
+// Parsing detail balasan SUKSES bayar tagihan pascabayar (listrik/PDAM) dari
+// OkeConnect. Format umum (contoh listrik PLN):
+//   ...SN: NAMA/TAG:35214/ADMIN:4500/TTAG:39714/TARIF:R1/DAYA:900/...
+//   Saldo 118.693 - 37.064 = 81.629 @23/09 10:06
+//
+// - TAG   = tagihan pokok (sebelum admin bank/PLN)
+// - ADMIN = admin bank/PLN — bagian RESMI dari tagihan yang wajib dibayar
+//   pelanggan, BUKAN komisi toko.
+// - TTAG  = total tagihan resmi = TAG + ADMIN. Ini batas MINIMAL yang harus
+//   ditagih ke pelanggan (belum termasuk "Admin Loket" milik toko sendiri,
+//   yang tidak pernah muncul di balasan OkeConnect — itu kebijakan toko).
+// - "Saldo A - B = C" -> B adalah MODAL RIIL yang benar-benar terpotong dari
+//   saldo distributor untuk transaksi ini. Field product.cost_price TIDAK
+//   BOLEH dipakai sebagai modal pascabayar — itu cuma referensi komisi/insentif
+//   rata-rata OkeConnect utk kode produk tsb (lihat catatan di recordPpobSale).
+//
+// Kalau salah satu pola tidak ketemu (format provider berubah, order belum
+// sukses, atau balasan bukan tagihan listrik/PDAM), field terkait dikembalikan
+// null — SENGAJA bukan 0, supaya kasir/kode pemanggil tidak salah mengira
+// modal Rp0. Regex \bTAG: memakai word-boundary supaya tidak ikut nyantol ke
+// "TAG" yang jadi bagian dari "TTAG:".
+export function parseTagihanListrikDetail(rawReply) {
+  const reply = String(rawReply || "");
+  const toNumber = (s) => (s == null ? null : parseInt(String(s).replace(/\./g, ""), 10) || 0);
+
+  const tag = reply.match(/\bTAG:([\d.]+)/i);
+  const admin = reply.match(/\bADMIN:([\d.]+)/i);
+  const ttag = reply.match(/\bTTAG:([\d.]+)/i);
+  const saldo = reply.match(/Saldo\s+([\d.]+)\s*-\s*([\d.]+)\s*=\s*([\d.]+)/i);
+
+  return {
+    tagihanPokok: tag ? toNumber(tag[1]) : null,
+    adminBank: admin ? toNumber(admin[1]) : null,
+    totalTagihan: ttag ? toNumber(ttag[1]) : null,
+    modalRiil: saldo ? toNumber(saldo[2]) : null,
+  };
+}
+
 // Coba tebak kode token PLN dari balasan mentah OkeConnect — pola umum:
 // deret 16-20 digit angka, kadang dipisah strip. BELUM ada contoh balasan
 // sukses token PLN asli, jadi ini pola tebakan yang bisa meleset; kasir
@@ -394,13 +433,31 @@ export async function finalizePpobOrder(env, { refId, sellPrice, costTotal, toke
     throw new Error(`Pembayaran ${finalPaidMethod === "utang" ? "Utang" : "Titipan"} wajib pilih kontak`);
   }
 
+  // Kalau caller (mis. jalur cron otomatis tanpa kasir) TIDAK mengirim
+  // costTotal eksplisit untuk kategori pascabayar, JANGAN jatuh ke
+  // product.cost_price (itu cuma referensi komisi OkeConnect, bukan modal
+  // riil — lihat catatan parseTagihanListrikDetail). Coba dulu ambil modal
+  // riil dari selisih saldo di raw_reply order ini; product.cost_price cuma
+  // dipakai sebagai upaya terakhir kalau balasan tidak bisa diparse sama sekali.
+  let effectiveCostTotal = costTotal;
+  if (effectiveCostTotal == null && isPostpaid(product)) {
+    const detail = parseTagihanListrikDetail(order.raw_reply);
+    if (detail.modalRiil != null) {
+      effectiveCostTotal = detail.modalRiil;
+    } else {
+      console.error(
+        `finalizePpobOrder ${refId}: gagal parse modal riil dari raw_reply, fallback ke product.cost_price (kemungkinan salah utk pascabayar)`
+      );
+    }
+  }
+
   const { transactionId, costTotal: appliedCostTotal } = await recordPpobSale(env, {
     product,
     wallet,
     refId,
     target: order.target,
     sellPrice,
-    costTotal,
+    costTotal: effectiveCostTotal,
     paidMethod: finalPaidMethod,
     contactId: finalContactId,
     sisaMethod,

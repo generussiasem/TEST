@@ -159,6 +159,19 @@ miniapp.get("/products", async (c) => {
   return c.json(results);
 });
 
+// Katalog PPOB lengkap (bukan cuma hasil pencarian terbatas 25 seperti
+// /products) — dipakai tab "Katalog" buat lihat-lihat semua harga per
+// kategori sebelum order, tanpa wajib ketik kata kunci dulu. Cuma kolom
+// publik (TIDAK termasuk cost_price/modal — itu urusan internal toko).
+miniapp.get("/catalog", async (c) => {
+  const { results } = await c.env.DB.prepare(
+    `SELECT code, name, category, product_group, sell_price FROM products
+     WHERE active = 1 AND code IS NOT NULL
+     ORDER BY category, product_group, sell_price ASC`
+  ).all();
+  return c.json(results);
+});
+
 // Cek tagihan/nama pelanggan dulu (PDAM/listrik/BPJS) SEBELUM benar-benar bayar
 // — sama seperti tombol "Cek" di halaman PPOB web, tidak memotong saldo.
 miniapp.post("/ppob/cek", async (c) => {

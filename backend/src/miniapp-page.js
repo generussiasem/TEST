@@ -86,6 +86,7 @@ function haptic(kind) { if (tg && tg.HapticFeedback) { if (kind === "err") tg.Ha
 
 let ME = null;
 let currentTab = "hutang";
+let catalogCache = null; // simpan hasil /catalog di memori, tidak usah fetch ulang tiap ganti tab
 
 async function boot() {
   try {
@@ -102,10 +103,13 @@ function render() {
     '<div class="tabs">' +
       '<div class="tab' + (currentTab === "hutang" ? " active" : "") + '" data-tab="hutang">💳 Hutang</div>' +
       '<div class="tab' + (currentTab === "ppob" ? " active" : "") + '" data-tab="ppob">📱 PPOB</div>' +
+      '<div class="tab' + (currentTab === "katalog" ? " active" : "") + '" data-tab="katalog">📋 Katalog</div>' +
     '</div>' +
     '<div id="tabBody"></div>';
   app.querySelectorAll(".tab").forEach((el) => el.addEventListener("click", () => { currentTab = el.dataset.tab; render(); }));
-  if (currentTab === "hutang") renderHutangTab(); else renderPpobTab();
+  if (currentTab === "hutang") renderHutangTab();
+  else if (currentTab === "ppob") renderPpobTab();
+  else renderKatalogTab();
 }
 
 // ---------------------------------------------------------------------------
@@ -331,6 +335,64 @@ async function loadProducts(q) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// TAB KATALOG — lihat-lihat semua harga PPOB per kategori, tanpa wajib ketik
+// kata kunci dulu (beda dari tab PPOB yang khusus alur cari-lalu-order).
+// Data di-cache di memori (catalogCache) sekali per sesi buka mini app —
+// kalau harga baru saja diubah di dashboard web, tutup-buka lagi mini app-nya.
+// ---------------------------------------------------------------------------
+function renderKatalogTab() {
+  const body = document.getElementById("tabBody");
+  body.innerHTML =
+    '<div class="card">' +
+      '<label>Cari di katalog (nama/kode)</label>' +
+      '<input id="katalogSearch" placeholder="mis. token, pulsa, PDAM..." />' +
+      '<div id="katalogPills" class="pill-row"></div>' +
+      '<div id="katalogList" class="spinner">Memuat katalog...</div>' +
+    '</div>';
+
+  let kategoriAktif = "semua";
+  const searchInput = document.getElementById("katalogSearch");
+  let timer;
+  searchInput.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(renderKatalogList, 200); });
+
+  function renderKatalogList() {
+    const listEl = document.getElementById("katalogList");
+    const q = searchInput.value.trim().toLowerCase();
+    let rows = catalogCache;
+    if (kategoriAktif !== "semua") rows = rows.filter((p) => p.category === kategoriAktif);
+    if (q) rows = rows.filter((p) => p.name.toLowerCase().includes(q) || p.code.toLowerCase().includes(q));
+    if (!rows.length) { listEl.innerHTML = '<p class="muted">Tidak ada produk yang cocok.</p>'; return; }
+    listEl.innerHTML = rows.map((p) =>
+      '<div class="list-item" data-code="' + esc(p.code) + '">' +
+        '<div class="row"><b>' + esc(p.name) + '</b><span class="badge">' + rupiah(p.sell_price) + '</span></div>' +
+        '<div class="muted">' + esc(p.code) + (p.product_group ? " · " + esc(p.product_group) : "") + '</div>' +
+      '</div>'
+    ).join("");
+    listEl.querySelectorAll(".list-item").forEach((el) => el.addEventListener("click", () => showOrderForm(rows.find((r) => r.code === el.dataset.code))));
+  }
+
+  async function loadKatalog() {
+    const listEl = document.getElementById("katalogList");
+    try {
+      if (!catalogCache) catalogCache = await api("/catalog");
+      const kategoriList = ["semua", ...new Set(catalogCache.map((p) => p.category).filter(Boolean))];
+      document.getElementById("katalogPills").innerHTML = kategoriList.map((k) =>
+        '<div class="pill' + (k === kategoriAktif ? " active" : "") + '" data-kat="' + esc(k) + '">' + esc(k === "semua" ? "Semua" : k) + '</div>'
+      ).join("");
+      document.querySelectorAll("#katalogPills .pill").forEach((el) => el.addEventListener("click", () => {
+        kategoriAktif = el.dataset.kat;
+        document.querySelectorAll("#katalogPills .pill").forEach((p) => p.classList.toggle("active", p === el));
+        renderKatalogList();
+      }));
+      renderKatalogList();
+    } catch (err) {
+      listEl.innerHTML = '<div class="error">' + esc(err.message) + '</div>';
+    }
+  }
+  loadKatalog();
+}
+
 function showOrderForm(product) {
   const body = document.getElementById("tabBody");
   body.innerHTML =
@@ -357,7 +419,7 @@ function showOrderForm(product) {
 
   let paidMethod = "tunai";
   let selectedContactId = null;
-  document.getElementById("backLink").addEventListener("click", renderPpobTab);
+  document.getElementById("backLink").addEventListener("click", render);
 
   body.querySelectorAll(".pill").forEach((el) => el.addEventListener("click", () => {
     paidMethod = el.dataset.method;
@@ -420,13 +482,13 @@ async function showOrderStatus(refId, product) {
         renderConfirmForm(order, product);
       } else if (order.finalized) {
         statusEl.innerHTML = '<div class="success">✅ Sudah tercatat sebelumnya (harga ' + rupiah(order.sell_price) + ').</div><button class="btn secondary" id="doneBtn">Selesai</button>';
-        document.getElementById("doneBtn").addEventListener("click", renderPpobTab);
+        document.getElementById("doneBtn").addEventListener("click", render);
       } else if (order.status === "gagal") {
         statusEl.innerHTML = '<div class="error">❌ Order gagal.</div><p class="muted">' + esc(order.raw_reply || "-") + '</p><button class="btn secondary" id="doneBtn">Selesai</button>';
-        document.getElementById("doneBtn").addEventListener("click", renderPpobTab);
+        document.getElementById("doneBtn").addEventListener("click", render);
       } else {
         statusEl.innerHTML = '<p class="muted">Masih menunggu balasan provider, cek lagi nanti lewat menu bot "Konfirmasi Order PPOB" atau dashboard web.</p><button class="btn secondary" id="doneBtn">Selesai</button>';
-        document.getElementById("doneBtn").addEventListener("click", renderPpobTab);
+        document.getElementById("doneBtn").addEventListener("click", render);
       }
     } catch (err) {
       statusEl.innerHTML = '<div class="error">' + esc(err.message) + '</div>';
@@ -469,7 +531,7 @@ async function renderConfirmForm(order, product) {
       haptic("ok");
       const body2 = document.getElementById("tabBody");
       body2.innerHTML = '<div class="card"><div class="success">✅ Dicatat dengan harga ' + rupiah(sellPrice) + '. Sudah masuk laporan web.</div><button class="btn secondary" id="doneBtn">Selesai</button></div>';
-      document.getElementById("doneBtn").addEventListener("click", renderPpobTab);
+      document.getElementById("doneBtn").addEventListener("click", render);
     } catch (err) {
       haptic("err");
       msgEl.innerHTML = '<div class="error">' + esc(err.message) + '</div>';

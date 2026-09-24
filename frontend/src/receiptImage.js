@@ -453,6 +453,273 @@ export function buatStrukTokenPLN(d) {
   return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), "image/png", 1));
 }
 
+
+// ---------------------------------------------------------------------------
+// STRUK KHUSUS TAGIHAN LISTRIK PLN PASCABAYAR
+//
+// Meniru struk resmi (ID PLGN, NAMA, TARIF DAYA, BULAN, PERIODE, STAND MTR,
+// TAGIHAN, ADMIN BANK, ADMIN LOKET, TOTAL BAYAR, Serial Number) ditambah NAMA
+// TOKO & ALAMAT di bagian atas. Sebagian besar data diambil dari balasan asli
+// OkeConnect (raw_reply), bukan diketik manual.
+// ---------------------------------------------------------------------------
+
+/**
+ * Ambil rincian tagihan dari balasan asli OkeConnect untuk pembayaran
+ * listrik pascabayar. Contoh balasan yang dikenali:
+ *   "...SUKSES. SN: DAHURI/TAG:35214/ADMIN:4500/TTAG:39714/TARIF:R1/DAYA:900/
+ *    JMLBLN:1/PERIODE:202609/MET:51986-52019/REFF:2OPT210ZEF760A46B5230EC...
+ *    Saldo..."
+ * Parsing ditulis generik (pisah per "/", lalu per "KEY:VALUE") supaya tetap
+ * jalan walau urutan field berubah — field yang tidak ketemu dikembalikan
+ * null, struk tetap dibuat tanpa baris itu, bukan error.
+ */
+export function parseStrukTagihanListrik(rawReply) {
+  const text = String(rawReply || "");
+  const hasil = {
+    nama: null,
+    tagihan: null,
+    adminBank: null,
+    totalTagihan: null,
+    tarif: null,
+    daya: null,
+    jmlBulan: null,
+    periode: null,
+    standMeter: null,
+    reff: null,
+  };
+  const blokMatch = text.match(/SN\s*:?\s*([^.]+?)\.\s*Saldo/i) || text.match(/SN\s*:?\s*([^.]+?)\.?\s*$/i);
+  if (!blokMatch) return hasil;
+
+  const parts = blokMatch[1].split("/").map((p) => p.trim());
+  if (parts.length && !parts[0].includes(":")) hasil.nama = parts.shift();
+
+  const KEY_MAP = {
+    TAG: "tagihan",
+    ADMIN: "adminBank",
+    TTAG: "totalTagihan",
+    TARIF: "tarif",
+    DAYA: "daya",
+    JMLBLN: "jmlBulan",
+    PERIODE: "periode",
+    MET: "standMeter",
+    REFF: "reff",
+  };
+  for (const part of parts) {
+    const i = part.indexOf(":");
+    if (i < 0) continue;
+    const key = KEY_MAP[part.slice(0, i).trim().toUpperCase()];
+    if (key) hasil[key] = part.slice(i + 1).trim();
+  }
+  return hasil;
+}
+
+/**
+ * @param {Object} d
+ * @param {string} d.storeName
+ * @param {string} [d.address]
+ * @param {string} d.date
+ * @param {string} d.idPlgn - nomor ID pelanggan (target order)
+ * @param {string} [d.nama] - nama pelanggan dari PLN
+ * @param {string} [d.tarif] mis. "R1"
+ * @param {string} [d.daya] mis. "900"
+ * @param {string} [d.jmlBulan] mis. "1"
+ * @param {string} [d.periode] mis. "202609"
+ * @param {string} [d.standMeter] mis. "51986-52019"
+ * @param {number} [d.tagihan] - nilai tagihan sebelum biaya admin
+ * @param {number} [d.adminBank] - biaya admin dari PLN/bank
+ * @param {number} [d.adminLoket] - margin toko (selisih yang kita ambil)
+ * @param {number} d.totalBayar - total yang dibayar pelanggan (= harga jual)
+ * @param {string} [d.reff] - nomor referensi/serial dari PLN
+ * @param {string[]} [d.catatan]
+ * @returns {Promise<Blob>}
+ */
+export function buatStrukTagihanListrik(d) {
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  const w = LEBAR;
+  const pad = PAD;
+  const contentW = w - pad * 2;
+  const lineH = 15;
+  const gap = 4;
+  const monoBold = (px) => `bold ${px}px "Courier New", monospace`;
+  const mono = (px) => `${px}px "Courier New", monospace`;
+
+  const rincian = [];
+  rincian.push(["ID PLGN", d.idPlgn]);
+  if (d.nama) rincian.push(["NAMA", d.nama]);
+  if (d.tarif || d.daya) rincian.push(["TARIF DAYA", [d.tarif, d.daya].filter(Boolean).join(" - ")]);
+  if (d.jmlBulan) rincian.push(["BULAN", d.jmlBulan]);
+  if (d.periode) rincian.push(["PERIODE", d.periode]);
+  if (d.standMeter) rincian.push(["STAND MTR", d.standMeter]);
+
+  const biaya = [];
+  if (d.tagihan != null) biaya.push(["TAGIHAN", d.tagihan]);
+  if (d.adminBank != null) biaya.push(["ADMIN BANK", d.adminBank]);
+  if (d.adminLoket != null && d.adminLoket > 0) biaya.push(["ADMIN LOKET", d.adminLoket]);
+
+  const measure = document.createElement("canvas").getContext("2d");
+  const wrapAt = (text, font, maxW) => {
+    measure.font = font;
+    return wrapText(measure, text, maxW);
+  };
+
+  // --- Pass 1: hitung tinggi ---
+  let y = pad;
+  y += lineH * 1.3; // nama toko
+  measure.font = mono(12);
+  const alamatLines = d.address ? wrapText(measure, d.address, contentW) : [];
+  y += alamatLines.length * lineH + (d.address ? gap : 0);
+  y += lineH + gap * 2; // tanggal
+  y += 1 + gap * 2; // garis
+
+  measure.font = monoBold(12.5);
+  const judulLines = wrapText(measure, "STRUK PEMBAYARAN LISTRIK", contentW);
+  y += judulLines.length * lineH * 1.15 + gap * 2;
+  y += 1 + gap * 2; // garis
+
+  for (const [label, value] of rincian) {
+    const valLines = wrapAt(String(value), mono(12), contentW - 10);
+    y += Math.max(1, valLines.length) * lineH + gap * 0.3;
+  }
+  y += gap;
+  y += 1 + gap * 2; // garis
+
+  measure.font = mono(12.5);
+  y += biaya.length * lineH;
+  if (biaya.length) y += gap;
+
+  y += lineH * 1.3 + gap * 2; // TOTAL BAYAR (bold)
+
+  measure.font = mono(11.5);
+  y += lineH; // "** Serial Number **"
+  measure.font = monoBold(13);
+  const reffLines = wrapText(measure, d.reff || "-", contentW);
+  y += reffLines.length * lineH * 1.2 + gap;
+
+  measure.font = mono(12);
+  const catatanLines = (d.catatan || []).flatMap((c) => wrapText(measure, c, contentW));
+  if (catatanLines.length) y += gap;
+  y += catatanLines.length * lineH;
+
+  measure.font = mono(11);
+  const footerLines = wrapText(measure, "PLN menyatakan struk ini sebagai bukti yang sah, mohon disimpan", contentW);
+  y += gap * 3 + 1 + gap * 2;
+  y += footerLines.length * lineH + gap + lineH * 1.2; // footer PLN + "Terima kasih!"
+  y += pad;
+
+  // --- Pass 2: gambar ---
+  canvas.width = w;
+  canvas.height = Math.ceil(y);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#1a1a1a";
+  ctx.textBaseline = "top";
+
+  const center = (text, cy, font) => {
+    ctx.font = font;
+    ctx.textAlign = "center";
+    ctx.fillText(text, w / 2, cy);
+    ctx.textAlign = "left";
+  };
+  const hr = (cy) => {
+    ctx.strokeStyle = "#1a1a1a";
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(pad, cy);
+    ctx.lineTo(w - pad, cy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  };
+
+  y = pad;
+  center(d.storeName || "Toko", y, monoBold(16));
+  y += lineH * 1.3;
+
+  if (d.address) {
+    ctx.font = mono(12);
+    for (const l of alamatLines) {
+      center(l, y, ctx.font);
+      y += lineH;
+    }
+    y += gap;
+  }
+  center(d.date, y, mono(12));
+  y += lineH + gap * 2;
+  hr(y);
+  y += gap * 2;
+
+  ctx.font = monoBold(12.5);
+  for (const l of judulLines) {
+    center(l, y, ctx.font);
+    y += lineH * 1.15;
+  }
+  y += gap;
+  hr(y);
+  y += gap * 2;
+
+  for (const [label, value] of rincian) {
+    ctx.font = mono(12);
+    ctx.fillText(label, pad, y);
+    const valLines = wrapText(ctx, String(value), contentW - 10);
+    for (const vl of valLines) {
+      ctx.fillText(vl, pad, y + lineH);
+      y += lineH;
+    }
+    y += gap * 0.3;
+  }
+  y += gap;
+  hr(y);
+  y += gap * 2;
+
+  ctx.font = mono(12.5);
+  for (const [label, value] of biaya) {
+    ctx.fillText(label, pad, y);
+    ctx.textAlign = "right";
+    ctx.fillText(rupiah(value), w - pad, y);
+    ctx.textAlign = "left";
+    y += lineH;
+  }
+  if (biaya.length) y += gap;
+
+  ctx.font = monoBold(14);
+  ctx.fillText("TOTAL BAYAR", pad, y);
+  ctx.textAlign = "right";
+  ctx.fillText(rupiah(d.totalBayar), w - pad, y);
+  ctx.textAlign = "left";
+  y += lineH * 1.3 + gap * 2;
+
+  center("** Serial Number **", y, mono(11.5));
+  y += lineH;
+  ctx.font = monoBold(13);
+  for (const l of reffLines) {
+    center(l, y, ctx.font);
+    y += lineH * 1.2;
+  }
+  y += gap;
+
+  if (catatanLines.length) {
+    y += gap;
+    ctx.font = mono(12);
+    for (const l of catatanLines) {
+      ctx.fillText(l, pad, y);
+      y += lineH;
+    }
+  }
+
+  y += gap * 3;
+  hr(y);
+  y += gap * 2;
+  ctx.font = mono(11);
+  for (const l of footerLines) {
+    center(l, y, ctx.font);
+    y += lineH;
+  }
+  y += gap;
+  center("Terima kasih!", y, mono(12.5));
+
+  return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), "image/png", 1));
+}
+
 export async function bagikanAtauUnduhGambar(blob, filename, { title, text } = {}) {
   const file = new File([blob], filename, { type: "image/png" });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {

@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from "vue";
 import { useRoute } from "vue-router";
 import { api } from "../api.js";
-import { buatStrukPNG, bagikanAtauUnduhGambar } from "../receiptImage.js";
+import { buatStrukPNG, buatStrukTagihanListrik, parseStrukTagihanListrik, bagikanAtauUnduhGambar } from "../receiptImage.js";
 
 const route = useRoute();
 
@@ -148,6 +148,14 @@ function isPostpaidCode(code) {
   return p && (p.category === "TAGIHAN" || p.category === "AIR PDAM");
 }
 
+// Tagihan listrik PLN pascabayar -> pakai struk khusus (ID PLGN, NAMA, TARIF
+// DAYA, BULAN, PERIODE, STAND MTR, rincian biaya). Produk lain (BPJS,
+// internet, PDAM) tetap pakai struk umum.
+function looksLikeListrik(code) {
+  const p = products.value.find((x) => x.code === code);
+  return !!p && (/listrik|pln/i.test(p.name || "") || /listrik|pln/i.test(p.code || ""));
+}
+
 async function load() {
   const [p, o, c, w, st] = await Promise.all([
     api.get("/api/products"),
@@ -245,16 +253,48 @@ async function doBayar() {
 }
 
 function openConfirm(o) {
-  confirmTarget.value = { refId: o.ref_id, productCode: o.product_code, target: o.target };
+  // tagihan_detail dikirim backend (parseTagihanListrikDetail di ppob.js):
+  // TAG/ADMIN/TTAG dari balasan OkeConnect + modalRiil dari selisih saldo
+  // ("Saldo A - B = C" -> B). Untuk pascabayar, o.cost_price BUKAN modal
+  // riil — itu cuma referensi komisi/insentif rata-rata OkeConnect per kode
+  // produk, jadi TIDAK BOLEH dipakai buat isi field Modal transaksi ini.
+  const detail = o.tagihan_detail || null;
+  const postpaid = isPostpaidCode(o.product_code);
+  const modalTerdeteksi = postpaid ? detail?.modalRiil : null; // null = gagal parse / belum sukses
+  confirmTarget.value = {
+    refId: o.ref_id,
+    productCode: o.product_code,
+    target: o.target,
+    rawReply: o.raw_reply || "",
+    isListrik: looksLikeListrik(o.product_code),
+    detail,
+    modalTidakTerdeteksi: postpaid && modalTerdeteksi == null,
+  };
   confirmForm.value = {
-    sellPrice: o.sell_price || 0,
-    costTotal: o.cost_price || 0,
+    // Kalau pascabayar & berhasil diparse -> pakai modal riil. Kalau
+    // pascabayar tapi GAGAL diparse -> kosongkan (0) supaya kasir wajib isi
+    // manual, jangan diam-diam pakai cost_price yang salah. Kalau bukan
+    // pascabayar (pulsa/kuota, harga tetap) -> tetap pakai cost_price seperti
+    // semula, itu memang benar utk kategori itu.
+    sellPrice: (postpaid && detail?.totalTagihan != null ? detail.totalTagihan : o.sell_price) || 0,
+    costTotal: postpaid ? modalTerdeteksi || 0 : o.cost_price || 0,
+    adminLoket: 0,
     paidMethod: o.paid_method === "utang" ? "utang" : "tunai",
     contactId: o.contact_id || null,
     sisaMethod: "tunai",
     receiveWalletId: lastReceiveWalletId.value || receiveWallets.value[0]?.id || null,
   };
   openedId.value = null;
+}
+
+// "Admin Loket" = fee jasa layanan milik TOKO sendiri di atas total tagihan
+// resmi (TTAG) — tidak pernah ada di balasan OkeConnect, murni kebijakan
+// toko. Menambah/mengubah nilainya otomatis update Harga Jual; kasir tetap
+// bisa timpa manual Harga Jual kalau perlu.
+function terapkanAdminLoket() {
+  const ttag = confirmTarget.value?.detail?.totalTagihan;
+  if (ttag == null) return;
+  confirmForm.value.sellPrice = ttag + (Number(confirmForm.value.adminLoket) || 0);
 }
 
 async function submitKonfirmasi() {
@@ -294,6 +334,8 @@ async function submitKonfirmasi() {
       productCode: confirmTarget.value.productCode,
       target: confirmTarget.value.target,
       sellPrice: confirmForm.value.sellPrice,
+      isListrik: confirmTarget.value.isListrik,
+      rawReply: confirmTarget.value.rawReply,
       paidMethod: confirmForm.value.paidMethod,
       contactName: confirmForm.value.contactId ? contacts.value.find((x) => x.id === confirmForm.value.contactId)?.name : null,
       titipanDipakai: confirmForm.value.paidMethod === "titipan" ? titipanInfo.value?.dipakai || 0 : 0,
@@ -318,22 +360,53 @@ async function bagikanGambar() {
   bagikanStatus.value = "membuat";
   try {
     const r = lastReceipt.value;
-    const catatan = [`Target: ${r.target}`];
+    const catatan = [];
     if (r.paidMethod === "utang") catatan.push(`Utang atas nama ${r.contactName}`);
     if (r.paidMethod === "titipan") {
       let t = `Dibayar titipan ${rupiah(r.titipanDipakai)} a.n. ${r.contactName}`;
       if (r.titipanSisa > 0) t += `, sisa ${rupiah(r.titipanSisa)} ${r.sisaMethod === "utang" ? "jadi utang" : "dibayar tunai"}`;
       catatan.push(t);
     }
-    const blob = await buatStrukPNG({
-      storeName: store.value.store_name,
-      address: store.value.address,
-      date: r.date,
-      judul: "STRUK TAGIHAN",
-      items: [{ label: r.productCode, amount: r.sellPrice }],
-      total: r.sellPrice,
-      catatan,
-    });
+
+    let blob;
+    if (r.isListrik) {
+      // Tagihan listrik PLN pascabayar -> struk khusus. TAGIHAN & ADMIN BANK
+      // diambil dari balasan asli OkeConnect; ADMIN LOKET dihitung dari
+      // selisih harga jual dan total tagihan (TTAG) — itu margin toko sendiri,
+      // tidak ada di balasan providernya.
+      const p = parseStrukTagihanListrik(r.rawReply);
+      const totalTagihan = p.totalTagihan != null ? Number(p.totalTagihan) : null;
+      const adminLoket = totalTagihan != null ? r.sellPrice - totalTagihan : null;
+      blob = await buatStrukTagihanListrik({
+        storeName: store.value.store_name,
+        address: store.value.address,
+        date: r.date,
+        idPlgn: r.target,
+        nama: p.nama,
+        tarif: p.tarif,
+        daya: p.daya,
+        jmlBulan: p.jmlBulan,
+        periode: p.periode,
+        standMeter: p.standMeter,
+        tagihan: p.tagihan != null ? Number(p.tagihan) : null,
+        adminBank: p.adminBank != null ? Number(p.adminBank) : null,
+        adminLoket,
+        totalBayar: r.sellPrice,
+        reff: p.reff,
+        catatan,
+      });
+    } else {
+      catatan.unshift(`Target: ${r.target}`);
+      blob = await buatStrukPNG({
+        storeName: store.value.store_name,
+        address: store.value.address,
+        date: r.date,
+        judul: "STRUK TAGIHAN",
+        items: [{ label: r.productCode, amount: r.sellPrice }],
+        total: r.sellPrice,
+        catatan,
+      });
+    }
     await bagikanAtauUnduhGambar(blob, `struk-tagihan-${Date.now()}.png`, { title: "Struk Tagihan", text: `Struk tagihan ${rupiah(r.sellPrice)}` });
   } finally {
     bagikanStatus.value = "";
@@ -459,7 +532,20 @@ onMounted(load);
         <h3 style="margin-bottom: 4px">Konfirmasi Pembayaran Tagihan</h3>
         <p class="muted" style="font-size: 13px; margin-bottom: 14px">{{ confirmTarget.productCode }} → {{ confirmTarget.target }}</p>
 
+        <div v-if="confirmTarget.detail && confirmTarget.detail.totalTagihan != null" class="muted" style="font-size: 13px; margin-bottom: 10px; line-height: 1.6">
+          Tagihan pokok: {{ rupiah(confirmTarget.detail.tagihanPokok) }} + Admin Bank: {{ rupiah(confirmTarget.detail.adminBank) }}
+          = Total Tagihan (TTAG): <strong>{{ rupiah(confirmTarget.detail.totalTagihan) }}</strong><br />
+          Modal riil (dari selisih saldo distributor): <strong>{{ rupiah(confirmTarget.detail.modalRiil) }}</strong>
+        </div>
+        <div v-if="confirmTarget.modalTidakTerdeteksi" class="field" style="background: #fff3cd; padding: 8px 10px; border-radius: 6px; font-size: 13px; margin-bottom: 10px">
+          ⚠️ Modal tidak terdeteksi otomatis dari balasan provider. Isi manual sesuai selisih saldo distributor SEBELUM & SESUDAH transaksi ini (jangan biarkan 0).
+        </div>
+
         <div class="field"><label>Modal (nominal tagihan asli yang terpotong dari saldo)</label><input v-model.number="confirmForm.costTotal" type="number" /></div>
+        <div v-if="confirmTarget.detail && confirmTarget.detail.totalTagihan != null" class="field">
+          <label>Admin Loket (fee jasa toko, di luar TTAG)</label>
+          <input v-model.number="confirmForm.adminLoket" type="number" @input="terapkanAdminLoket" />
+        </div>
         <div class="field"><label>Harga Jual (diterima dari pelanggan, termasuk fee)</label><input v-model.number="confirmForm.sellPrice" type="number" /></div>
 
         <div class="field">
