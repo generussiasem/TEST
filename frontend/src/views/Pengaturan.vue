@@ -12,6 +12,10 @@ const editingWallet = ref(null);
 const modal = ref(null);
 const modalAwalForm = ref(0);
 const modalMsg = ref("");
+const depositForm = ref({ bank: "", nominal: null });
+const depositMsg = ref("");
+const depositError = ref("");
+const depositLoading = ref(false);
 
 function rupiah(n) {
   return "Rp" + Number(n || 0).toLocaleString("id-ID");
@@ -34,6 +38,24 @@ async function simpanModalAwal() {
     await load();
   } catch (err) {
     error.value = err.message;
+  }
+}
+
+async function kirimDepositPortalpulsa() {
+  depositError.value = "";
+  depositMsg.value = "";
+  if (!depositForm.value.bank || !depositForm.value.nominal) {
+    depositError.value = "Bank dan nominal wajib diisi.";
+    return;
+  }
+  depositLoading.value = true;
+  try {
+    const res = await api.post("/api/admin/portalpulsa/deposit", depositForm.value);
+    depositMsg.value = res.reply;
+  } catch (err) {
+    depositError.value = err.message;
+  } finally {
+    depositLoading.value = false;
   }
 }
 
@@ -135,6 +157,22 @@ onMounted(load);
       </div>
 
       <div class="card">
+        <h3 style="margin-bottom: 12px">Deposit Saldo portalpulsa</h3>
+        <p class="muted" style="font-size: 13px; margin-bottom: 12px">
+          Kirim perintah Deposit langsung ke portalpulsa (PIN otomatis dari secret PORTALPULSA_PIN).
+          Balasannya berupa <b>instruksi transfer manual</b> (nominal + kode unik, bank, no rekening) —
+          bukan topup otomatis, tetap transfer manual sesuai instruksi setelah dikirim.
+        </p>
+        <div v-if="depositError" class="error-box">{{ depositError }}</div>
+        <form @submit.prevent="kirimDepositPortalpulsa">
+          <div class="field"><label>Bank</label><input v-model="depositForm.bank" placeholder="mis. BCA" required /></div>
+          <div class="field"><label>Nominal (Rp)</label><input v-model.number="depositForm.nominal" type="number" min="1" required /></div>
+          <button class="btn" type="submit" :disabled="depositLoading">{{ depositLoading ? "Mengirim..." : "Kirim Deposit" }}</button>
+        </form>
+        <div v-if="depositMsg" class="ok-box" style="white-space: pre-wrap; margin-top: 12px">{{ depositMsg }}</div>
+      </div>
+
+      <div class="card">
         <h3 style="margin-bottom: 12px">Tambah Akun / Dompet</h3>
         <div v-if="walletMsg" class="ok-box">{{ walletMsg }}</div>
         <p class="muted" style="font-size: 13px; margin-bottom: 12px">
@@ -188,7 +226,7 @@ onMounted(load);
               <td>{{ w.name }}</td>
               <td>
                 {{ w.type === "distributor_ppob" ? "Distributor PPOB" : "Umum" }}
-                <span v-if="w.type === 'distributor_ppob'" class="muted" style="font-size: 12px"> (OkeConnect) </span>
+                <span v-if="w.type === 'distributor_ppob'" class="muted" style="font-size: 12px"> ({{ w.provider === "portalpulsa" ? "portalpulsa" : "OkeConnect" }}) </span>
               </td>
               <td class="num">{{ rupiah(w.balance) }}</td>
               <td style="white-space: nowrap">

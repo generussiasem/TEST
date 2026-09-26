@@ -269,7 +269,7 @@ export function extractTokenCode(reply) {
 // secret yang belum diisi, errornya jelas dan LANGSUNG ("PIN belum
 // dikonfigurasi"), bukan diam-diam mengirim literal string "undefined" ke
 // server lalu bingung kenapa selalu gagal/timeout tanpa penjelasan.
-function assertCfgComplete(cfg) {
+export function assertCfgComplete(cfg) {
   const envNames =
     cfg.provider === "portalpulsa"
       ? { jid: "PORTALPULSA_JID (atau JABBER_JID sbg fallback)", password: "PORTALPULSA_PASSWORD (atau JABBER_PASSWORD sbg fallback)", pin: "PORTALPULSA_PIN", target: "PORTALPULSA_TARGET" }

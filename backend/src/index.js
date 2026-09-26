@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { sendJabberCommand } from "./jabber.js";
 import { sendTelegramMessage } from "./telegram.js";
-import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, extractTokenCode, syncPpobPrices, getProviderConfig, finalizePpobOrder, checkDistributorBalance, parseTagihanListrikDetail } from "./ppob.js";
+import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, extractTokenCode, syncPpobPrices, getProviderConfig, finalizePpobOrder, checkDistributorBalance, parseTagihanListrikDetail, assertCfgComplete } from "./ppob.js";
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
 import { getEmployeeByChatId, handleLinkCommand, sendMainMenu, handleAdminCallback, handleAdminSessionMessage } from "./bot-admin.js";
 import { hitungAsetBersih, catatSnapshotModalHarian } from "./modal.js";
@@ -339,6 +339,36 @@ app.delete("/api/wallets/:id", requireAdmin, async (c) => {
   }
   await c.env.DB.prepare("DELETE FROM wallets WHERE id = ?").bind(id).run();
   return c.json({ ok: true });
+});
+
+// Kirim perintah Deposit ke portalpulsa langsung dari web ("D BANK NOMINAL
+// PIN") — PIN otomatis dari secret PORTALPULSA_PIN, admin cukup isi bank +
+// nominal. Balasannya berupa instruksi transfer manual (nominal+kode unik,
+// no rekening, dst) — BUKAN topup otomatis, tetap harus transfer manual
+// sesuai instruksi. Dibatasi requireAdmin karena menyangkut saldo & rekening
+// (sama seperti command Telegram /deposit yang sudah ada).
+app.post("/api/admin/portalpulsa/deposit", requireAdmin, async (c) => {
+  const { bank, nominal } = await c.req.json();
+  if (!bank || !nominal) {
+    return c.json({ ok: false, error: "bank dan nominal wajib diisi" }, 400);
+  }
+  try {
+    const cfg = getProviderConfig(c.env, "portalpulsa");
+    assertCfgComplete(cfg);
+    const body = `D ${bank} ${nominal} ${cfg.pin}`;
+    const reply = await sendJabberCommand({
+      jid: cfg.jid,
+      password: cfg.password,
+      to: cfg.target,
+      body,
+      firstReplyIsFinal: true,
+      refSeparator: cfg.separator,
+      acceptAnyFromTarget: true,
+    });
+    return c.json({ ok: true, reply });
+  } catch (err) {
+    return c.json({ ok: false, error: err.message }, 500);
+  }
 });
 
 // Kompatibel mundur: tanpa parameter apa pun, tetap balas array polos semua
@@ -1632,6 +1662,10 @@ app.post("/api/ppob-orders/:refId/konfirmasi", async (c) => {
 // Perintah admin/kasir (wajib terhubung dulu lewat halaman Karyawan di web):
 //   /hubung KODE                     -> hubungkan chat ini ke akun karyawan
 //   /menu atau /start                -> buka menu tombol (Hutang, Konfirmasi PPOB, dst)
+//   /deposit BANK NOMINAL            -> kirim perintah Deposit ke portalpulsa (D BANK NOMINAL PIN),
+//                                        PIN otomatis dari secret PORTALPULSA_PIN. Balasannya berupa
+//                                        instruksi transfer manual (nominal+kode unik, no rekening, dst)
+//                                        — bukan topup otomatis, tetap harus transfer manual sesuai instruksi.
 //
 // Format ke OkeConnect mengikuti: {KODE}.{NO_HP}.{PIN}.R#{ID}
 // (lihat catatan CS OkeConnect Anda). Sesuaikan bila format berbeda per produk.
@@ -1676,6 +1710,39 @@ app.post("/telegram/webhook", async (c) => {
       await sendMainMenu(env, chatId, employee);
       return c.text("ok");
     }
+    // Kirim perintah Deposit portalpulsa langsung ("D BANK NOMINAL PIN") — PIN
+    // diambil dari secret PORTALPULSA_PIN, tidak perlu diketik manual. KHUSUS
+    // portalpulsa karena OkeConnect topup saldo distributor lewat cara lain
+    // (bukan lewat command Jabber). Sengaja dibatasi employee/karyawan saja
+    // (bukan command publik seperti /beli) karena ini menyangkut saldo & rekening.
+    if (text.startsWith("/deposit")) {
+      const parts = text.split(/\s+/);
+      const bank = parts[1];
+      const nominal = parts[2];
+      if (!bank || !nominal) {
+        await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, "Format: /deposit BANK NOMINAL\nContoh: /deposit BCA 500000");
+        return c.text("ok");
+      }
+      try {
+        const cfg = getProviderConfig(env, "portalpulsa");
+        assertCfgComplete(cfg);
+        const body = `D ${bank} ${nominal} ${cfg.pin}`;
+        const reply = await sendJabberCommand({
+          jid: cfg.jid,
+          password: cfg.password,
+          to: cfg.target,
+          body,
+          firstReplyIsFinal: true,
+          refSeparator: cfg.separator,
+          acceptAnyFromTarget: true,
+        });
+        await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `Balasan portalpulsa:\n${reply}`);
+      } catch (err) {
+        await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `Gagal kirim deposit: ${err.message}`);
+      }
+      return c.text("ok");
+    }
+
     // Kalau sedang di tengah alur (mis. bot lagi nunggu nominal pembayaran
     // hutang atau harga jual baru), tangkap di sini duluan.
     const handled = await handleAdminSessionMessage(env, chatId, text);
