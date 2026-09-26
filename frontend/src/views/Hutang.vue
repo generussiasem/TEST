@@ -16,6 +16,7 @@ const mode = ref(null);
 const catatForm = ref({ contact_id: "", type: "piutang", amount: 0, note: "" });
 const bayarForm = ref({ contact_id: "", amount: 0, wallet_id: "", kelebihan: "", note: "" });
 const titipForm = ref({ aksi: "titip", contact_id: "", amount: 0, wallet_id: "", note: "" });
+const pinjamForm = ref({ contact_id: "", amount: 0, wallet_id: "", note: "" });
 
 function rupiah(n) {
   return "Rp" + Number(n || 0).toLocaleString("id-ID");
@@ -171,6 +172,37 @@ async function submitTitip() {
   }
 }
 
+// ---------------- Pinjamkan uang (uang keluar, jadi piutang baru) ----------------
+const pinjamSiap = computed(() => {
+  const f = pinjamForm.value;
+  return !!f.contact_id && !!f.wallet_id && Number(f.amount) > 0;
+});
+const pinjamWallet = computed(() => wallets.value.find((w) => w.id === pinjamForm.value.wallet_id) || null);
+const pinjamKurang = computed(() => pinjamWallet.value && Number(pinjamForm.value.amount) > pinjamWallet.value.balance);
+
+async function submitPinjam() {
+  error.value = "";
+  okMsg.value = "";
+  saving.value = true;
+  try {
+    const f = pinjamForm.value;
+    await api.post("/api/debts/pinjamkan", {
+      contact_id: f.contact_id,
+      amount: Number(f.amount),
+      wallet_id: f.wallet_id,
+      note: f.note || undefined,
+    });
+    okMsg.value = `Pinjaman ${rupiah(f.amount)} dari ${walletName(f.wallet_id)} dicatat sebagai piutang.`;
+    pinjamForm.value = { contact_id: "", amount: 0, wallet_id: f.wallet_id, note: "" };
+    mode.value = null;
+    await load();
+  } catch (err) {
+    error.value = err.message;
+  } finally {
+    saving.value = false;
+  }
+}
+
 // ---------------- Edit / hapus catatan ----------------
 function startEdit(d) {
   editing.value = { ...d };
@@ -220,6 +252,7 @@ onMounted(load);
       <div style="display: flex; gap: 8px; flex-wrap: wrap">
         <button class="btn" @click="bukaForm('bayar')">{{ mode === "bayar" ? "Batal" : "💵 Bayar Hutang" }}</button>
         <button class="btn ghost" @click="bukaForm('titip')">{{ mode === "titip" ? "Batal" : "💰 Titipan" }}</button>
+        <button class="btn ghost" @click="bukaForm('pinjam')">{{ mode === "pinjam" ? "Batal" : "🤝 Pinjamkan Uang" }}</button>
         <button class="btn ghost" @click="bukaForm('catat')">{{ mode === "catat" ? "Batal" : "+ Catat Hutang Baru" }}</button>
       </div>
     </div>
@@ -315,6 +348,36 @@ onMounted(load);
         </div>
         <div class="field"><label>Catatan</label><input v-model="titipForm.note" placeholder="opsional" /></div>
         <button class="btn" type="submit" :disabled="!titipSiap || saving">{{ saving ? "Menyimpan…" : "Simpan" }}</button>
+      </form>
+    </div>
+
+    <!-- PINJAMKAN UANG -->
+    <div v-if="mode === 'pinjam'" class="card" style="margin-bottom: 18px">
+      <h3 style="margin-bottom: 4px">Pinjamkan Uang</h3>
+      <p class="muted" style="font-size: 12.5px; margin-bottom: 12px">
+        Uang tunai beneran keluar dari dompet (beda dari "Catat Hutang Baru" yang tidak menyentuh dompet), langsung dicatat sebagai piutang baru.
+      </p>
+      <form @submit.prevent="submitPinjam">
+        <div class="form-row">
+          <div class="field">
+            <label>Kontak</label>
+            <select v-model.number="pinjamForm.contact_id" required>
+              <option value="" disabled>Pilih kontak…</option>
+              <option v-for="c in contacts" :key="c.id" :value="c.id">{{ c.name }} ({{ c.type }}) — hutang {{ rupiah(c.total_debt) }}</option>
+            </select>
+          </div>
+          <div class="field"><label>Nominal dipinjamkan</label><input v-model.number="pinjamForm.amount" type="number" min="1" required /></div>
+          <div class="field">
+            <label>Dikeluarkan dari dompet</label>
+            <select v-model.number="pinjamForm.wallet_id" required>
+              <option value="" disabled>Pilih dompet…</option>
+              <option v-for="w in wallets" :key="w.id" :value="w.id">{{ w.name }} ({{ rupiah(w.balance) }})</option>
+            </select>
+          </div>
+        </div>
+        <div v-if="pinjamKurang" class="error-box">Saldo {{ pinjamWallet?.name }} tidak cukup (sisa {{ rupiah(pinjamWallet?.balance) }}).</div>
+        <div class="field"><label>Catatan</label><input v-model="pinjamForm.note" placeholder="opsional" /></div>
+        <button class="btn" type="submit" :disabled="!pinjamSiap || pinjamKurang || saving">{{ saving ? "Menyimpan…" : "Simpan Pinjaman" }}</button>
       </form>
     </div>
 

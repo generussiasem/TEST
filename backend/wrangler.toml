@@ -39,6 +39,11 @@ JABBER_TARGET = "center@mitra.orderkuota.com"
 # (CEK + nomor tujuan). Placeholder: {ref} {product} {target} {pin}.
 # JABBER_CEK_TEMPLATE = "CEK.{target}"
 
+# Target Jabber provider portalpulsa. Dicoba dulu "trx@im.portalpulsa.com"
+# (pola JID resmi mirip OkeConnect center@mitra.orderkuota.com) — kalau tidak
+# ada balasan/ack, coba alternatif "portalpulsa.trx@jabbim.com".
+PORTALPULSA_TARGET = "trx@im.portalpulsa.com"
+
 # Secrets (isi lewat: wrangler secret put NAMA, ATAU dashboard Cloudflare
 # Settings -> Variables and Secrets -> tipe "Secret")
 #   TELEGRAM_BOT_TOKEN     -> token bot dari @BotFather
@@ -47,6 +52,13 @@ JABBER_TARGET = "center@mitra.orderkuota.com"
 #                              harus sama dengan yang diisi di kolom "Jabber 1" Pengaturan OkeConnect
 #   JABBER_PASSWORD        -> password akun Jabber OkeConnect tersebut (bukan password OrderKuota)
 #   JABBER_PIN             -> PIN transaksi PPOB OkeConnect Anda
+#   PORTALPULSA_JID        -> (OPSIONAL) isi HANYA kalau akun Jabber portalpulsa BEDA dari OkeConnect.
+#                              Kalau kosong, otomatis pakai JABBER_JID yang sama (kasus umum: JID yang
+#                              sama didaftarkan ke semua provider, mis. ysudarto@jabb.im)
+#   PORTALPULSA_PASSWORD   -> (OPSIONAL) sama seperti di atas, fallback ke JABBER_PASSWORD kalau kosong
+#   PORTALPULSA_PIN        -> WAJIB diisi tersendiri — PIN transaksi PPOB portalpulsa Anda (TERPISAH dari
+#                              JABBER_PIN OkeConnect — lihat catatan lama soal Digiflazz yang pernah
+#                              kejadian PIN kosong ke-share)
 #   RELAY_SECRET           -> (Opsional, untuk Relay Jabber di HP/PC) kunci rahasia panjang & acak; harus sama
 #                              dengan RELAY_SECRET di file .env program relay. Isi lewat Dashboard Cloudflare
 #                              (Settings -> Variables and Secrets), jangan ditulis di file ini.

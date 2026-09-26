@@ -56,6 +56,16 @@ export function renderMiniAppPage() {
   .hidden { display: none !important; }
   .spinner { text-align: center; padding: 20px; color: var(--tg-theme-hint-color, #888); font-size: 13px; }
   .back-link { font-size: 13px; color: var(--tg-theme-link-color, #2481cc); margin-bottom: 10px; display: inline-block; cursor: pointer; }
+  .section-title { font-size: 14px; font-weight: 700; margin: 16px 2px 8px; }
+  .section-title:first-child { margin-top: 2px; }
+  .tile-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px 6px; margin-bottom: 6px; }
+  .tile { display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; }
+  .tile-icon {
+    width: 100%; aspect-ratio: 1; max-width: 62px; border-radius: 16px; font-size: 26px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--tg-theme-secondary-bg-color, #e7f3ee);
+  }
+  .tile-label { font-size: 11.5px; text-align: center; line-height: 1.25; color: var(--tg-theme-text-color, #000); }
 </style>
 </head>
 <body>
@@ -336,61 +346,118 @@ async function loadProducts(q) {
 }
 
 // ---------------------------------------------------------------------------
-// TAB KATALOG — lihat-lihat semua harga PPOB per kategori, tanpa wajib ketik
-// kata kunci dulu (beda dari tab PPOB yang khusus alur cari-lalu-order).
+// TAB KATALOG — gaya grid ikon per kategori (ala Orderkuota), bukan list
+// panjang. Alurnya: grid kategori -> grid provider/grup dalam kategori itu
+// (kalau lebih dari satu) -> daftar harga per item, tap item = lanjut order.
+// Kotak cari di paling atas tetap ada buat lompat langsung ke pencarian
+// flat lintas kategori, buat yang sudah tahu nama/kode produknya.
 // Data di-cache di memori (catalogCache) sekali per sesi buka mini app —
 // kalau harga baru saja diubah di dashboard web, tutup-buka lagi mini app-nya.
 // ---------------------------------------------------------------------------
+const KATEGORI_ICON = [
+  [/pulsa/i, "📱"],
+  [/kuota|internet|data/i, "📶"],
+  [/token|listrik|pln/i, "⚡"],
+  [/tagihan|pdam|air|bpjs|tv kabel|multifinance/i, "🧾"],
+  [/e-?wallet|saldo|dompet/i, "💳"],
+  [/voucher|game|top ?up game/i, "🎮"],
+  [/sms|telp/i, "☎️"],
+];
+function iconUntukKategori(kategori) {
+  const found = KATEGORI_ICON.find(([re]) => re.test(kategori || ""));
+  return found ? found[1] : "🛒";
+}
+
 function renderKatalogTab() {
   const body = document.getElementById("tabBody");
   body.innerHTML =
     '<div class="card">' +
-      '<label>Cari di katalog (nama/kode)</label>' +
+      '<label>Cari di katalog (nama/kode) — lompat langsung tanpa pilih kategori</label>' +
       '<input id="katalogSearch" placeholder="mis. token, pulsa, PDAM..." />' +
-      '<div id="katalogPills" class="pill-row"></div>' +
-      '<div id="katalogList" class="spinner">Memuat katalog...</div>' +
-    '</div>';
+    '</div>' +
+    '<div id="katalogBody"><div class="spinner">Memuat katalog...</div></div>';
 
-  let kategoriAktif = "semua";
   const searchInput = document.getElementById("katalogSearch");
   let timer;
-  searchInput.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(renderKatalogList, 200); });
+  searchInput.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const q = searchInput.value.trim();
+      if (q) renderHasilCari(q); else renderGridKategori();
+    }, 200);
+  });
 
-  function renderKatalogList() {
-    const listEl = document.getElementById("katalogList");
-    const q = searchInput.value.trim().toLowerCase();
-    let rows = catalogCache;
-    if (kategoriAktif !== "semua") rows = rows.filter((p) => p.category === kategoriAktif);
-    if (q) rows = rows.filter((p) => p.name.toLowerCase().includes(q) || p.code.toLowerCase().includes(q));
-    if (!rows.length) { listEl.innerHTML = '<p class="muted">Tidak ada produk yang cocok.</p>'; return; }
-    listEl.innerHTML = rows.map((p) =>
-      '<div class="list-item" data-code="' + esc(p.code) + '">' +
-        '<div class="row"><b>' + esc(p.name) + '</b><span class="badge">' + rupiah(p.sell_price) + '</span></div>' +
-        '<div class="muted">' + esc(p.code) + (p.product_group ? " · " + esc(p.product_group) : "") + '</div>' +
-      '</div>'
-    ).join("");
-    listEl.querySelectorAll(".list-item").forEach((el) => el.addEventListener("click", () => showOrderForm(rows.find((r) => r.code === el.dataset.code))));
+  function renderDaftarItem(rows, judul) {
+    const kBody = document.getElementById("katalogBody");
+    kBody.innerHTML =
+      '<span class="back-link" id="katalogBack">&larr; ' + esc(judul) + '</span>' +
+      '<div class="card">' +
+      (!rows.length
+        ? '<p class="muted">Tidak ada produk yang cocok.</p>'
+        : rows.map((p) =>
+            '<div class="list-item" data-code="' + esc(p.code) + '">' +
+              '<div class="row"><b>' + esc(p.name) + '</b><span class="badge">' + rupiah(p.sell_price) + '</span></div>' +
+              '<div class="muted">' + esc(p.code) + '</div>' +
+            '</div>'
+          ).join("")) +
+      '</div>';
+    kBody.querySelectorAll(".list-item").forEach((el) => el.addEventListener("click", () => showOrderForm(rows.find((r) => r.code === el.dataset.code))));
+    document.getElementById("katalogBack").addEventListener("click", () => { searchInput.value = ""; renderGridKategori(); });
   }
 
-  async function loadKatalog() {
-    const listEl = document.getElementById("katalogList");
+  function renderHasilCari(q) {
+    const ql = q.toLowerCase();
+    const rows = catalogCache.filter((p) => p.name.toLowerCase().includes(ql) || p.code.toLowerCase().includes(ql) || (p.product_group || "").toLowerCase().includes(ql));
+    renderDaftarItem(rows, "Hasil cari \"" + q + "\"");
+  }
+
+  function renderGridProvider(kategori) {
+    const rows = catalogCache.filter((p) => p.category === kategori);
+    const grup = [...new Set(rows.map((p) => p.product_group).filter(Boolean))];
+    // Kalau cuma satu grup (atau tidak ada grup sama sekali) di kategori ini,
+    // langsung ke daftar item — tidak usah nampilin grid provider isi 1 kotak.
+    if (grup.length <= 1) { renderDaftarItem(rows, kategori); return; }
+    const kBody = document.getElementById("katalogBody");
+    kBody.innerHTML =
+      '<span class="back-link" id="katalogBack">&larr; Kategori</span>' +
+      '<div class="section-title">' + esc(kategori) + '</div>' +
+      '<div class="tile-grid">' +
+      grup.map((g) =>
+        '<div class="tile" data-grup="' + esc(g) + '">' +
+          '<div class="tile-icon">' + iconUntukKategori(g) + '</div>' +
+          '<div class="tile-label">' + esc(g) + '</div>' +
+        '</div>'
+      ).join("") +
+      '</div>';
+    kBody.querySelectorAll(".tile").forEach((el) => el.addEventListener("click", () => renderDaftarItem(rows.filter((p) => p.product_group === el.dataset.grup), el.dataset.grup)));
+    document.getElementById("katalogBack").addEventListener("click", renderGridKategori);
+  }
+
+  function renderGridKategori() {
+    const kategoriList = [...new Set(catalogCache.map((p) => p.category).filter(Boolean))];
+    const kBody = document.getElementById("katalogBody");
+    kBody.innerHTML =
+      '<div class="section-title">Kategori</div>' +
+      '<div class="tile-grid">' +
+      kategoriList.map((k) =>
+        '<div class="tile" data-kat="' + esc(k) + '">' +
+          '<div class="tile-icon">' + iconUntukKategori(k) + '</div>' +
+          '<div class="tile-label">' + esc(k) + '</div>' +
+        '</div>'
+      ).join("") +
+      '</div>';
+    kBody.querySelectorAll(".tile").forEach((el) => el.addEventListener("click", () => renderGridProvider(el.dataset.kat)));
+  }
+
+  (async () => {
+    const kBody = document.getElementById("katalogBody");
     try {
       if (!catalogCache) catalogCache = await api("/catalog");
-      const kategoriList = ["semua", ...new Set(catalogCache.map((p) => p.category).filter(Boolean))];
-      document.getElementById("katalogPills").innerHTML = kategoriList.map((k) =>
-        '<div class="pill' + (k === kategoriAktif ? " active" : "") + '" data-kat="' + esc(k) + '">' + esc(k === "semua" ? "Semua" : k) + '</div>'
-      ).join("");
-      document.querySelectorAll("#katalogPills .pill").forEach((el) => el.addEventListener("click", () => {
-        kategoriAktif = el.dataset.kat;
-        document.querySelectorAll("#katalogPills .pill").forEach((p) => p.classList.toggle("active", p === el));
-        renderKatalogList();
-      }));
-      renderKatalogList();
+      renderGridKategori();
     } catch (err) {
-      listEl.innerHTML = '<div class="error">' + esc(err.message) + '</div>';
+      kBody.innerHTML = '<div class="error">' + esc(err.message) + '</div>';
     }
-  }
-  loadKatalog();
+  })();
 }
 
 function showOrderForm(product) {

@@ -6,7 +6,7 @@ import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanB
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
 import { getEmployeeByChatId, handleLinkCommand, sendMainMenu, handleAdminCallback, handleAdminSessionMessage } from "./bot-admin.js";
 import { hitungAsetBersih, catatSnapshotModalHarian } from "./modal.js";
-import { DebtError, bayarHutang, titipUang, tarikTitipan, catatHutangManual, rencanaPakaiTitipan, stmtsPakaiTitipan, balikkanCatatanTertaut, debtEffect } from "./debt.js";
+import { DebtError, bayarHutang, titipUang, tarikTitipan, pinjamkanUang, catatHutangManual, rencanaPakaiTitipan, stmtsPakaiTitipan, balikkanCatatanTertaut, debtEffect } from "./debt.js";
 import miniappRouter from "./miniapp.js";
 import { renderMiniAppPage } from "./miniapp-page.js";
 
@@ -888,6 +888,43 @@ app.put("/api/transactions/:id", requireAdmin, async (c) => {
   return c.json({ ok: true });
 });
 
+// Ubah transaksi 'sale' yang terlanjur tercatat TUNAI jadi UTANG — buat kasus
+// kasir salah pilih metode bayar, tanpa perlu hapus+catat ulang manual (yang
+// jadi rawan kalau transaksinya PPOB, karena mesti reset ppob_orders.finalized
+// segala). Cukup: balikkan kredit dompet penerima, kosongkan wallet_id (persis
+// gambaran transaksi utang lain), lalu catat sbg piutang ke kontak yg dipilih.
+// Modal (cost_total/cost_wallet_id) TIDAK berubah — itu tetap keluar terlepas
+// dari cara pelanggan bayar (lihat POST /api/transactions).
+app.post("/api/transactions/:id/jadikan-utang", requireAdmin, async (c) => {
+  const id = c.req.param("id");
+  const { contact_id } = await c.req.json();
+  if (!contact_id) return c.json({ ok: false, error: "Wajib pilih kontak yang berhutang" }, 400);
+
+  const t = await c.env.DB.prepare("SELECT * FROM transactions WHERE id = ?").bind(id).first();
+  if (!t) return c.json({ ok: false, error: "Transaksi tidak ditemukan" }, 404);
+  if (t.type !== "sale") return c.json({ ok: false, error: "Cuma transaksi penjualan yang bisa diubah jadi utang" }, 400);
+  if (!t.wallet_id) return c.json({ ok: false, error: "Transaksi ini sudah bukan tunai (wallet_id kosong) — mungkin sudah utang/titipan" }, 400);
+  if (t.deposit_used > 0) {
+    return c.json(
+      { ok: false, error: "Transaksi ini sebagian dibayar pakai titipan — kasus campuran begini harus dibetulkan manual (hapus lalu catat ulang), tidak didukung tombol ini" },
+      400
+    );
+  }
+
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE wallets SET balance = balance - ? WHERE id = ?").bind(t.amount, t.wallet_id),
+    c.env.DB.prepare("UPDATE transactions SET wallet_id = NULL, contact_id = ? WHERE id = ?").bind(contact_id, id),
+    c.env.DB.prepare("INSERT INTO debts (contact_id, type, amount, note) VALUES (?, 'piutang', ?, ?)").bind(
+      contact_id,
+      t.amount,
+      t.note ? `${t.note} (dipindah dari tunai)` : `Transaksi #${id} (dipindah dari tunai)`
+    ),
+    c.env.DB.prepare("UPDATE contacts SET total_debt = total_debt + ? WHERE id = ?").bind(t.amount, contact_id),
+  ]);
+
+  return c.json({ ok: true });
+});
+
 // Hapus transaksi — otomatis balikkan efek saldo dompet & stok produk yang
 // sempat berubah karena transaksi ini, supaya laporan tetap akurat.
 // Hapus satu transaksi + balikkan semua efeknya (saldo dompet, stok, catatan
@@ -1032,6 +1069,20 @@ app.post("/api/debts/tarik", async (c) => {
   const { contact_id, amount, wallet_id, note } = await c.req.json();
   return jalankanHutang(c, () =>
     tarikTitipan(c.env, { contactId: contact_id, amount, walletId: wallet_id, note, employeeId: employee ? employee.employeeId : null })
+  );
+});
+
+// Pinjamkan uang tunai ke kontak — kebalikan dari /api/debts/bayar: uang
+// KELUAR dari dompet (wajib pilih dompet, saldo dicek cukup/tidak), dicatat
+// sbg piutang baru. Beda dari POST /api/debts (catatHutangManual): itu tidak
+// menyentuh dompet sama sekali, dipakai kalau memang tidak ada uang yang
+// benar-benar keluar (mis. cuma mencatat utang dari transaksi yang lupa
+// dicatat, bukan pinjaman tunai).
+app.post("/api/debts/pinjamkan", async (c) => {
+  const employee = c.get("employee");
+  const { contact_id, amount, wallet_id, note } = await c.req.json();
+  return jalankanHutang(c, () =>
+    pinjamkanUang(c.env, { contactId: contact_id, amount, walletId: wallet_id, note, employeeId: employee ? employee.employeeId : null })
   );
 });
 
@@ -1521,12 +1572,12 @@ app.post("/api/admin/koreksi-modal-tagihan", requireAdmin, async (c) => {
 // Order PPOB langsung dari halaman kasir web (pola sama dengan /beli di Telegram,
 // tapi lewat sini biar bisa dipanggil dari UI kasir, misal setelah scan barcode/pilih produk).
 app.post("/api/ppob/order", async (c) => {
-  const { productCode, target, paidMethod, contactId, batchId } = await c.req.json();
+  const { productCode, target, paidMethod, contactId, batchId, newProductProvider } = await c.req.json();
   if (!productCode || !target) {
     return c.json({ ok: false, error: "productCode dan target wajib diisi" }, 400);
   }
   try {
-    const result = await placePpobOrder(c.env, { productCode, target, paidMethod, contactId, batchId });
+    const result = await placePpobOrder(c.env, { productCode, target, paidMethod, contactId, batchId, newProductProvider });
     return c.json({ ok: true, ...result });
   } catch (err) {
     return c.json({ ok: false, error: err.message }, 400);
@@ -1735,7 +1786,10 @@ async function recheckOrder(env, order, { autoRecord } = {}) {
   // OkeConnect: perintah cek status "CEK.{nomor tujuan}" (format dari pengguna:
   // "Cek.085741114833"). Format bisa diganti tanpa ubah kode lewat variabel
   // JABBER_CEK_TEMPLATE, mis. "CEK.R#{ref}". Placeholder: {ref} {product} {target} {pin}.
-  const template = env.JABBER_CEK_TEMPLATE || "CEK.{target}";
+  // portalpulsa: format resmi "STATUS NoHp" (lihat screenshot) — beda total,
+  // dan formatnya juga tidak pakai ref sama sekali (sama seperti transaksi).
+  const defaultTemplate = order.provider === "portalpulsa" ? "STATUS {target}" : "CEK.{target}";
+  const template = order.provider === "portalpulsa" ? defaultTemplate : env.JABBER_CEK_TEMPLATE || defaultTemplate;
   const body = template
     .replaceAll("{ref}", order.ref_id)
     .replaceAll("{product}", order.product_code || "")
@@ -1744,12 +1798,22 @@ async function recheckOrder(env, order, { autoRecord } = {}) {
   // Balasan diterima kalau memuat ref order ATAU nomor tujuan (format "CEK.NOMOR"
   // belum tentu membalas dengan ref). Kalau template memuat {ref}, cukup ref.
   const expectTokens = template.includes("{ref}") ? [order.ref_id] : [order.ref_id, order.target].filter(Boolean);
-  const rawReply = await sendJabberCommand({ jid: cfg.jid, password: cfg.password, to: cfg.target, body, expectTokens });
+  const rawReply = await sendJabberCommand({
+    jid: cfg.jid,
+    password: cfg.password,
+    to: cfg.target,
+    body,
+    expectTokens,
+    refSeparator: cfg.separator,
+    acceptAnyFromTarget: order.provider === "portalpulsa",
+  });
 
-  // Balasan "CEK.NOMOR" berisi daftar transaksi ke nomor itu (tanpa ref order).
-  // Order dicocokkan lewat ref (kalau ada) atau kode produk + nomor + tanggal +
-  // jam (lihat cocokkanBalasanCek). Kalau tidak bisa dicocokkan dengan yakin,
-  // status TIDAK diubah — kasir memeriksa balasannya lalu memakai "Ubah Status".
+  // Balasan "CEK.NOMOR"/"STATUS NoHp" berisi daftar transaksi ke nomor itu
+  // (tanpa ref order). Order dicocokkan lewat ref (kalau ada, khusus
+  // OkeConnect) atau kode produk + nomor (+ tanggal + jam utk OkeConnect,
+  // tanpa jam utk portalpulsa — lihat cocokkanBalasanCekPortalpulsa di
+  // ppob.js). Kalau tidak bisa dicocokkan dengan yakin, status TIDAK
+  // diubah — kasir memeriksa balasannya lalu memakai "Ubah Status".
   const cocok = cocokkanBalasanCek(order, rawReply);
   const reply = cocok.matched
     ? rawReply
@@ -2016,12 +2080,16 @@ export default {
         await checkPendingOrders(env).catch((err) =>
           console.error("[cron] checkPendingOrders gagal:", err.message)
         );
-        // 00, 06, 12, 18 UTC: sinkron saldo dompet distributor (Saldo.PIN).
-        // Dibungkus catch: kalau Jabber gangguan, jangan ganggu tugas lain.
+        // 00, 06, 12, 18 UTC: sinkron saldo dompet distributor tiap provider
+        // aktif (OkeConnect: "Saldo.PIN", portalpulsa: "S PIN" — lihat
+        // checkDistributorBalance di ppob.js). Dibungkus catch per provider:
+        // kalau satu provider Jabber-nya gangguan, provider lain tetap dicek.
         if (tepatJam && jam % 6 === 0) {
-          await checkDistributorBalance(env).catch((err) =>
-            console.error("[cron] checkDistributorBalance gagal:", err.message)
-          );
+          for (const provider of ["okeconnect", "portalpulsa"]) {
+            await checkDistributorBalance(env, provider).catch((err) =>
+              console.error(`[cron] checkDistributorBalance (${provider}) gagal:`, err.message)
+            );
+          }
         }
       })()
     );

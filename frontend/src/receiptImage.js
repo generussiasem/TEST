@@ -720,6 +720,313 @@ export function buatStrukTagihanListrik(d) {
   return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), "image/png", 1));
 }
 
+// ---------------------------------------------------------------------------
+// STRUK KHUSUS PULSA/PAKET DATA PRABAYAR
+//
+// Beda dari token PLN (tidak ada TARIF/DAYA/KWH) dan dari tagihan (tidak ada
+// rincian TAG/ADMIN/TTAG, karena pulsa harganya flat, bukan dihitung dari
+// nominal tagihan yang beda tiap transaksi). Cukup NO HP, PRODUK, HARGA,
+// STATUS, dan Serial Number (SN) kalau providernya mengirim.
+// ---------------------------------------------------------------------------
+
+/**
+ * Ambil Serial Number (SN) dari balasan sukses pulsa/paket data, mis.:
+ *   "...Isi Pulsa TELKOMSEL 10.000 SUKSES. SN: 000123456789. Saldo..."
+ * Beda provider kadang formatnya beda (angka saja, atau alfanumerik) —
+ * makanya pola sengaja longgar (huruf/angka/strip), bukan cuma digit.
+ * Kalau tidak ketemu, dikembalikan null — struk tetap dibuat tanpa baris SN.
+ */
+export function parseStrukPulsa(rawReply) {
+  const text = String(rawReply || "");
+  const snMatch = text.match(/SN\s*:?\s*([\w-]{6,})/i);
+  return { sn: snMatch ? snMatch[1] : null };
+}
+
+/**
+ * Mesin render bersama utk struk "ringkas gaya OkeConnect": header rata KIRI
+ * (nama toko + tanggal, TANPA garis pemisah), judul tebal rata tengah, baris
+ * rincian format "LABEL : nilai" dengan titik dua sejajar, lalu Serial
+ * Number besar rata tengah (opsional), baris footer rata tengah (masing-
+ * masing dibungkus/di-wrap sendiri — bisa satu paragraf atau beberapa baris
+ * lepas kayak pemisah "- - -" + teks promo), ditutup catatan tambahan rata
+ * kiri (info utang/titipan). Dipakai bersama oleh buatStrukPulsa &
+ * buatStrukTopupEwallet supaya stylenya konsisten & gampang ditambah lagi.
+ *
+ * @param {Object} o
+ * @param {string} o.storeName
+ * @param {string} [o.address]
+ * @param {string} o.date
+ * @param {string} o.judul
+ * @param {[string, string][]} o.rincian - pasangan [label, nilai_string]
+ * @param {string} [o.sn] - serial number, kalau ada
+ * @param {string[]} [o.footerLines] - baris-baris footer, masing2 di-wrap & rata tengah sendiri
+ * @param {string[]} [o.catatan] - baris tambahan rata kiri di paling bawah
+ * @returns {Promise<Blob>}
+ */
+function strukRingkasOkeconnect(o) {
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  const w = LEBAR;
+  const pad = PAD;
+  const contentW = w - pad * 2;
+  const lineH = 15;
+  const gap = 4;
+  const monoBold = (px) => `bold ${px}px "Courier New", monospace`;
+  const mono = (px) => `${px}px "Courier New", monospace`;
+  const rincian = o.rincian;
+  const footerLines = o.footerLines || [];
+
+  const measure = document.createElement("canvas").getContext("2d");
+  measure.font = mono(12.5);
+  const labelColW = Math.max(...rincian.map(([label]) => measure.measureText(label).width)) + 14;
+  const wrapAt = (text, font, maxW) => {
+    measure.font = font;
+    return wrapText(measure, String(text), maxW);
+  };
+
+  // --- Pass 1: hitung tinggi ---
+  let y = pad;
+  y += lineH * 1.15; // nama toko
+  measure.font = mono(12);
+  const alamatLines = o.address ? wrapText(measure, o.address, contentW) : [];
+  y += alamatLines.length * lineH;
+  y += lineH + gap * 3; // tanggal
+
+  measure.font = monoBold(14);
+  const judulLines = wrapText(measure, o.judul, contentW);
+  y += judulLines.length * lineH * 1.2 + gap * 3;
+
+  measure.font = mono(12.5);
+  const rincianLines = rincian.map(([, value]) => wrapAt(value, mono(12.5), contentW - labelColW - 10));
+  for (const lines of rincianLines) y += Math.max(1, lines.length) * lineH * 1.3;
+  y += gap * 3;
+
+  if (o.sn) {
+    measure.font = mono(11.5);
+    y += lineH * 1.3; // "** Serial Number **"
+    measure.font = monoBold(15);
+    const snLines = wrapText(measure, o.sn, contentW);
+    y += snLines.length * lineH * 1.3 + gap * 3;
+  }
+
+  measure.font = mono(11.5);
+  const footerWrapped = footerLines.map((f) => wrapText(measure, f, contentW));
+  for (const lines of footerWrapped) y += lines.length * lineH * 1.2;
+
+  measure.font = mono(12);
+  const catatanLines = (o.catatan || []).flatMap((c) => wrapText(measure, c, contentW));
+  if (catatanLines.length) y += gap * 2;
+  y += catatanLines.length * lineH;
+  y += pad;
+
+  // --- Pass 2: gambar ---
+  canvas.width = w;
+  canvas.height = Math.ceil(y);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#1a1a1a";
+  ctx.textBaseline = "top";
+
+  const center = (text, cy, font) => {
+    ctx.font = font;
+    ctx.textAlign = "center";
+    ctx.fillText(text, w / 2, cy);
+    ctx.textAlign = "left";
+  };
+
+  y = pad;
+  ctx.font = monoBold(14);
+  ctx.fillText(o.storeName || "Toko", pad, y);
+  y += lineH * 1.15;
+
+  if (o.address) {
+    ctx.font = mono(12);
+    for (const l of alamatLines) {
+      ctx.fillText(l, pad, y);
+      y += lineH;
+    }
+  }
+  ctx.font = mono(12);
+  ctx.fillText(o.date, pad, y);
+  y += lineH + gap * 3;
+
+  ctx.font = monoBold(14);
+  for (const l of judulLines) {
+    center(l, y, ctx.font);
+    y += lineH * 1.2;
+  }
+  y += gap * 3;
+
+  ctx.font = mono(12.5);
+  rincian.forEach(([label], i) => {
+    const lines = rincianLines[i];
+    const startY = y;
+    ctx.fillText(label, pad, y);
+    ctx.fillText(":", pad + labelColW - 10, y);
+    for (const l of lines) {
+      ctx.fillText(l, pad + labelColW + 6, y);
+      y += lineH * 1.3;
+    }
+    y = Math.max(y, startY + lineH * 1.3);
+  });
+  y += gap * 2;
+
+  if (o.sn) {
+    center("** Serial Number **", y, mono(11.5));
+    y += lineH * 1.3;
+    ctx.font = monoBold(15);
+    for (const l of wrapText(ctx, o.sn, contentW)) {
+      center(l, y, ctx.font);
+      y += lineH * 1.3;
+    }
+    y += gap * 2;
+  }
+
+  ctx.font = mono(11.5);
+  footerWrapped.forEach((lines) => {
+    for (const l of lines) {
+      center(l, y, ctx.font);
+      y += lineH * 1.2;
+    }
+  });
+
+  if (catatanLines.length) {
+    y += gap * 2;
+    ctx.font = mono(12);
+    for (const l of catatanLines) {
+      ctx.fillText(l, pad, y);
+      y += lineH;
+    }
+  }
+
+  return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), "image/png", 1));
+}
+
+/**
+ * Meniru struk resmi provider (contoh nyata: "STRUK PULSA INDOSAT" dari
+ * OkeConnect) — judul "STRUK PULSA {PROVIDER}", ditutup catatan pengecekan
+ * pulsa (kode UMB beda tiap provider) alih-alih "Terima kasih!".
+ *
+ * @param {Object} d
+ * @param {string} d.storeName
+ * @param {string} [d.address]
+ * @param {string} d.date
+ * @param {string} d.refId - ID TRX (ref_id order)
+ * @param {string} d.produkNama - mis. "Indosat 25.000" (kata pertama dipakai sbg nama provider di judul)
+ * @param {string} d.noTujuan - nomor tujuan (target order)
+ * @param {number} d.harga - harga jual ke pelanggan
+ * @param {string} [d.sn] - serial number dari provider, kalau ada
+ * @param {string} [d.catatanCek] - baris pengecekan pulsa khas provider, mis.
+ *   "SEGERA LAKUKAN PENGECEKAN PULSA PADA *123# / MY IM3". Default generik
+ *   kalau tidak diisi (beda provider beda kode UMB cek pulsanya).
+ * @param {string[]} [d.catatan] - baris tambahan (mis. info utang/titipan)
+ * @returns {Promise<Blob>}
+ */
+export function buatStrukPulsa(d) {
+  const provider = String(d.produkNama || "").trim().split(/\s+/)[0] || "";
+  const judul = `STRUK PULSA ${provider}`.trim().toUpperCase();
+  // Kode UMB cek pulsa beda tiap provider (persis contoh resmi Indosat: "*123#
+  // / MY IM3"). Ini tebakan berdasarkan yang umum dipakai; kalau providernya
+  // tidak ada di daftar, pakai pesan generik saja.
+  const CEK_PULSA = {
+    telkomsel: "*888# / MyTelkomsel",
+    simpati: "*888# / MyTelkomsel",
+    as: "*888# / MyTelkomsel",
+    indosat: "*123# / MY IM3",
+    im3: "*123# / MY IM3",
+    ooredoo: "*123# / MY IM3",
+    xl: "*123# / MyXL",
+    axis: "*123# / AXISnet",
+    tri: "*111# / Bima+",
+    "3": "*111# / Bima+",
+    smartfren: "*999# / MySmartfren",
+    byu: "aplikasi By.U",
+  };
+  const kodeCek = CEK_PULSA[provider.toLowerCase()];
+  const catatanCek = d.catatanCek || (kodeCek ? `SEGERA LAKUKAN PENGECEKAN PULSA PADA ${kodeCek}` : "SEGERA LAKUKAN PENGECEKAN PULSA/PAKET DI HP TUJUAN");
+
+  return strukRingkasOkeconnect({
+    storeName: d.storeName,
+    address: d.address,
+    date: d.date,
+    judul,
+    rincian: [
+      ["ID TRX", d.refId],
+      ["PRODUK", d.produkNama],
+      ["NO TUJUAN", d.noTujuan],
+      ["HARGA", "Rp " + Number(d.harga || 0).toLocaleString("id-ID")],
+    ],
+    sn: d.sn,
+    footerLines: [catatanCek],
+    catatan: d.catatan,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// STRUK TOPUP UANG ELEKTRONIK (ShopeePay/GoPay/DANA/OVO/LinkAja, dst)
+//
+// Beda dari struk pulsa: ada baris DETAIL (nama pemilik akun e-wallet tujuan,
+// diambil dari balasan OkeConnect) dan footer-nya promosi produk lain yang
+// tersedia di toko (bukan kode UMB cek pulsa, karena e-wallet tidak punya itu).
+// ---------------------------------------------------------------------------
+
+/**
+ * Ambil NAMA pemilik & serial code dari balasan sukses topup e-wallet, mis.:
+ *   "...SUKSES. SN: MOHAMAD NURUL MUTTAQIEN/200000/MWSH6WFB1Y5IZMNWCX1EJ3DFQWI1Q. Saldo..."
+ * Formatnya "NAMA/NOMINAL/KODE" — nominal di tengah sengaja tidak dipakai di
+ * struk (itu nominal topup pokok, HARGA yang ditampilkan sudah termasuk
+ * admin, diambil dari data transaksi, bukan dari sini). Kalau formatnya
+ * cuma "NAMA/KODE" (tanpa nominal) atau cuma kode polos, tetap dikenali.
+ */
+export function parseStrukTopupEwallet(rawReply) {
+  const text = String(rawReply || "");
+  let m = text.match(/SN\s*:?\s*([^\/]+?)\s*\/\s*[\d.,]+\s*\/\s*([\w-]+)/i);
+  if (m) return { nama: m[1].trim(), sn: m[2] };
+  m = text.match(/SN\s*:?\s*([^\/]+?)\s*\/\s*([\w-]{6,})/i);
+  if (m) return { nama: m[1].trim(), sn: m[2] };
+  m = text.match(/SN\s*:?\s*([\w-]{6,})/i);
+  return { nama: null, sn: m ? m[1] : null };
+}
+
+/**
+ * @param {Object} d
+ * @param {string} d.storeName
+ * @param {string} [d.address]
+ * @param {string} d.date
+ * @param {string} d.refId - ID TRX (ref_id order)
+ * @param {string} d.produkNama - mis. "Shopee Pay 200.000"
+ * @param {string} d.noTujuan - nomor tujuan (target order)
+ * @param {string} [d.nama] - nama pemilik akun e-wallet tujuan (hasil parseStrukTopupEwallet)
+ * @param {number} d.harga - harga jual ke pelanggan (sudah termasuk admin)
+ * @param {string} [d.sn] - serial/kode referensi dari provider, kalau ada
+ * @param {string[]} [d.footerPromo] - baris promo produk lain; default daftar e-wallet umum
+ * @param {string[]} [d.catatan] - baris tambahan (mis. info utang/titipan)
+ * @returns {Promise<Blob>}
+ */
+export function buatStrukTopupEwallet(d) {
+  const rincian = [
+    ["ID TRX", d.refId],
+    ["PRODUK", d.produkNama],
+    ["NO TUJUAN", d.noTujuan],
+  ];
+  if (d.nama) rincian.push(["DETAIL", d.nama]);
+  rincian.push(["HARGA", "Rp " + Number(d.harga || 0).toLocaleString("id-ID")]);
+
+  const footerPromo = d.footerPromo || ["DISINI JUGA TERSEDIA GOPAY", "LINK AJA, DANA, OVO", "BAYAR BLANJA - TRANSFER UANG"];
+
+  return strukRingkasOkeconnect({
+    storeName: d.storeName,
+    address: d.address,
+    date: d.date,
+    judul: "TOPUP UANG ELEKTRONIK",
+    rincian,
+    sn: d.sn,
+    footerLines: ["- - - - - - - - - - - - - - - -", ...footerPromo],
+    catatan: d.catatan,
+  });
+}
+
+
 export async function bagikanAtauUnduhGambar(blob, filename, { title, text } = {}) {
   const file = new File([blob], filename, { type: "image/png" });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {

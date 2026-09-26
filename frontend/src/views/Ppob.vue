@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from "vue";
 import { useRoute } from "vue-router";
 import { api } from "../api.js";
-import { buatStrukPNG, buatStrukTokenPLN, parseStrukTokenPLN, bagikanAtauUnduhGambar } from "../receiptImage.js";
+import { buatStrukPNG, buatStrukTokenPLN, parseStrukTokenPLN, buatStrukPulsa, parseStrukPulsa, buatStrukTopupEwallet, parseStrukTopupEwallet, bagikanAtauUnduhGambar } from "../receiptImage.js";
 
 const route = useRoute();
 
@@ -18,6 +18,11 @@ const formProductCode = ref("");
 const formTarget = ref("");
 const formPaidMethod = ref("tunai");
 const formContactId = ref(null);
+// Dipakai HANYA kalau kode produk belum ada di katalog (products.value) —
+// portalpulsa tidak punya price list, jadi kode baru diketik manual dan
+// produknya diprovisi otomatis di backend dgn provider ini. Diabaikan
+// backend kalau kode sudah ada di katalog (mis. kode OkeConnect lama).
+const formNewProvider = ref("okeconnect");
 
 // ---- Antrean (keranjang) order, diproses satu-satu ----
 const queue = ref([]); // { productCode, name, target, paidMethod, contactId }
@@ -75,6 +80,17 @@ function isPostpaidCategory(cat) {
 }
 function looksLikeToken(product) {
   return /token|PLN/i.test(product.category || "") || /token|PLN/i.test(product.product_group || "");
+}
+// Pulsa & paket data/kuota -> harga flat, no rincian tagihan/token; pakai
+// struk khusus (ID TRX, PRODUK, NO TUJUAN, HARGA, Serial Number) alih-alih struk generik.
+function looksLikePulsa(product) {
+  return /pulsa|kuota|data|sms|telp/i.test(product.category || "");
+}
+// Topup e-wallet (ShopeePay/GoPay/DANA/OVO/LinkAja, dst) -> ada baris DETAIL
+// nama pemilik akun tujuan & footer promosi, beda dari struk pulsa.
+function looksLikeEwallet(product) {
+  return /e-?wallet|saldo|dompet|emoney|shopee|gopay|dana|ovo|link\s*aja/i.test(product.category || "") ||
+    /e-?wallet|saldo|dompet|emoney|shopee|gopay|dana|ovo|link\s*aja/i.test(product.product_group || "");
 }
 
 function toggleDetail(o) {
@@ -180,6 +196,9 @@ function tambahAntrean() {
     target: formTarget.value,
     paidMethod: formPaidMethod.value,
     contactId: formContactId.value,
+    // Cuma dipakai backend kalau kode BELUM ada di katalog (products.value) —
+    // diabaikan kalau kode sudah dikenal.
+    newProductProvider: product ? null : formNewProvider.value,
   });
   formTarget.value = "";
   search.value = "";
@@ -209,6 +228,7 @@ async function prosesSemua() {
         paidMethod: item.paidMethod,
         contactId: item.contactId,
         batchId,
+        newProductProvider: item.newProductProvider || null,
       });
       batchResults.value.push({ ...item, ...res });
     } catch (err) {
@@ -238,8 +258,13 @@ function openConfirm(o) {
     refId: o.ref_id,
     product,
     target: o.target,
-    isPostpaid: isPostpaidCategory(product.category),
+    // portalpulsa tidak punya price list — modalnya SELALU baru diketahui dari
+    // balasan (field "Harga"), sama seperti kategori pascabayar OkeConnect,
+    // jadi kotak "Modal" ikut dibuka utk diedit (lihat usesDynamicCost di ppob.js).
+    isPostpaid: isPostpaidCategory(product.category) || product.provider === "portalpulsa",
     isToken: looksLikeToken(product),
+    isPulsa: looksLikePulsa(product),
+    isEwallet: looksLikeEwallet(product),
     rawReply: o.raw_reply || "",
   };
   confirmForm.value = {
@@ -297,6 +322,8 @@ async function submitKonfirmasi() {
       sellPrice: confirmForm.value.sellPrice,
       tokenCode: confirmForm.value.tokenCode,
       isToken: confirmTarget.value.isToken,
+      isPulsa: confirmTarget.value.isPulsa,
+      isEwallet: confirmTarget.value.isEwallet,
       rawReply: confirmTarget.value.rawReply,
       paidMethod: confirmForm.value.paidMethod,
       contactName: confirmForm.value.contactId ? contacts.value.find((x) => x.id === confirmForm.value.contactId)?.name : null,
@@ -349,6 +376,39 @@ async function bagikanGambar() {
         kwh: p.kwh,
         harga: r.sellPrice,
         sn: r.tokenCode || p.token || "-",
+        catatan,
+      });
+    } else if (r.isPulsa) {
+      // Pulsa/paket data -> struk khusus meniru format resmi provider (ID
+      // TRX, PRODUK, NO TUJUAN, HARGA, Serial Number), lebih rapi daripada
+      // struk generik untuk item flat-price ini.
+      const p = parseStrukPulsa(r.rawReply);
+      blob = await buatStrukPulsa({
+        storeName: store.value.store_name,
+        address: store.value.address,
+        date: r.date,
+        refId: r.refId,
+        noTujuan: r.target,
+        produkNama: r.productName,
+        harga: r.sellPrice,
+        sn: p.sn,
+        catatan, // info utang/titipan kalau ada; "No Tujuan" sudah jadi field sendiri di struk ini
+      });
+    } else if (r.isEwallet) {
+      // Topup e-wallet -> struk khusus meniru format resmi (ID TRX, PRODUK,
+      // NO TUJUAN, DETAIL nama pemilik akun, HARGA, Serial Number, footer
+      // promo produk lain), beda dari struk pulsa.
+      const p = parseStrukTopupEwallet(r.rawReply);
+      blob = await buatStrukTopupEwallet({
+        storeName: store.value.store_name,
+        address: store.value.address,
+        date: r.date,
+        refId: r.refId,
+        noTujuan: r.target,
+        produkNama: r.productName,
+        nama: p.nama,
+        harga: r.sellPrice,
+        sn: p.sn,
         catatan,
       });
     } else {
@@ -419,7 +479,14 @@ onMounted(load);
             </div>
           </div>
         </div>
-        <div class="field"><label>Kode produk</label><input v-model="formProductCode" placeholder="mis. TSEL5" /></div>
+        <div class="field"><label>Kode produk</label><input v-model="formProductCode" placeholder="mis. TSEL5 (OkeConnect) / S5 (portalpulsa)" /></div>
+        <div class="field">
+          <label>Provider (kalau kode baru/belum ada di katalog)</label>
+          <select v-model="formNewProvider">
+            <option value="okeconnect">OkeConnect</option>
+            <option value="portalpulsa">portalpulsa</option>
+          </select>
+        </div>
         <div class="field"><label>Nomor HP / ID Pelanggan tujuan</label><input v-model="formTarget" placeholder="mis. 081234567890" /></div>
         <div class="field">
           <label>Metode Bayar</label>

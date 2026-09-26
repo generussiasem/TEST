@@ -6,6 +6,37 @@ import { rencanaPakaiTitipan, stmtsPakaiTitipan } from "./debt.js";
 // dipilih per-produk lewat kolom products.provider (nilainya selalu
 // 'okeconnect' sekarang, kolom dipertahankan untuk kompatibilitas data lama).
 export function getProviderConfig(env, provider) {
+  if (provider === "portalpulsa") {
+    return {
+      provider: "portalpulsa",
+      // Fallback ke JABBER_JID/JABBER_PASSWORD kalau PORTALPULSA_JID/PASSWORD
+      // tidak diisi — dipakai kalau JID Jabber yang sama didaftarkan ke semua
+      // provider (kasus Anda: ysudarto@jabb.im dipakai di OkeConnect &
+      // portalpulsa). Isi PORTALPULSA_JID/PASSWORD eksplisit HANYA kalau nanti
+      // mau pakai akun Jabber yang berbeda utk portalpulsa.
+      jid: env.PORTALPULSA_JID || env.JABBER_JID,
+      password: env.PORTALPULSA_PASSWORD || env.JABBER_PASSWORD,
+      pin: env.PORTALPULSA_PIN,
+      target: env.PORTALPULSA_TARGET || "trx@im.portalpulsa.com",
+      // Format portalpulsa TIDAK pakai ref id sama sekali (beda dari
+      // OkeConnect) — pemisahnya spasi, bukan titik. Konsekuensi pencocokan
+      // balasan (jabber.js: acceptAnyFromTarget) sudah didiskusikan & diterima.
+      separator: " ",
+      buildPrabayarBody(productCode, target, pin, _refId) {
+        return `${productCode} ${target} ${pin}`;
+      },
+      // BELUM didukung: format Token PLN portalpulsa butuh field idpelanggan
+      // terpisah ("kode idpelanggan NoHP PIN") yang tidak ada tempatnya di
+      // alur order saat ini (cuma productCode + target). Sengaja throw
+      // eksplisit daripada diam-diam mengirim perintah yang salah format.
+      buildPascaCekBody(productCode, target, pin, refId) {
+        throw new Error("Cek tagihan pascabayar belum didukung untuk provider portalpulsa (Token PLN butuh field idpelanggan terpisah).");
+      },
+      buildPascaBayarBody(productCode, target, pin, refId) {
+        throw new Error("Transaksi pascabayar belum didukung untuk provider portalpulsa (Token PLN butuh field idpelanggan terpisah).");
+      },
+    };
+  }
   // Perilaku lama tidak berubah — cek maupun bayar pascabayar sama-sama pakai
   // suffix "A" di belakang R#{refId}, BELUM dikonfirmasi CS OkeConnect, lihat
   // catatan lama di bawah.
@@ -15,6 +46,7 @@ export function getProviderConfig(env, provider) {
     password: env.JABBER_PASSWORD,
     pin: env.JABBER_PIN,
     target: env.JABBER_TARGET || "okeconnect@gojabber.com",
+    separator: ".",
     buildPrabayarBody(productCode, target, pin, refId) {
       return `${productCode}.${target}.${pin}.R#${refId}`;
     },
@@ -30,7 +62,7 @@ export function getProviderConfig(env, provider) {
 // PENTING: cek kegagalan DULU (prioritas), baru sukses — dan waspadai kata
 // "berhasil"/"sukses" yang DINEGASIKAN (mis. "tidak berhasil", "belum sukses").
 export function detectPpobStatus(reply) {
-  const failurePattern = /gagal|ditolak|dibatalkan|invalid|salah pin|saldo tidak cukup|tidak dapat diproses|\berror\b/i;
+  const failurePattern = /gagal|ditolak|dibatalkan|invalid|salah pin|\bsalah\b|saldo tidak cukup|tidak dapat diproses|\berror\b/i;
   const negatedSuccess = /\b(tidak|belum|bukan|gak|ga)\s+(ber)?hasil\b|\b(tidak|belum|bukan|gak|ga)\s+sukses\b/i;
   const successPattern = /\bsukses\b|\bberhasil\b/i;
   if (failurePattern.test(reply) || negatedSuccess.test(reply)) return "gagal";
@@ -67,6 +99,7 @@ function waktuWibOrder(order) {
 }
 
 export function cocokkanBalasanCek(order, reply) {
+  if (order.provider === "portalpulsa") return cocokkanBalasanCekPortalpulsa(order, reply);
   const lines = String(reply || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
 
   // 1) Balasan memuat ref order -> paling akurat
@@ -108,10 +141,56 @@ export function cocokkanBalasanCek(order, reply) {
   return { matched: true, by: "kode+nomor+jam", status: kandidat[0].status, line: kandidat[0].line };
 }
 
+// Balasan "STATUS NoHp" portalpulsa, contoh asli (2026-09-25):
+//   @2026-09-25
+//   260925120354 S5 085225492482 SUKSES SN:04285200000862029402.
+//    # Ayo transaksi terus biar dapet bonus mingguan
+// Header tanggal formatnya "@YYYY-MM-DD" (BEDA dari OkeConnect yang
+// "@DD/MM/YYYY"), dan baris transaksi TIDAK memuat jam sama sekali — cuma
+// "{ID_provider} {kode} {NoHP} {STATUS...}" dipisah spasi. Karena tidak ada
+// jam, pencocokan HANYA berdasar kode+nomor tujuan (+tanggal header kalau
+// ada) — kalau ada >1 transaksi ke nomor+kode yang sama di hari yang sama
+// dengan status berbeda, tetap dianggap ambigu (matched:false) sama seperti
+// jalur OkeConnect.
+function cocokkanBalasanCekPortalpulsa(order, reply) {
+  const lines = String(reply || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const digits = (s) => String(s || "").replace(/\D/g, "");
+  const kode = String(order.product_code || "").toLowerCase();
+  const tujuan = digits(order.target);
+  const kandidat = [];
+  for (const line of lines) {
+    const h = line.match(/^@\s*(\d{4})-(\d{2})-(\d{2})/);
+    if (h) continue; // header tanggal — tidak dipakai utk penyaringan (tak ada jam pembanding)
+    const e = line.match(/^(\S+)\s+([A-Za-z0-9]+)\s+(\d{6,})\s+(.*)$/);
+    if (!e) continue;
+    if (e[2].toLowerCase() !== kode || digits(e[3]) !== tujuan) continue;
+    kandidat.push({ line, providerRefId: e[1], status: detectPpobStatus(e[4]) });
+  }
+  if (!kandidat.length) {
+    return { matched: false, reason: "tidak ada baris dengan kode produk dan nomor tujuan yang cocok" };
+  }
+  if (new Set(kandidat.map((k) => k.status)).size > 1) {
+    return { matched: false, reason: "ada lebih dari satu transaksi cocok dengan status berbeda" };
+  }
+  return { matched: true, by: "kode+nomor(portalpulsa)", status: kandidat[0].status, line: kandidat[0].line };
+}
+
 const POSTPAID_CATEGORIES = ["TAGIHAN", "AIR PDAM"];
 
 function isPostpaid(product) {
   return POSTPAID_CATEGORIES.includes(product.category);
+}
+
+// portalpulsa TIDAK punya price list (lihat getProviderConfig) — HPP-nya cuma
+// diketahui dari field "Harga" di balasan SUKSES tiap transaksi, persis
+// seperti modal riil tagihan pascabayar OkeConnect yang juga baru diketahui
+// dari balasan, bukan dari product.cost_price. Jadi utk kebutuhan "modal
+// harus diisi manual/di-parse dari balasan, bukan angka tetap di katalog",
+// portalpulsa diperlakukan sama seperti kategori pascabayar — walau perintah
+// yang dikirim ke provider tetap format prabayar biasa (lihat isPostpaid()
+// yang dipakai KHUSUS utk pemilihan format perintah, terpisah dari ini).
+function usesDynamicCost(product) {
+  return isPostpaid(product) || product.provider === "portalpulsa";
 }
 
 // ---------------------------------------------------------------------------
@@ -153,6 +232,29 @@ export function parseTagihanListrikDetail(rawReply) {
   };
 }
 
+// Parsing balasan SUKSES portalpulsa, contoh asli (2026-09-25):
+//   "S5 085225492482 SUKSES. SN: 04285200000862029402.. Harga: Rp 5.395. ID:
+//   260925120354. Saldo:Rp 9.273 # Ayo transaksi terus biar dapet bonus mingguan"
+// Field dipisah titik, tapi SN kadang diikuti titik dobel ("..") — makanya SN
+// diambil sampai whitespace saja (bukan sampai "."), supaya tidak salah potong.
+// "hpp" di sini adalah field "Harga" — inilah modal riil transaksi ini (lihat
+// usesDynamicCost di atas), BUKAN product.cost_price yang selalu 0 utk
+// portalpulsa karena tidak ada price list.
+export function parsePortalpulsaDetail(rawReply) {
+  const reply = String(rawReply || "");
+  const toNumber = (s) => (s == null ? null : parseInt(String(s).replace(/\./g, ""), 10) || 0);
+  const sn = reply.match(/\bSN:\s*([A-Za-z0-9]+)/i);
+  const harga = reply.match(/\bHarga:\s*Rp\.?\s*([\d.]+)/i);
+  const id = reply.match(/\bID:\s*([A-Za-z0-9]+)/i);
+  const saldo = reply.match(/\bSaldo:?\s*Rp\.?\s*([\d.]+)/i);
+  return {
+    sn: sn ? sn[1] : null,
+    hpp: harga ? toNumber(harga[1]) : null,
+    refIdProvider: id ? id[1] : null,
+    saldoAkhir: saldo ? toNumber(saldo[1]) : null,
+  };
+}
+
 // Coba tebak kode token PLN dari balasan mentah OkeConnect — pola umum:
 // deret 16-20 digit angka, kadang dipisah strip. BELUM ada contoh balasan
 // sukses token PLN asli, jadi ini pola tebakan yang bisa meleset; kasir
@@ -168,7 +270,10 @@ export function extractTokenCode(reply) {
 // dikonfigurasi"), bukan diam-diam mengirim literal string "undefined" ke
 // server lalu bingung kenapa selalu gagal/timeout tanpa penjelasan.
 function assertCfgComplete(cfg) {
-  const envNames = { jid: "JABBER_JID", password: "JABBER_PASSWORD", pin: "JABBER_PIN", target: "JABBER_TARGET" };
+  const envNames =
+    cfg.provider === "portalpulsa"
+      ? { jid: "PORTALPULSA_JID (atau JABBER_JID sbg fallback)", password: "PORTALPULSA_PASSWORD (atau JABBER_PASSWORD sbg fallback)", pin: "PORTALPULSA_PIN", target: "PORTALPULSA_TARGET" }
+      : { jid: "JABBER_JID", password: "JABBER_PASSWORD", pin: "JABBER_PIN", target: "JABBER_TARGET" };
   const missing = ["jid", "password", "pin", "target"].filter((k) => !cfg[k]);
   if (missing.length) {
     throw new Error(
@@ -199,7 +304,14 @@ export async function cekTagihan(env, { productCode, target }) {
 
   let reply = null;
   try {
-    reply = await sendJabberCommand({ jid: cfg.jid, password: cfg.password, to: cfg.target, body });
+    reply = await sendJabberCommand({
+      jid: cfg.jid,
+      password: cfg.password,
+      to: cfg.target,
+      body,
+      refSeparator: cfg.separator,
+      acceptAnyFromTarget: cfg.provider === "portalpulsa",
+    });
   } catch (err) {
     console.error("Jabber gagal untuk cek", refId, ":", err.message, err.stack);
     reply = "ERROR: " + err.message;
@@ -224,12 +336,28 @@ export async function cekTagihan(env, { productCode, target }) {
  * baru ketahuan sukses lewat CRON (tanpa kasir di depan layar) tetap otomatis
  * tercatat pakai harga default — itu ditangani terpisah di index.js.
  */
-export async function placePpobOrder(env, { productCode, target, paidMethod = "tunai", contactId = null, batchId = null, telegramChatId = "" }) {
-  const product = await env.DB.prepare("SELECT * FROM products WHERE code = ?")
+export async function placePpobOrder(env, { productCode, target, paidMethod = "tunai", contactId = null, batchId = null, telegramChatId = "", newProductProvider = null }) {
+  let product = await env.DB.prepare("SELECT * FROM products WHERE code = ?")
     .bind(productCode)
     .first();
   if (!product) {
-    throw new Error(`Kode produk "${productCode}" tidak ditemukan. Coba /cari dulu.`);
+    // portalpulsa tidak punya katalog/price-list (lihat getProviderConfig) —
+    // kasir mengetik kode manual, jadi produk baru diprovisi otomatis di sini
+    // (cost_price/sell_price mulai dari 0, disesuaikan tiap transaksi lewat
+    // kotak konfirmasi — lihat usesDynamicCost). Provider lain (OkeConnect)
+    // TETAP wajib sudah ada di katalog hasil sinkron, supaya salah ketik kode
+    // tidak diam-diam membuat "produk" baru yang sebenarnya cuma typo.
+    if (newProductProvider === "portalpulsa") {
+      await env.DB.prepare(
+        `INSERT INTO products (code, name, category, provider, cost_price, sell_price, active)
+         VALUES (?, ?, NULL, 'portalpulsa', 0, 0, 1)`
+      )
+        .bind(productCode, productCode)
+        .run();
+      product = await env.DB.prepare("SELECT * FROM products WHERE code = ?").bind(productCode).first();
+    } else {
+      throw new Error(`Kode produk "${productCode}" tidak ditemukan. Coba /cari dulu.`);
+    }
   }
   if (paidMethod === "utang" && !contactId) {
     throw new Error("Pembayaran Utang wajib pilih kontak.");
@@ -268,7 +396,14 @@ export async function placePpobOrder(env, { productCode, target, paidMethod = "t
   let reply = null;
 
   try {
-    reply = await sendJabberCommand({ jid: cfg.jid, password: cfg.password, to: cfg.target, body });
+    reply = await sendJabberCommand({
+      jid: cfg.jid,
+      password: cfg.password,
+      to: cfg.target,
+      body,
+      refSeparator: cfg.separator,
+      acceptAnyFromTarget: cfg.provider === "portalpulsa",
+    });
     status = detectPpobStatus(reply);
   } catch (err) {
     console.error("Jabber gagal untuk order", refId, ":", err.message, err.stack);
@@ -308,7 +443,7 @@ export async function placePpobOrder(env, { productCode, target, paidMethod = "t
  * ikut product.cost_price apa adanya (tidak pernah bisa diedit manual). */
 export async function recordPpobSale(env, { product, wallet, refId, target, sellPrice, costTotal, paidMethod = "tunai", contactId = null, sisaMethod = "tunai", receiveWalletId = null, employeeId = null }) {
   const finalSellPrice = sellPrice != null ? sellPrice : product.sell_price;
-  const finalCostTotal = isPostpaid(product) && costTotal != null ? costTotal : product.cost_price;
+  const finalCostTotal = usesDynamicCost(product) && costTotal != null ? costTotal : product.cost_price;
 
   // Bayar pakai titipan pelanggan: bagian yang ditutup titipan tidak menambah
   // apa pun ke dompet (uangnya sudah masuk saat dititipkan). Kalau titipan
@@ -440,14 +575,25 @@ export async function finalizePpobOrder(env, { refId, sellPrice, costTotal, toke
   // riil dari selisih saldo di raw_reply order ini; product.cost_price cuma
   // dipakai sebagai upaya terakhir kalau balasan tidak bisa diparse sama sekali.
   let effectiveCostTotal = costTotal;
-  if (effectiveCostTotal == null && isPostpaid(product)) {
-    const detail = parseTagihanListrikDetail(order.raw_reply);
-    if (detail.modalRiil != null) {
-      effectiveCostTotal = detail.modalRiil;
+  if (effectiveCostTotal == null && usesDynamicCost(product)) {
+    if (product.provider === "portalpulsa") {
+      const detail = parsePortalpulsaDetail(order.raw_reply);
+      if (detail.hpp != null) {
+        effectiveCostTotal = detail.hpp;
+      } else {
+        console.error(
+          `finalizePpobOrder ${refId}: gagal parse field "Harga" dari balasan portalpulsa, fallback ke product.cost_price (selalu 0 utk portalpulsa — cek harus isi manual)`
+        );
+      }
     } else {
-      console.error(
-        `finalizePpobOrder ${refId}: gagal parse modal riil dari raw_reply, fallback ke product.cost_price (kemungkinan salah utk pascabayar)`
-      );
+      const detail = parseTagihanListrikDetail(order.raw_reply);
+      if (detail.modalRiil != null) {
+        effectiveCostTotal = detail.modalRiil;
+      } else {
+        console.error(
+          `finalizePpobOrder ${refId}: gagal parse modal riil dari raw_reply, fallback ke product.cost_price (kemungkinan salah utk pascabayar)`
+        );
+      }
     }
   }
 
@@ -734,15 +880,22 @@ export async function syncPpobPrices(env) {
 // Formatnya BELUM tentu selalu persis sama (mis. kalau ada saldo minus, atau
 // akun jenis lain) — kalau parseBalanceReply gagal menangkap angka, fungsi ini
 // TIDAK menimpa saldo (lebih aman diam daripada menimpa dengan angka salah/0).
+// Diperluas supaya cocok baik format OkeConnect ("Saldo 3.523!", tanpa "Rp")
+// maupun portalpulsa ("Saldo:Rp 9.273", pakai titik dua + "Rp") — BELUM ada
+// contoh balasan ASLI perintah cek saldo "S PIN" portalpulsa (yang ada baru
+// contoh field "Saldo" di balasan SUKSES transaksi, formatnya diasumsikan
+// sama). Kalau ternyata beda, fungsi ini akan gagal parse (return null) dan
+// checkDistributorBalance TIDAK menimpa saldo — aman, tapi perlu disesuaikan
+// begitu ada contoh balasan cek saldo portalpulsa yang asli.
 export function parseBalanceReply(reply) {
-  const match = reply.match(/Saldo\s+([\d.]+)/i);
+  const match = reply.match(/Saldo:?\s*(?:Rp\.?\s*)?([\d.]+)/i);
   if (!match) return null;
   const n = Number(match[1].replace(/\./g, ""));
   return Number.isFinite(n) ? n : null;
 }
 
-export async function checkDistributorBalance(env) {
-  const cfg = getProviderConfig(env, "okeconnect");
+export async function checkDistributorBalance(env, provider = "okeconnect") {
+  const cfg = getProviderConfig(env, provider);
   assertCfgComplete(cfg);
 
   const wallet = await env.DB.prepare(
@@ -751,16 +904,21 @@ export async function checkDistributorBalance(env) {
     .bind(cfg.provider)
     .first();
   if (!wallet) {
-    return { ok: false, error: "Belum ada dompet type='distributor_ppob' untuk provider ini." };
+    return { ok: false, error: `Belum ada dompet type='distributor_ppob' untuk provider "${cfg.provider}".` };
   }
 
-  const body = `Saldo.${cfg.pin}`;
+  // Format perintah cek saldo beda per provider: OkeConnect pakai titik
+  // ("Saldo.PIN"), portalpulsa pakai spasi ("S PIN") — lihat screenshot format
+  // resmi portalpulsa yang dikirim user.
+  const body = cfg.provider === "portalpulsa" ? `S ${cfg.pin}` : `Saldo.${cfg.pin}`;
   const reply = await sendJabberCommand({
     jid: cfg.jid,
     password: cfg.password,
     to: cfg.target,
     body,
     firstReplyIsFinal: true,
+    refSeparator: cfg.separator,
+    acceptAnyFromTarget: cfg.provider === "portalpulsa",
   });
 
   const balance = parseBalanceReply(reply);

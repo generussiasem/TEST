@@ -181,6 +181,45 @@ export async function bayarHutang(env, { contactId, amount, walletId, kelebihan,
   return { transactionId, untukHutang, lebih, titipkan, dikembalikan: lebih > 0 && !titipkan ? lebih : 0, masukDompet, contact: after };
 }
 
+/**
+ * Pinjamkan uang tunai ke kontak (kebalikan dari bayarHutang) — uang KELUAR
+ * dari dompet, dicatat sebagai piutang baru. Beda dari catatHutangManual:
+ * ini beneran memotong saldo dompet, karena uangnya memang benar-benar
+ * dikeluarkan (bukan cuma catatan admin tanpa uang bergerak).
+ */
+export async function pinjamkanUang(env, { contactId, amount, walletId, note, employeeId }) {
+  const uang = toInt(amount);
+  if (!contactId) throw new DebtError("Pilih kontak dulu.");
+  if (uang <= 0) throw new DebtError("Nominal harus lebih dari 0.");
+  const contact = await env.DB.prepare("SELECT * FROM contacts WHERE id = ?").bind(contactId).first();
+  if (!contact) throw new DebtError("Kontak tidak ditemukan.");
+  const wallet = await getPayWallet(env, walletId);
+  if (toInt(wallet.balance) < uang) {
+    throw new DebtError(`Saldo dompet ${wallet.name} tidak cukup (sisa ${rp(wallet.balance)}).`);
+  }
+  const shiftId = await getOpenShiftId(env, employeeId);
+  const txNote = `Pinjamkan uang ke ${contact.name}${note ? " — " + note : ""}`;
+
+  const tx = await env.DB.prepare(
+    `INSERT INTO transactions (type, category, wallet_id, amount, cost_total, note, contact_id, employee_id, shift_id)
+     VALUES ('debt_out', 'Pinjaman Uang', ?, ?, 0, ?, ?, ?, ?)`
+  )
+    .bind(wallet.id, uang, txNote, contact.id, employeeId || null, shiftId)
+    .run();
+  const transactionId = tx.meta.last_row_id;
+
+  await env.DB.batch([
+    env.DB.prepare("UPDATE wallets SET balance = balance - ? WHERE id = ?").bind(uang, wallet.id),
+    env.DB.prepare(
+      "INSERT INTO debts (contact_id, type, amount, note, wallet_id, transaction_id) VALUES (?, 'piutang', ?, ?, ?, ?)"
+    ).bind(contact.id, uang, note || "Pinjaman uang tunai", wallet.id, transactionId),
+    env.DB.prepare("UPDATE contacts SET total_debt = total_debt + ? WHERE id = ?").bind(uang, contact.id),
+  ]);
+
+  const after = await env.DB.prepare("SELECT * FROM contacts WHERE id = ?").bind(contact.id).first();
+  return { transactionId, amount: uang, contact: after };
+}
+
 /** Pelanggan menitipkan uang tanpa ada hutang (mis. titip untuk belanja nanti). */
 export async function titipUang(env, { contactId, amount, walletId, note, employeeId }) {
   const uang = toInt(amount);

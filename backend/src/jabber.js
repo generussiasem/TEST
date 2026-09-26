@@ -44,7 +44,16 @@ function xmlEscape(str) {
 // jadi otomatis mengandung ref_id kita sendiri juga — tetap lolos filter ini),
 // dan "from"-nya pun tetap JID tujuan — padahal itu tandanya pesan GAGAL
 // terkirim ke OkeConnect, bukan balasan sukses.
-function extractAllReplies(buffer, targetBareJid, expectedRefToken, expectedPrefix) {
+// acceptAnyFromTarget: khusus provider yang balasannya SAMA SEKALI TIDAK bisa
+// dicocokkan ke transaksi tertentu (tidak ada ref id maupun prefix yang
+// diulang di semua kasus — mis. balasan GAGAL portalpulsa "PIN xxx Salah."
+// tidak mengutip perintah apapun). Kalau true, balasan dari target yang benar
+// tetap diterima walau ref/prefix tidak cocok — RESIKO: kalau ada transaksi
+// LAIN ke provider yang sama berjalan bersamaan (dua sesi Worker paralel),
+// balasannya bisa "ketuker". Mitigasi jangka pendek: jangan jalankan dua
+// transaksi portalpulsa bersamaan. Mitigasi jangka panjang: butuh queue/lock
+// per provider di level database (belum diimplementasikan).
+function extractAllReplies(buffer, targetBareJid, expectedRefToken, expectedPrefix, acceptAnyFromTarget = false) {
   // expectedRefToken boleh satu string atau daftar token (balasan diterima kalau
   // memuat SALAH SATU). Daftar dipakai untuk perintah cek status berformat
   // "CEK.NOMOR" yang balasannya belum tentu memuat ref order.
@@ -88,10 +97,16 @@ function extractAllReplies(buffer, targetBareJid, expectedRefToken, expectedPref
     const matchesRef = expectedTokens.some((t) => text.includes(t));
     const matchesPrefix = expectedPrefix && text.startsWith(expectedPrefix);
     if (!isError && expectedTokens.length && !matchesRef && !matchesPrefix) {
-      console.log(
-        `[jabber-debug] diabaikan: body tidak mengandung token "${expectedTokens.join(" / ")}" maupun prefix "${expectedPrefix}" — kemungkinan balasan transaksi lain. Isi: ${text.slice(0, 200)}`
-      );
-      continue; // balasan ini untuk transaksi/permintaan LAIN — bukan punya kita, abaikan
+      if (acceptAnyFromTarget) {
+        console.log(
+          `[jabber-debug] ref/prefix tidak cocok TAPI acceptAnyFromTarget aktif (provider tanpa ref id) — diterima apa adanya, resiko ketuker kalau ada transaksi lain jalan bersamaan. Isi: ${text.slice(0, 200)}`
+        );
+      } else {
+        console.log(
+          `[jabber-debug] diabaikan: body tidak mengandung token "${expectedTokens.join(" / ")}" maupun prefix "${expectedPrefix}" — kemungkinan balasan transaksi lain. Isi: ${text.slice(0, 200)}`
+        );
+        continue; // balasan ini untuk transaksi/permintaan LAIN — bukan punya kita, abaikan
+      }
     }
     if (isError) {
       const errCondMatch = inner.match(/<error[^>]*>[\s\S]*?<([a-z0-9-]+)\s+xmlns=["']urn:ietf:params:xml:ns:xmpp-stanzas["']/i);
@@ -112,7 +127,7 @@ function extractAllReplies(buffer, targetBareJid, expectedRefToken, expectedPref
 // Kata kunci yang menandakan balasan FINAL (bukan sekadar tanda terima
 // "akan diproses"/"sedang diproses"). Kalau balasan yang masuk cuma ack,
 // kita TERUS mendengarkan sampai dapat salah satu kata kunci ini atau waktu habis.
-const FINAL_REPLY_KEYWORDS = /sukses|berhasil|gagal|\berror\b|ditolak|dibatalkan|invalid|salah pin|saldo tidak cukup/i;
+const FINAL_REPLY_KEYWORDS = /sukses|berhasil|gagal|\berror\b|ditolak|dibatalkan|invalid|salah pin|\bsalah\b|saldo tidak cukup/i;
 
 async function readUntil(reader, predicate, timeoutMs = 15000) {
   let buffer = "";
@@ -143,7 +158,7 @@ async function readUntil(reader, predicate, timeoutMs = 15000) {
 // (lihat FINAL_REPLY_KEYWORDS) — kalau tidak diberi jalur ini, fungsi akan
 // menunggu penuh sampai timeout tiap kali dipanggil walau balasan yang benar
 // sudah masuk dari detik pertama, karena tidak pernah cocok kata kunci apapun.
-async function waitForFinalReply(reader, targetBareJid, expectedRefToken, expectedPrefix, timeoutMs = 25000, firstReplyIsFinal = false) {
+async function waitForFinalReply(reader, targetBareJid, expectedRefToken, expectedPrefix, timeoutMs = 25000, firstReplyIsFinal = false, acceptAnyFromTarget = false) {
   let buffer = "";
   const decoder = new TextDecoder();
   const deadline = Date.now() + timeoutMs;
@@ -157,7 +172,7 @@ async function waitForFinalReply(reader, targetBareJid, expectedRefToken, expect
     if (done) break;
     if (value === undefined) continue;
     buffer += decoder.decode(value, { stream: true });
-    const replies = extractAllReplies(buffer, targetBareJid, expectedRefToken, expectedPrefix);
+    const replies = extractAllReplies(buffer, targetBareJid, expectedRefToken, expectedPrefix, acceptAnyFromTarget);
     if (replies.length) {
       latest = replies[replies.length - 1];
       if (latest.isError || firstReplyIsFinal || FINAL_REPLY_KEYWORDS.test(latest.text)) {
@@ -187,8 +202,13 @@ async function waitForFinalReply(reader, targetBareJid, expectedRefToken, expect
  *   dari target sebagai final, walau tidak mengandung kata kunci "sukses/gagal"
  *   dst. Dipakai untuk perintah non-transaksi seperti cek saldo ("Saldo.PIN"),
  *   supaya tidak menunggu penuh sampai timeout tiap kali dipanggil.
+ * @param {string} [opts.refSeparator] - pemisah antar-segmen body dipakai untuk
+ *   membangun expectedPrefix fallback (default "."; portalpulsa pakai " " karena
+ *   formatnya "kode target pin" tanpa titik).
+ * @param {boolean} [opts.acceptAnyFromTarget] - lihat catatan di extractAllReplies;
+ *   dipakai untuk provider tanpa ref id sama sekali (portalpulsa).
  */
-export async function sendJabberCommand({ jid, password, to, body, firstReplyIsFinal = false, expectTokens = null }) {
+export async function sendJabberCommand({ jid, password, to, body, firstReplyIsFinal = false, expectTokens = null, refSeparator = ".", acceptAnyFromTarget = false }) {
   const [localpart, jabberHost] = jid.split("@");
   // Login ke server tempat akun Jabber Anda sendiri terdaftar (mis. jabbim.com),
   // BUKAN ke server tujuan pesan (okeconnect@gojabber.com) — dua server ini beda,
@@ -310,9 +330,9 @@ export async function sendJabberCommand({ jid, password, to, body, firstReplyIsF
     // karena saldo kurang) — "KODE.NOMOR" adalah dua segmen pertama body kita
     // sendiri (format semua provider di ppob.js: KODE.NOMOR.PIN[...]), dan
     // OkeConnect selalu mengulang persis "KODE.NOMOR" di awal balasannya.
-    const bodySegments = body.split(".");
-    const expectedPrefix = bodySegments.length >= 2 ? `${bodySegments[0]}.${bodySegments[1]}` : null;
-    const parsed = await waitForFinalReply(reader, targetBareJid, expectedRefToken, expectedPrefix, 25000, firstReplyIsFinal);
+    const bodySegments = body.split(refSeparator);
+    const expectedPrefix = bodySegments.length >= 2 ? `${bodySegments[0]}${refSeparator}${bodySegments[1]}` : null;
+    const parsed = await waitForFinalReply(reader, targetBareJid, expectedRefToken, expectedPrefix, 25000, firstReplyIsFinal, acceptAnyFromTarget);
     if (parsed.isError) {
       throw new Error(parsed.text);
     }
