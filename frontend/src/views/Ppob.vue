@@ -248,11 +248,17 @@ async function prosesSemua() {
 }
 
 function openConfirm(o) {
+  // Fallback WAJIB ikut sertakan provider dari order (o.provider) — kalau
+  // tidak, produk portalpulsa yang belum sempat ke-reload ke products.value
+  // (mis. baru saja auto-terprovisi) akan dianggap provider undefined, dan
+  // kotak Modal jadi TIDAK bisa diedit padahal justru itu skenario utamanya
+  // (lihat usesDynamicCost di ppob.js — ini bug yang sempat kejadian).
   const product = products.value.find((p) => p.code === o.product_code) || {
     code: o.product_code,
     category: "",
     product_group: "",
     cost_price: o.cost_price,
+    provider: o.provider,
   };
   confirmTarget.value = {
     refId: o.ref_id,
@@ -533,6 +539,7 @@ onMounted(load);
               <span class="badge" :class="r.status">{{ r.status }}</span>
             </div>
             <div v-if="r.status === 'error' || r.reply" class="muted" style="font-size: 12px; margin-top: 2px">{{ r.error || r.reply }}</div>
+            <div v-if="r.warning" style="font-size: 12px; margin-top: 2px; color: #b45309">⚠️ {{ r.warning }}</div>
           </div>
         </div>
       </div>

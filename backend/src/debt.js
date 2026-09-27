@@ -128,6 +128,14 @@ export async function bayarHutang(env, { contactId, amount, walletId, kelebihan,
   // Uang yang benar-benar menetap di dompet.
   const masukDompet = isSupplier ? untukHutang : titipkan ? uang : untukHutang;
 
+  // Bayar utang KE supplier = uang KELUAR dari dompet — beda dari terima
+  // pembayaran DARI pelanggan (debt_in) yang selalu menambah saldo. Cek saldo
+  // cukup di sini, SAMA seperti pinjamkanUang/tarikTitipan di bawah, supaya
+  // dompet tidak bisa jadi minus.
+  if (isSupplier && untukHutang > 0 && toInt(wallet.balance) < untukHutang) {
+    throw new DebtError(`Saldo dompet ${wallet.name} (${rp(wallet.balance)}) tidak cukup untuk bayar ${rp(untukHutang)}.`);
+  }
+
   const shiftId = await getOpenShiftId(env, employeeId);
   const noteParts = [];
   if (note) noteParts.push(note);

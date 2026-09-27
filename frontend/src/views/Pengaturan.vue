@@ -16,6 +16,7 @@ const depositForm = ref({ bank: "", nominal: null });
 const depositMsg = ref("");
 const depositError = ref("");
 const depositLoading = ref(false);
+const depositHistory = ref([]);
 
 function rupiah(n) {
   return "Rp" + Number(n || 0).toLocaleString("id-ID");
@@ -41,6 +42,15 @@ async function simpanModalAwal() {
   }
 }
 
+async function loadDepositHistory() {
+  try {
+    const res = await api.get("/api/admin/portalpulsa/deposits");
+    depositHistory.value = res.deposits;
+  } catch {
+    // diam-diam gagal — bukan bagian kritis halaman
+  }
+}
+
 async function kirimDepositPortalpulsa() {
   depositError.value = "";
   depositMsg.value = "";
@@ -52,6 +62,7 @@ async function kirimDepositPortalpulsa() {
   try {
     const res = await api.post("/api/admin/portalpulsa/deposit", depositForm.value);
     depositMsg.value = res.reply;
+    await loadDepositHistory();
   } catch (err) {
     depositError.value = err.message;
   } finally {
@@ -109,7 +120,10 @@ async function hapusWallet(w) {
   }
 }
 
-onMounted(load);
+onMounted(() => {
+  load();
+  loadDepositHistory();
+});
 </script>
 
 <template>
@@ -170,6 +184,14 @@ onMounted(load);
           <button class="btn" type="submit" :disabled="depositLoading">{{ depositLoading ? "Mengirim..." : "Kirim Deposit" }}</button>
         </form>
         <div v-if="depositMsg" class="ok-box" style="white-space: pre-wrap; margin-top: 12px">{{ depositMsg }}</div>
+
+        <div v-if="depositHistory.length" style="margin-top: 16px">
+          <h4 style="font-size: 14px; margin-bottom: 8px">Riwayat Deposit Terakhir</h4>
+          <div v-for="d in depositHistory" :key="d.id" style="border-top: 1px solid #eee; padding: 8px 0; font-size: 13px">
+            <div><b>{{ d.bank }}</b> — Rp {{ rupiah(d.nominal) }} <span class="muted">({{ d.employee_name || "?" }}, {{ d.created_at }})</span></div>
+            <div class="muted" style="white-space: pre-wrap; margin-top: 4px">{{ d.raw_reply }}</div>
+          </div>
+        </div>
       </div>
 
       <div class="card">

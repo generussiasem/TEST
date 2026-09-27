@@ -371,6 +371,24 @@ export async function placePpobOrder(env, { productCode, target, paidMethod = "t
     .bind(cfg.provider)
     .first();
 
+  // Peringatan (BUKAN blokir — order tetap dikirim) kalau saldo dompet
+  // distributor sudah diketahui menipis. Dicek SEBELUM kirim ke provider,
+  // supaya kasir sadar dari awal, bukan kaget setelah transaksi jalan.
+  // Untuk produk yang modalnya baru diketahui SETELAH transaksi (portalpulsa,
+  // tagihan pascabayar) — lihat usesDynamicCost — perkiraan modal tidak ada,
+  // jadi cuma diperingatkan kalau saldo sudah 0/minus (bukan dibandingkan
+  // modal, karena modalnya sendiri belum diketahui).
+  let warning = null;
+  if (!wallet) {
+    warning = `Belum ada dompet distributor utk provider "${cfg.provider}" — modal transaksi TIDAK akan terpotong dari mana pun.`;
+  } else if (usesDynamicCost(product)) {
+    if (wallet.balance <= 0) {
+      warning = `Saldo distributor "${wallet.name}" sudah habis/minus (Rp ${wallet.balance.toLocaleString("id-ID")}). Modal transaksi ini belum diketahui pastinya, tapi kemungkinan besar tidak akan tertutup.`;
+    }
+  } else if (wallet.balance < product.cost_price) {
+    warning = `Saldo distributor "${wallet.name}" (Rp ${wallet.balance.toLocaleString("id-ID")}) lebih kecil dari modal produk ini (Rp ${product.cost_price.toLocaleString("id-ID")}) — kemungkinan transaksi akan gagal karena saldo tidak cukup.`;
+  }
+
   const refId = "TX" + Date.now();
 
   // OkeConnect: pulsa/kuota/token prabayar pakai R#{ID} biasa, tagihan
@@ -430,6 +448,7 @@ export async function placePpobOrder(env, { productCode, target, paidMethod = "t
     reply,
     product,
     tokenCode,
+    warning,
     needsConfirm: status === "sukses", // kasir masih di depan layar, tampilkan kotak konfirmasi harga sebelum dicatat
   };
 }

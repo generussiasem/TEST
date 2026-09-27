@@ -127,7 +127,9 @@ function extractAllReplies(buffer, targetBareJid, expectedRefToken, expectedPref
 // Kata kunci yang menandakan balasan FINAL (bukan sekadar tanda terima
 // "akan diproses"/"sedang diproses"). Kalau balasan yang masuk cuma ack,
 // kita TERUS mendengarkan sampai dapat salah satu kata kunci ini atau waktu habis.
-const FINAL_REPLY_KEYWORDS = /sukses|berhasil|gagal|\berror\b|ditolak|dibatalkan|invalid|salah pin|\bsalah\b|saldo tidak cukup/i;
+// "\btransfer\b" ditambah khusus deposit portalpulsa — balasan finalnya
+// "Silakan transfer Rp ... Ke Bank: ..." tidak mengandung sukses/gagal.
+const FINAL_REPLY_KEYWORDS = /sukses|berhasil|gagal|\berror\b|ditolak|dibatalkan|invalid|salah pin|\bsalah\b|saldo tidak cukup|\btransfer\b/i;
 
 async function readUntil(reader, predicate, timeoutMs = 15000) {
   let buffer = "";

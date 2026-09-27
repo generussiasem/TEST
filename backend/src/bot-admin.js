@@ -1,5 +1,5 @@
 import { sendTelegramMessage, editTelegramMessage, answerCallbackQuery } from "./telegram.js";
-import { finalizePpobOrder } from "./ppob.js";
+import { finalizePpobOrder, placePpobOrder } from "./ppob.js";
 import { bayarHutang } from "./debt.js";
 
 // ---------------------------------------------------------------------------
@@ -94,6 +94,7 @@ function mainMenuKeyboard(env) {
     rows.push([{ text: "🧮 Buka Mini App Kasir", web_app: { url: env.MINIAPP_URL } }]);
   }
   rows.push([{ text: "📋 Cek Hutang Pelanggan", callback_data: "h:l:0" }]);
+  rows.push([{ text: "🛍️ Transaksi PPOB (Katalog)", callback_data: "b:cari:0" }]);
   rows.push([{ text: "🧾 Konfirmasi Order PPOB", callback_data: "p:l:0" }]);
   rows.push([{ text: "💳 Saldo Distributor", callback_data: "m:saldo" }]);
   return { inline_keyboard: rows };
@@ -154,6 +155,55 @@ async function renderHutangDetail(env, contactId) {
     [{ text: "🔙 Kembali ke Daftar", callback_data: "h:l:0" }],
   ];
   return { text, reply_markup: { inline_keyboard: keyboard } };
+}
+
+// ---------------------------------------------------------------------------
+// KATALOG & TRANSAKSI PPOB LEWAT CHAT (cari produk -> pilih -> nomor tujuan
+// -> metode bayar -> kirim ke provider). Beda dari command teks "/beli KODE
+// NOMOR" yang sudah ada (masih tetap jalan) — ini versi tombol spy kasir
+// tidak perlu hafal kode produk. Kode BARU yang tidak ada di katalog otomatis
+// dianggap portalpulsa (lihat newProductProvider di placePpobOrder, ppob.js).
+// ---------------------------------------------------------------------------
+
+async function pilihProdukPpob(env, chatId, code, isNew = false) {
+  let product = null;
+  if (!isNew) {
+    product = await env.DB.prepare("SELECT * FROM products WHERE code = ?").bind(code).first();
+    if (!product) throw new Error(`Produk "${code}" tidak ditemukan.`);
+  }
+  await setSession(env, chatId, "awaiting_ppob_target", { productCode: code, isNew });
+  return {
+    text: isNew
+      ? `Kode baru: *${code}* (dianggap produk *portalpulsa* — modal & harga jual diisi manual nanti, saat konfirmasi).\n\nKirim nomor tujuan:`
+      : `*${product.name}* (${product.code})\n\nKirim nomor tujuan:`,
+    reply_markup: { inline_keyboard: [[{ text: "❌ Batal", callback_data: "b:cari:0" }]] },
+  };
+}
+
+// Eksekusi akhir: kirim order ke provider (lewat placePpobOrder, jalur sama
+// persis dengan web & command /beli — termasuk peringatan saldo menipis).
+async function eksekusiOrderPpob(env, chatId, { productCode, target, paidMethod, contactId, isNew }) {
+  await clearSession(env, chatId);
+  const result = await placePpobOrder(env, {
+    productCode,
+    target,
+    paidMethod,
+    contactId,
+    newProductProvider: isNew ? "portalpulsa" : null,
+  });
+  const menuBtn = { inline_keyboard: [[{ text: "🏠 Menu Utama", callback_data: "m:main" }]] };
+  let text = `Order *${result.refId}* (${result.status}):\n${result.reply}`;
+  if (result.warning) text += `\n\n⚠️ ${result.warning}`;
+  if (result.status === "sukses") {
+    text += `\n\nSelanjutnya, konfirmasi harga jualnya:`;
+    return {
+      text,
+      reply_markup: {
+        inline_keyboard: [[{ text: "🧾 Konfirmasi Harga", callback_data: `p:s:${result.refId}` }], [{ text: "🏠 Menu Utama", callback_data: "m:main" }]],
+      },
+    };
+  }
+  return { text, reply_markup: menuBtn };
 }
 
 // ---------------------------------------------------------------------------
@@ -363,6 +413,42 @@ export async function handleAdminCallback(env, callbackQuery) {
         text: `Kirim harga jual baru untuk *${arg}* (angka saja, mis. 12000):`,
         reply_markup: { inline_keyboard: [[{ text: "❌ Batal", callback_data: `p:s:${arg}` }]] },
       };
+    } else if (ns === "b" && action === "cari") {
+      await setSession(env, chatId, "awaiting_ppob_search", {});
+      payload = {
+        text: 'Ketik kata kunci produk (nama atau kode), mis. `telkomsel 5000` — atau kode portalpulsa langsung kalau kodenya belum ada di katalog.',
+        reply_markup: { inline_keyboard: [[{ text: "🏠 Menu Utama", callback_data: "m:main" }]] },
+      };
+    } else if (ns === "b" && action === "pick") {
+      payload = await pilihProdukPpob(env, chatId, arg);
+    } else if (ns === "b" && action === "manualnew") {
+      const session = await getSession(env, chatId);
+      if (!session || session.state !== "awaiting_ppob_search" || !session.data.query) {
+        throw new Error("Sesi pencarian sudah kedaluwarsa/kode belum diketik. Buka lagi menu Transaksi PPOB.");
+      }
+      payload = await pilihProdukPpob(env, chatId, session.data.query, true);
+    } else if (ns === "b" && action === "pay") {
+      const session = await getSession(env, chatId);
+      if (!session || session.state !== "awaiting_ppob_pay") {
+        throw new Error("Sesi order sudah kedaluwarsa. Mulai lagi dari menu Transaksi PPOB.");
+      }
+      const { productCode, target, isNew } = session.data;
+      if (arg === "tunai") {
+        payload = await eksekusiOrderPpob(env, chatId, { productCode, target, paidMethod: "tunai", contactId: null, isNew });
+      } else {
+        await setSession(env, chatId, "awaiting_ppob_contact", { productCode, target, isNew });
+        payload = {
+          text: "Ketik nama pelanggan (yang berutang transaksi ini):",
+          reply_markup: { inline_keyboard: [[{ text: "❌ Batal", callback_data: "b:cari:0" }]] },
+        };
+      }
+    } else if (ns === "b" && action === "contact") {
+      const session = await getSession(env, chatId);
+      if (!session || session.state !== "awaiting_ppob_contact_pick") {
+        throw new Error("Sesi order sudah kedaluwarsa. Mulai lagi dari menu Transaksi PPOB.");
+      }
+      const { productCode, target, isNew } = session.data;
+      payload = await eksekusiOrderPpob(env, chatId, { productCode, target, paidMethod: "utang", contactId: Number(arg), isNew });
     } else {
       payload = { text: "Perintah tidak dikenal.", reply_markup: mainMenuKeyboard(env) };
     }
@@ -423,6 +509,69 @@ export async function handleAdminSessionMessage(env, chatId, text) {
         ],
       },
     });
+    return true;
+  }
+
+  if (session.state === "awaiting_ppob_search") {
+    const q = String(text).trim();
+    if (!q) {
+      await sendTelegramMessage(token, chatId, "Ketik kata kunci dulu (nama atau kode produk).");
+      return true;
+    }
+    const { results } = await env.DB.prepare(
+      "SELECT code, name FROM products WHERE active = 1 AND (name LIKE ? OR code LIKE ?) ORDER BY name LIMIT 8"
+    )
+      .bind(`%${q}%`, `%${q}%`)
+      .all();
+    await setSession(env, chatId, "awaiting_ppob_search", { query: q });
+    const keyboard = results.map((p) => [{ text: `${p.name} (${p.code})`, callback_data: `b:pick:${p.code}` }]);
+    keyboard.push([{ text: `🆕 Pakai "${q}" sbg kode baru (portalpulsa)`, callback_data: "b:manualnew" }]);
+    keyboard.push([{ text: "🏠 Menu Utama", callback_data: "m:main" }]);
+    await sendTelegramMessage(token, chatId, results.length ? `Hasil untuk "${q}":` : `Tidak ada produk cocok utk "${q}" di katalog.`, {
+      reply_markup: { inline_keyboard: keyboard },
+    });
+    return true;
+  }
+
+  if (session.state === "awaiting_ppob_target") {
+    const { productCode, isNew } = session.data;
+    const target = String(text).replace(/[^\d]/g, "");
+    if (!target || target.length < 6) {
+      await sendTelegramMessage(token, chatId, "Nomor tujuan tidak valid. Kirim angka saja, mis. 081234567890.");
+      return true;
+    }
+    await setSession(env, chatId, "awaiting_ppob_pay", { productCode, target, isNew });
+    await sendTelegramMessage(token, chatId, `Tujuan: ${target}. Dibayar bagaimana?`, {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "💵 Tunai", callback_data: "b:pay:tunai" }],
+          [{ text: "🧾 Utang", callback_data: "b:pay:utang" }],
+          [{ text: "❌ Batal", callback_data: "b:cari:0" }],
+        ],
+      },
+    });
+    return true;
+  }
+
+  if (session.state === "awaiting_ppob_pay" || session.state === "awaiting_ppob_contact_pick") {
+    await sendTelegramMessage(token, chatId, "Silakan pilih lewat tombol di atas, atau kirim /menu untuk batal.");
+    return true;
+  }
+
+  if (session.state === "awaiting_ppob_contact") {
+    const { productCode, target, isNew } = session.data;
+    const q = String(text).trim();
+    const { results } = await env.DB.prepare("SELECT id, name FROM contacts WHERE type = 'pelanggan' AND name LIKE ? ORDER BY name LIMIT 8")
+      .bind(`%${q}%`)
+      .all();
+    if (!results.length) {
+      await sendTelegramMessage(token, chatId, `Tidak ada pelanggan bernama "${q}". Coba nama lain, atau /menu untuk batal.`);
+      return true;
+    }
+    await setSession(env, chatId, "awaiting_ppob_contact_pick", { productCode, target, isNew });
+    const keyboard = results.map((cst) => [{ text: `👤 ${cst.name}`, callback_data: `b:contact:${cst.id}` }]);
+    keyboard.push([{ text: "❌ Batal", callback_data: "b:cari:0" }]);
+    await sendTelegramMessage(token, chatId, "Pilih pelanggan:", { reply_markup: { inline_keyboard: keyboard } });
     return true;
   }
 

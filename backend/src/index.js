@@ -316,6 +316,9 @@ app.get("/api/wallets", async (c) => {
 
 app.post("/api/wallets", async (c) => {
   const { name, type = "umum", balance = 0, provider = null } = await c.req.json();
+  if (balance < 0) {
+    return c.json({ ok: false, error: "Saldo dompet tidak boleh diisi angka minus." }, 400);
+  }
   await c.env.DB.prepare("INSERT INTO wallets (name, type, balance, provider) VALUES (?, ?, ?, ?)")
     .bind(name, type, balance, type === "distributor_ppob" ? provider || "okeconnect" : null)
     .run();
@@ -325,6 +328,9 @@ app.post("/api/wallets", async (c) => {
 app.put("/api/wallets/:id", requireAdmin, async (c) => {
   const id = c.req.param("id");
   const { name, type, balance, provider } = await c.req.json();
+  if (balance != null && balance < 0) {
+    return c.json({ ok: false, error: "Saldo dompet tidak boleh diisi angka minus." }, 400);
+  }
   await c.env.DB.prepare("UPDATE wallets SET name = ?, type = ?, balance = ?, provider = ? WHERE id = ?")
     .bind(name, type, balance, type === "distributor_ppob" ? provider || "okeconnect" : null, id)
     .run();
@@ -348,6 +354,7 @@ app.delete("/api/wallets/:id", requireAdmin, async (c) => {
 // sesuai instruksi. Dibatasi requireAdmin karena menyangkut saldo & rekening
 // (sama seperti command Telegram /deposit yang sudah ada).
 app.post("/api/admin/portalpulsa/deposit", requireAdmin, async (c) => {
+  const employee = c.get("employee");
   const { bank, nominal } = await c.req.json();
   if (!bank || !nominal) {
     return c.json({ ok: false, error: "bank dan nominal wajib diisi" }, 400);
@@ -356,19 +363,41 @@ app.post("/api/admin/portalpulsa/deposit", requireAdmin, async (c) => {
     const cfg = getProviderConfig(c.env, "portalpulsa");
     assertCfgComplete(cfg);
     const body = `D ${bank} ${nominal} ${cfg.pin}`;
+    // Deposit itu 2 tahap (ack "Telah kami terima..." dulu, baru balasan
+    // instruksi transfer beneran) — SAMA seperti transaksi pulsa, BUKAN
+    // seperti Cek Saldo yang cuma 1 balasan. Makanya TIDAK pakai
+    // firstReplyIsFinal:true di sini (kalau dipakai, kode berhenti di ack
+    // duluan). FINAL_REPLY_KEYWORDS di jabber.js sudah ditambah kata
+    // "transfer" supaya balasan instruksi transfer langsung dikenali final,
+    // tidak perlu nunggu penuh sampai timeout 25 detik.
     const reply = await sendJabberCommand({
       jid: cfg.jid,
       password: cfg.password,
       to: cfg.target,
       body,
-      firstReplyIsFinal: true,
       refSeparator: cfg.separator,
       acceptAnyFromTarget: true,
     });
+    await c.env.DB.prepare(
+      "INSERT INTO portalpulsa_deposits (bank, nominal, raw_reply, employee_id) VALUES (?, ?, ?, ?)"
+    )
+      .bind(bank, nominal, reply, employee ? employee.employeeId : null)
+      .run();
     return c.json({ ok: true, reply });
   } catch (err) {
     return c.json({ ok: false, error: err.message }, 500);
   }
+});
+
+// Riwayat deposit portalpulsa — dilihat di halaman Pengaturan supaya kasir
+// tidak kehilangan instruksi transfer kalau sudah tertutup/lupa dicatat.
+app.get("/api/admin/portalpulsa/deposits", requireAdmin, async (c) => {
+  const rows = await c.env.DB.prepare(
+    `SELECT d.*, e.name AS employee_name FROM portalpulsa_deposits d
+     LEFT JOIN employees e ON e.id = d.employee_id
+     ORDER BY d.id DESC LIMIT 20`
+  ).all();
+  return c.json({ ok: true, deposits: rows.results });
 });
 
 // Kompatibel mundur: tanpa parameter apa pun, tetap balas array polos semua
@@ -617,6 +646,24 @@ app.delete("/api/ppob-blocked-keywords/:id", async (c) => {
   return c.json({ ok: true });
 });
 
+// Cegah saldo dompet jadi negatif di TITIK KEPUTUSAN (saat toko baru MAU
+// mengeluarkan uang dari dompetnya sendiri — mutasi, pembelian, biaya, modal
+// keluar, jasa pakai dompet lain). SENGAJA TIDAK dipakai utk membalikkan
+// transaksi (hapus/edit) atau mencatat efek transaksi PPOB yang uangnya
+// sudah beneran keluar duluan di provider — di titik itu uang sudah kejadian
+// di dunia nyata, jadi yang salah bukan "boleh/tidaknya dicatat", tapi
+// asal mula kok bisa sampai situ (perlu dicek manual, bukan ditolak sistem).
+async function assertSufficientBalance(db, walletId, amountNeeded) {
+  if (!walletId || amountNeeded <= 0) return;
+  const w = await db.prepare("SELECT name, balance FROM wallets WHERE id = ?").bind(walletId).first();
+  if (!w) throw new Error("Dompet tidak ditemukan.");
+  if (w.balance < amountNeeded) {
+    throw new Error(
+      `Saldo "${w.name}" tidak cukup (saldo Rp ${w.balance.toLocaleString("id-ID")}, butuh Rp ${amountNeeded.toLocaleString("id-ID")}) — dibatalkan, saldo dompet tidak boleh jadi minus.`
+    );
+  }
+}
+
 app.get("/api/transactions", async (c) => {
   const { results } = await c.env.DB.prepare(
     "SELECT * FROM transactions ORDER BY date DESC LIMIT 200"
@@ -681,6 +728,11 @@ app.post("/api/transactions", async (c) => {
     const mutasiTotal = amount || 0;
     if (mutasiTotal <= 0) {
       return c.json({ ok: false, error: "Nominal mutasi harus lebih dari 0" }, 400);
+    }
+    try {
+      await assertSufficientBalance(c.env.DB, wallet_id, mutasiTotal);
+    } catch (err) {
+      return c.json({ ok: false, error: err.message }, 400);
     }
 
     const shift = employee
@@ -785,6 +837,25 @@ app.post("/api/transactions", async (c) => {
         .bind(employee.employeeId)
         .first()
     : null;
+
+  // Cegah dompet jadi minus SEBELUM transaksi disimpan (kalau dicek sesudah
+  // INSERT, transaksinya sudah kadung tersimpan tanpa deduksi dompet — row
+  // "hantu" yang tidak konsisten). type !== "sale"/"capital_in" -> delta
+  // negatif (purchase/expense/capital_out ngurangin effectiveWalletId).
+  if (effectiveWalletId && type !== "sale" && type !== "capital_in") {
+    try {
+      await assertSufficientBalance(c.env.DB, effectiveWalletId, total);
+    } catch (err) {
+      return c.json({ ok: false, error: err.message }, 400);
+    }
+  }
+  if (type === "sale" && cost_wallet_id && costTotal > 0) {
+    try {
+      await assertSufficientBalance(c.env.DB, cost_wallet_id, costTotal);
+    } catch (err) {
+      return c.json({ ok: false, error: err.message }, 400);
+    }
+  }
 
   const insertResult = await c.env.DB.prepare(
     `INSERT INTO transactions (type, category, wallet_id, cost_wallet_id, amount, cost_total, note, contact_id, employee_id, shift_id, deposit_used)
@@ -893,6 +964,24 @@ app.put("/api/transactions/:id", requireAdmin, async (c) => {
   if (existing.type === "sale") {
     if (amount != null) newAmount = amount;
     if (cost_total != null) newCostTotal = cost_total;
+  }
+
+  // Cegah dompet jadi minus akibat koreksi: omzet dikoreksi TURUN (dompet
+  // penerima berkurang) atau modal dikoreksi NAIK (dompet distributor makin
+  // banyak dipotong). Dicek SEBELUM baris transaksi diupdate.
+  if (existing.type === "sale" && existing.wallet_id && newAmount < existing.amount) {
+    try {
+      await assertSufficientBalance(c.env.DB, existing.wallet_id, existing.amount - newAmount);
+    } catch (err) {
+      return c.json({ ok: false, error: err.message }, 400);
+    }
+  }
+  if (existing.type === "sale" && existing.cost_wallet_id && newCostTotal > existing.cost_total) {
+    try {
+      await assertSufficientBalance(c.env.DB, existing.cost_wallet_id, newCostTotal - existing.cost_total);
+    } catch (err) {
+      return c.json({ ok: false, error: err.message }, 400);
+    }
   }
 
   await c.env.DB.prepare("UPDATE transactions SET category = ?, note = ?, contact_id = ?, amount = ?, cost_total = ? WHERE id = ?")
@@ -1727,16 +1816,22 @@ app.post("/telegram/webhook", async (c) => {
         const cfg = getProviderConfig(env, "portalpulsa");
         assertCfgComplete(cfg);
         const body = `D ${bank} ${nominal} ${cfg.pin}`;
+        // Lihat catatan sama di endpoint web /api/admin/portalpulsa/deposit —
+        // deposit 2 tahap (ack dulu), jadi TIDAK pakai firstReplyIsFinal:true.
         const reply = await sendJabberCommand({
           jid: cfg.jid,
           password: cfg.password,
           to: cfg.target,
           body,
-          firstReplyIsFinal: true,
           refSeparator: cfg.separator,
           acceptAnyFromTarget: true,
         });
         await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `Balasan portalpulsa:\n${reply}`);
+        await env.DB.prepare(
+          "INSERT INTO portalpulsa_deposits (bank, nominal, raw_reply, employee_id) VALUES (?, ?, ?, ?)"
+        )
+          .bind(bank, nominal, reply, employee.employeeId)
+          .run();
       } catch (err) {
         await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `Gagal kirim deposit: ${err.message}`);
       }
@@ -1761,11 +1856,12 @@ app.post("/telegram/webhook", async (c) => {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, "Order diterima ✅, sedang diproses...");
 
     try {
-      const { refId, status, reply } = await placePpobOrder(env, { productCode, target });
+      const { refId, status, reply, warning } = await placePpobOrder(env, { productCode, target });
       const pesan =
-        status === "pending"
+        (status === "pending"
           ? `Order ${refId} masih diproses server (belum ada balasan cepat). Saya kabari lagi begitu ada update.`
-          : `Balasan server untuk ${refId} (${status}):\n${reply}`;
+          : `Balasan server untuk ${refId} (${status}):\n${reply}`) +
+        (warning ? `\n\n⚠️ ${warning}` : "");
       await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, pesan);
 
       // Simpan chat_id supaya cron bisa notifikasi balik kalau statusnya masih "pending"

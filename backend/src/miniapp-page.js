@@ -408,7 +408,7 @@ function renderKatalogTab() {
   function renderHasilCari(q) {
     const ql = q.toLowerCase();
     const rows = catalogCache.filter((p) => p.name.toLowerCase().includes(ql) || p.code.toLowerCase().includes(ql) || (p.product_group || "").toLowerCase().includes(ql));
-    renderDaftarItem(rows, "Hasil cari \"" + q + "\"");
+    renderDaftarItem(rows, "Hasil cari '" + q + "'");
   }
 
   function renderGridProvider(kategori) {
