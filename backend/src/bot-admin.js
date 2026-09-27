@@ -99,6 +99,7 @@ function mainMenuKeyboard(env, employee) {
   rows.push([{ text: "🔎 Transaksi PPOB (cari cepat)", callback_data: "b:cari:0" }]);
   rows.push([{ text: "🧾 Konfirmasi Order PPOB", callback_data: "p:l:0" }]);
   rows.push([{ text: "💳 Saldo Distributor", callback_data: "m:saldo" }]);
+  rows.push([{ text: "🔁 Mutasi Antar Akun", callback_data: "mut:start" }]);
   // Deposit menyangkut saldo & rekening — dibatasi role admin, sama seperti
   // di web (Pengaturan) & Mini App. employee bisa undefined di beberapa
   // titik panggil lama (aman: fallback ke tidak ditampilkan).
@@ -433,6 +434,70 @@ async function selesaikanBayarHutang(env, chatId, employee, { contactId, nominal
 }
 
 // ---------------------------------------------------------------------------
+// MUTASI ANTAR AKUN — pindah saldo antar dompet lewat bot (mis. setor tunai
+// dari Kas ke Bank). Alur: pilih akun asal (tombol) -> pilih akun tujuan
+// (tombol, akun asal disembunyikan dari daftar) -> ketik nominal (teks) ->
+// langsung dieksekusi. Logikanya SAMA PERSIS dengan POST /api/transactions
+// type='mutation' di index.js (dan endpoint mini app di miniapp.js), supaya
+// saldo & riwayat konsisten di semua jalur. Terbuka untuk semua role, sama
+// seperti di web (beda dari Deposit portalpulsa yang dibatasi admin).
+// ---------------------------------------------------------------------------
+
+async function renderMutasiWalletPicker(env, { purpose, excludeId, callbackPrefix }) {
+  const { results: wallets } = await env.DB.prepare(
+    "SELECT id, name FROM wallets WHERE type != 'distributor_ppob' ORDER BY id"
+  ).all();
+  const filtered = excludeId ? wallets.filter((w) => w.id !== excludeId) : wallets;
+  if (!filtered.length) {
+    return {
+      text: "⚠️ Belum ada dompet (Tunai/Bank/E-Wallet) yang bisa dipilih. Tambahkan dulu lewat halaman Akun di web.",
+      reply_markup: { inline_keyboard: [[{ text: "🏠 Menu Utama", callback_data: "m:main" }]] },
+    };
+  }
+  return {
+    text: purpose,
+    reply_markup: {
+      inline_keyboard: [
+        ...filtered.map((w) => [{ text: `👛 ${w.name}`, callback_data: `${callbackPrefix}${w.id}` }]),
+        [{ text: "❌ Batal", callback_data: "m:main" }],
+      ],
+    },
+  };
+}
+
+// Eksekusi akhir mutasi: kurangi saldo akun asal, tambah saldo akun tujuan,
+// catat satu baris di transactions (type='mutation') supaya tampil juga di
+// halaman Mutasi Akun & Laporan web.
+async function eksekusiMutasi(env, chatId, employee, { fromWalletId, toWalletId, nominal }) {
+  const wallet = await env.DB.prepare("SELECT * FROM wallets WHERE id = ?").bind(fromWalletId).first();
+  if (!wallet) throw new Error("Akun asal tidak ditemukan");
+  if (wallet.balance < nominal) {
+    throw new Error(`Saldo "${wallet.name}" tidak cukup (saldo ${rupiah(wallet.balance)}, butuh ${rupiah(nominal)})`);
+  }
+  const toWallet = await env.DB.prepare("SELECT * FROM wallets WHERE id = ?").bind(toWalletId).first();
+  if (!toWallet) throw new Error("Akun tujuan tidak ditemukan");
+
+  const shift = await env.DB.prepare("SELECT id FROM shifts WHERE employee_id = ? AND status = 'open'")
+    .bind(employee.id)
+    .first();
+
+  await env.DB.prepare(
+    `INSERT INTO transactions (type, wallet_id, to_wallet_id, amount, cost_total, note, employee_id, shift_id)
+     VALUES ('mutation', ?, ?, ?, 0, ?, ?, ?)`
+  )
+    .bind(fromWalletId, toWalletId, nominal, "Dicatat via bot Telegram", employee.id, shift ? shift.id : null)
+    .run();
+  await env.DB.prepare("UPDATE wallets SET balance = balance - ? WHERE id = ?").bind(nominal, fromWalletId).run();
+  await env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?").bind(nominal, toWalletId).run();
+
+  await clearSession(env, chatId);
+  return {
+    text: `✅ Berhasil pindahkan ${rupiah(nominal)} dari *${wallet.name}* ke *${toWallet.name}*.`,
+    reply_markup: { inline_keyboard: [[{ text: "🏠 Menu Utama", callback_data: "m:main" }]] },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // ROUTER: tombol ditekan (callback_query)
 // ---------------------------------------------------------------------------
 
@@ -597,6 +662,35 @@ export async function handleAdminCallback(env, callbackQuery) {
         text: "Ketik nama bank tujuan deposit (mis. BCA):",
         reply_markup: { inline_keyboard: [[{ text: "❌ Batal", callback_data: "m:main" }]] },
       };
+    } else if (ns === "mut" && action === "start") {
+      await clearSession(env, chatId);
+      payload = await renderMutasiWalletPicker(env, {
+        purpose: "🔁 *Mutasi Antar Akun*\n\nDari akun mana?",
+        callbackPrefix: "mut:from:",
+      });
+    } else if (ns === "mut" && action === "from") {
+      const fromWalletId = Number(arg);
+      await setSession(env, chatId, "awaiting_mutasi_to", { fromWalletId });
+      payload = await renderMutasiWalletPicker(env, {
+        purpose: "Ke akun mana?",
+        excludeId: fromWalletId,
+        callbackPrefix: "mut:to:",
+      });
+    } else if (ns === "mut" && action === "to") {
+      const session = await getSession(env, chatId);
+      if (!session || session.state !== "awaiting_mutasi_to") {
+        throw new Error("Sesi mutasi sudah kedaluwarsa. Mulai lagi dari menu Mutasi Antar Akun.");
+      }
+      const { fromWalletId } = session.data;
+      const toWalletId = Number(arg);
+      if (toWalletId === fromWalletId) {
+        throw new Error("Akun asal dan akun tujuan tidak boleh sama.");
+      }
+      await setSession(env, chatId, "awaiting_mutasi_nominal", { fromWalletId, toWalletId });
+      payload = {
+        text: "Ketik nominal yang mau dipindahkan (mis. 500000):",
+        reply_markup: { inline_keyboard: [[{ text: "❌ Batal", callback_data: "m:main" }]] },
+      };
     } else {
       payload = { text: "Perintah tidak dikenal.", reply_markup: mainMenuKeyboard(env, employee) };
     }
@@ -704,6 +798,28 @@ export async function handleAdminSessionMessage(env, chatId, text) {
       await sendTelegramMessage(token, chatId, `Balasan portalpulsa:\n${reply}`, { reply_markup: mainMenuKeyboard(env, employee) });
     } catch (err) {
       await sendTelegramMessage(token, chatId, `Gagal kirim deposit: ${err.message}`, { reply_markup: mainMenuKeyboard(env, employee) });
+    }
+    return true;
+  }
+
+  if (session.state === "awaiting_mutasi_to") {
+    await sendTelegramMessage(token, chatId, "Silakan pilih akun tujuan lewat tombol di atas, atau kirim /menu untuk batal.");
+    return true;
+  }
+
+  if (session.state === "awaiting_mutasi_nominal") {
+    const { fromWalletId, toWalletId } = session.data;
+    if (!nominal || nominal <= 0) {
+      await sendTelegramMessage(token, chatId, "Nominal tidak valid. Kirim angka saja, mis. 500000.");
+      return true;
+    }
+    const employee = await getEmployeeByChatId(env, chatId);
+    try {
+      const p = await eksekusiMutasi(env, chatId, employee, { fromWalletId, toWalletId, nominal });
+      await sendTelegramMessage(token, chatId, p.text, { reply_markup: p.reply_markup });
+    } catch (err) {
+      await clearSession(env, chatId);
+      await sendTelegramMessage(token, chatId, `⚠️ Gagal: ${err.message}`, { reply_markup: mainMenuKeyboard(env, employee) });
     }
     return true;
   }

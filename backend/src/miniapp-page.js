@@ -114,11 +114,13 @@ function render() {
       '<div class="tab' + (currentTab === "hutang" ? " active" : "") + '" data-tab="hutang">💳 Hutang</div>' +
       '<div class="tab' + (currentTab === "ppob" ? " active" : "") + '" data-tab="ppob">📱 PPOB</div>' +
       '<div class="tab' + (currentTab === "katalog" ? " active" : "") + '" data-tab="katalog">📋 Katalog</div>' +
+      '<div class="tab' + (currentTab === "mutasi" ? " active" : "") + '" data-tab="mutasi">🔁 Mutasi</div>' +
     '</div>' +
     '<div id="tabBody"></div>';
   app.querySelectorAll(".tab").forEach((el) => el.addEventListener("click", () => { currentTab = el.dataset.tab; render(); }));
   if (currentTab === "hutang") renderHutangTab();
   else if (currentTab === "ppob") renderPpobTab();
+  else if (currentTab === "mutasi") renderMutasiTab();
   else renderKatalogTab();
 }
 
@@ -498,6 +500,88 @@ async function loadDepositHistory() {
             '<div class="row"><b>' + esc(d.bank) + '</b><span class="badge">' + rupiah(d.nominal) + '</span></div>' +
             '<div class="muted">' + esc(d.employee_name || "?") + ' · ' + esc(d.created_at) + '</div>' +
             '<div class="muted" style="white-space:pre-wrap;margin-top:4px">' + esc(d.raw_reply || "") + '</div>' +
+          '</div>'
+        ).join("");
+  } catch (err) {
+    el.innerHTML = '<div class="error">' + esc(err.message) + '</div>';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// TAB MUTASI ANTAR AKUN — pindah saldo antar dompet (mis. setor tunai dari
+// Kas ke Bank). Terbuka untuk semua role, sama seperti halaman /mutasi di
+// dashboard web. Endpoint backend: POST/GET /api/miniapp/mutasi (miniapp.js),
+// logikanya sama persis dgn POST /api/transactions type='mutation'.
+// ---------------------------------------------------------------------------
+function renderMutasiTab() {
+  const body = document.getElementById("tabBody");
+  body.innerHTML =
+    '<div class="card"><div class="spinner">Memuat dompet...</div></div>';
+  loadMutasiForm();
+}
+
+async function loadMutasiForm() {
+  const body = document.getElementById("tabBody");
+  let wallets = [];
+  try {
+    wallets = await api("/wallets");
+  } catch (err) {
+    body.innerHTML = '<div class="card"><div class="error">' + esc(err.message) + '</div></div>';
+    return;
+  }
+  const walletOpts = wallets.map((w) => '<option value="' + w.id + '">' + esc(w.name) + '</option>').join("");
+
+  body.innerHTML =
+    '<div class="card">' +
+      '<h2>Mutasi Antar Akun</h2>' +
+      '<p class="muted">Pindahkan saldo antar akun/dompet, mis. setor tunai dari Kas ke Bank.</p>' +
+      '<label>Dari akun</label><select id="mutFrom"><option value="">Pilih akun...</option>' + walletOpts + '</select>' +
+      '<label>Ke akun</label><select id="mutTo"><option value="">Pilih akun...</option>' + walletOpts + '</select>' +
+      '<label>Nominal (Rp)</label><input id="mutAmount" type="number" min="1" inputmode="numeric" placeholder="mis. 500000" />' +
+      '<label>Catatan (opsional)</label><input id="mutNote" placeholder="mis. Setor ke bank hari ini" />' +
+      '<div id="mutMsg"></div>' +
+      '<button class="btn" id="submitMutasi">Pindahkan Saldo</button>' +
+    '</div>' +
+    '<div class="card"><div class="section-title">Riwayat Mutasi Terakhir</div><div id="mutHistory" class="spinner">Memuat...</div></div>';
+
+  document.getElementById("submitMutasi").addEventListener("click", async () => {
+    const walletId = Number(document.getElementById("mutFrom").value);
+    const toWalletId = Number(document.getElementById("mutTo").value);
+    const amount = Number(document.getElementById("mutAmount").value);
+    const note = document.getElementById("mutNote").value.trim();
+    const msgEl = document.getElementById("mutMsg");
+    if (!walletId || !toWalletId) { msgEl.innerHTML = '<div class="error">Pilih akun asal dan akun tujuan dulu</div>'; return; }
+    if (walletId === toWalletId) { msgEl.innerHTML = '<div class="error">Akun asal dan akun tujuan tidak boleh sama</div>'; return; }
+    if (!amount || amount <= 0) { msgEl.innerHTML = '<div class="error">Isi nominal mutasi dulu</div>'; return; }
+    msgEl.innerHTML = '<div class="spinner">Menyimpan...</div>';
+    try {
+      const result = await api("/mutasi", { method: "POST", body: JSON.stringify({ walletId, toWalletId, amount, note }) });
+      haptic("ok");
+      msgEl.innerHTML = '<div class="success">Berhasil pindahkan ' + rupiah(result.amount) + ' dari ' + esc(result.fromWallet) + ' ke ' + esc(result.toWallet) + '.</div>';
+      document.getElementById("mutAmount").value = "";
+      document.getElementById("mutNote").value = "";
+      loadMutasiHistory();
+    } catch (err) {
+      haptic("err");
+      msgEl.innerHTML = '<div class="error">' + esc(err.message) + '</div>';
+    }
+  });
+
+  loadMutasiHistory();
+}
+
+async function loadMutasiHistory() {
+  const el = document.getElementById("mutHistory");
+  if (!el) return;
+  try {
+    const rows = await api("/mutasi");
+    el.innerHTML = !rows.length
+      ? '<p class="muted">Belum ada mutasi antar akun.</p>'
+      : rows.map((m) =>
+          '<div class="list-item">' +
+            '<div class="row"><b>' + esc(m.from_wallet_name || "?") + ' → ' + esc(m.to_wallet_name || "?") + '</b><span class="badge">' + rupiah(m.amount) + '</span></div>' +
+            '<div class="muted">' + esc(m.employee_name || "?") + ' · ' + new Date(m.date).toLocaleString("id-ID") + '</div>' +
+            (m.note ? '<div class="muted" style="margin-top:4px">' + esc(m.note) + '</div>' : "") +
           '</div>'
         ).join("");
   } catch (err) {

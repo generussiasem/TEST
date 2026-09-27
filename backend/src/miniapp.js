@@ -280,4 +280,76 @@ miniapp.get("/portalpulsa/deposits", async (c) => {
   return c.json(rows.results);
 });
 
+// ---------------------------------------------------------------------------
+// MUTASI ANTAR AKUN — pindah saldo antar dompet (mis. setor tunai Kas -> Bank).
+// Logikanya SAMA PERSIS dengan POST /api/transactions type='mutation' di
+// dashboard web (index.js): dompet asal berkurang, dompet tujuan bertambah,
+// dicatat sebagai satu baris transactions supaya muncul juga di halaman
+// Mutasi Akun & Laporan web. Terbuka untuk semua role (bukan cuma admin),
+// sama seperti di web. Dompet dipilih dari GET /wallets yang sudah ada
+// (tipe distributor_ppob sengaja tidak ikut, sama seperti hutang/titip).
+// ---------------------------------------------------------------------------
+miniapp.post("/mutasi", async (c) => {
+  const employee = c.get("employee");
+  const { walletId, toWalletId, amount, note } = await c.req.json();
+  if (!walletId || !toWalletId) {
+    return c.json({ ok: false, error: "Akun asal dan akun tujuan wajib dipilih" }, 400);
+  }
+  if (walletId === toWalletId) {
+    return c.json({ ok: false, error: "Akun asal dan akun tujuan tidak boleh sama" }, 400);
+  }
+  const mutasiTotal = Number(amount) || 0;
+  if (mutasiTotal <= 0) {
+    return c.json({ ok: false, error: "Nominal mutasi harus lebih dari 0" }, 400);
+  }
+  const wallet = await c.env.DB.prepare("SELECT * FROM wallets WHERE id = ?").bind(walletId).first();
+  if (!wallet) return c.json({ ok: false, error: "Akun asal tidak ditemukan" }, 404);
+  if (wallet.balance < mutasiTotal) {
+    return c.json(
+      { ok: false, error: `Saldo "${wallet.name}" tidak cukup (saldo Rp${wallet.balance.toLocaleString("id-ID")}, butuh Rp${mutasiTotal.toLocaleString("id-ID")})` },
+      400
+    );
+  }
+  const toWallet = await c.env.DB.prepare("SELECT * FROM wallets WHERE id = ?").bind(toWalletId).first();
+  if (!toWallet) return c.json({ ok: false, error: "Akun tujuan tidak ditemukan" }, 404);
+
+  const noteFinal = note ? `${note} (via mini app oleh ${employee.name})` : `via mini app oleh ${employee.name}`;
+  const shift = await c.env.DB.prepare("SELECT id FROM shifts WHERE employee_id = ? AND status = 'open'")
+    .bind(employee.employeeId)
+    .first();
+
+  const insertResult = await c.env.DB.prepare(
+    `INSERT INTO transactions (type, wallet_id, to_wallet_id, amount, cost_total, note, employee_id, shift_id)
+     VALUES ('mutation', ?, ?, ?, 0, ?, ?, ?)`
+  )
+    .bind(walletId, toWalletId, mutasiTotal, noteFinal, employee.employeeId, shift ? shift.id : null)
+    .run();
+  await c.env.DB.prepare("UPDATE wallets SET balance = balance - ? WHERE id = ?").bind(mutasiTotal, walletId).run();
+  await c.env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?").bind(mutasiTotal, toWalletId).run();
+
+  return c.json({
+    ok: true,
+    transactionId: insertResult.meta.last_row_id,
+    amount: mutasiTotal,
+    fromWallet: wallet.name,
+    toWallet: toWallet.name,
+  });
+});
+
+// Riwayat mutasi terakhir (dipakai tab Mutasi mini app, sama data-nya dgn
+// halaman web /mutasi tapi dibatasi 20 baris terakhir).
+miniapp.get("/mutasi", async (c) => {
+  const { results } = await c.env.DB.prepare(
+    `SELECT t.id, t.date, t.amount, t.note, t.wallet_id, t.to_wallet_id,
+            w1.name AS from_wallet_name, w2.name AS to_wallet_name, e.name AS employee_name
+     FROM transactions t
+     LEFT JOIN wallets w1 ON w1.id = t.wallet_id
+     LEFT JOIN wallets w2 ON w2.id = t.to_wallet_id
+     LEFT JOIN employees e ON e.id = t.employee_id
+     WHERE t.type = 'mutation'
+     ORDER BY t.id DESC LIMIT 20`
+  ).all();
+  return c.json(results);
+});
+
 export default miniapp;
