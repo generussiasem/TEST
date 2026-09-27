@@ -699,7 +699,7 @@ export async function handleAdminSessionMessage(env, chatId, text) {
       await env.DB.prepare(
         "INSERT INTO portalpulsa_deposits (bank, nominal, raw_reply, employee_id) VALUES (?, ?, ?, ?)"
       )
-        .bind(bank, nominal, reply, employee ? employee.employeeId : null)
+        .bind(bank, nominal, reply, employee ? employee.id : null)
         .run();
       await sendTelegramMessage(token, chatId, `Balasan portalpulsa:\n${reply}`, { reply_markup: mainMenuKeyboard(env, employee) });
     } catch (err) {
