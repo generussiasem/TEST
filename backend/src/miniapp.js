@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { verifyTelegramInitData } from "./telegram-miniapp-auth.js";
-import { placePpobOrder, cekTagihan, finalizePpobOrder } from "./ppob.js";
+import { placePpobOrder, cekTagihan, finalizePpobOrder, getProviderConfig, assertCfgComplete } from "./ppob.js";
+import { sendJabberCommand } from "./jabber.js";
 import { DebtError, bayarHutang, titipUang, catatHutangManual } from "./debt.js";
 
 // ---------------------------------------------------------------------------
@@ -189,13 +190,16 @@ miniapp.post("/ppob/cek", async (c) => {
 // di dashboard web (fungsi placePpobOrder yang sama), cuma jalur masuknya lewat
 // Telegram Mini App. paidMethod "utang" wajib sertakan contactId.
 miniapp.post("/ppob/order", async (c) => {
-  const { productCode, target, paidMethod, contactId } = await c.req.json();
+  const { productCode, target, paidMethod, contactId, newProductProvider } = await c.req.json();
   if (!productCode || !target) return c.json({ ok: false, error: "productCode dan target wajib diisi" }, 400);
   const employee = c.get("employee");
   try {
     // telegramChatId = chat karyawan ini sendiri, supaya kalau balasan provider
     // telat (Mini App sudah berhenti polling), cron tetap bisa mengabari balik.
-    const result = await placePpobOrder(c.env, { productCode, target, paidMethod, contactId, telegramChatId: employee.telegramId });
+    // newProductProvider: dikirim frontend HANYA utk kode baru yg belum ada di
+    // katalog (form manual portalpulsa) — diabaikan backend kalau kode sudah
+    // dikenal (lihat placePpobOrder di ppob.js).
+    const result = await placePpobOrder(c.env, { productCode, target, paidMethod, contactId, telegramChatId: employee.telegramId, newProductProvider });
     return c.json({ ok: true, ...result });
   } catch (err) {
     return c.json({ ok: false, error: err.message }, 400);
@@ -221,6 +225,59 @@ miniapp.post("/ppob-orders/:refId/konfirmasi", async (c) => {
   } catch (err) {
     return c.json({ ok: false, error: err.message }, 400);
   }
+});
+
+// ---------------------------------------------------------------------------
+// DEPOSIT SALDO PORTALPULSA — kirim perintah "D BANK NOMINAL PIN" langsung ke
+// provider (PIN otomatis dari secret PORTALPULSA_PIN, tidak diketik manual).
+// Balasannya instruksi transfer manual (nominal+kode unik, bank, no rekening)
+// — BUKAN topup otomatis. Jalur & tabel riwayat SAMA PERSIS dengan endpoint
+// web /api/admin/portalpulsa/deposit (index.js) & command Telegram /deposit,
+// supaya riwayatnya satu tempat terlepas dari mana dikirimnya. Dibatasi role
+// admin (bukan kasir biasa) — konsisten dengan pembatasan di web & bot.
+// ---------------------------------------------------------------------------
+miniapp.post("/portalpulsa/deposit", async (c) => {
+  const employee = c.get("employee");
+  if (employee.role !== "admin") {
+    return c.json({ ok: false, error: "Cuma admin yang boleh kirim deposit portalpulsa." }, 403);
+  }
+  const { bank, nominal } = await c.req.json();
+  if (!bank || !nominal) {
+    return c.json({ ok: false, error: "bank dan nominal wajib diisi" }, 400);
+  }
+  try {
+    const cfg = getProviderConfig(c.env, "portalpulsa");
+    assertCfgComplete(cfg);
+    const body = `D ${bank} ${nominal} ${cfg.pin}`;
+    // Deposit 2 tahap (ack dulu, baru instruksi transfer beneran) — lihat
+    // catatan panjang di endpoint web ttg firstReplyIsFinal & kata kunci
+    // "transfer" di FINAL_REPLY_KEYWORDS (jabber.js).
+    const reply = await sendJabberCommand({
+      jid: cfg.jid,
+      password: cfg.password,
+      to: cfg.target,
+      body,
+      refSeparator: cfg.separator,
+      acceptAnyFromTarget: true,
+    });
+    await c.env.DB.prepare(
+      "INSERT INTO portalpulsa_deposits (bank, nominal, raw_reply, employee_id) VALUES (?, ?, ?, ?)"
+    )
+      .bind(bank, nominal, reply, employee.employeeId)
+      .run();
+    return c.json({ ok: true, reply });
+  } catch (err) {
+    return c.json({ ok: false, error: err.message }, 500);
+  }
+});
+
+miniapp.get("/portalpulsa/deposits", async (c) => {
+  const rows = await c.env.DB.prepare(
+    `SELECT d.*, e.name AS employee_name FROM portalpulsa_deposits d
+     LEFT JOIN employees e ON e.id = d.employee_id
+     ORDER BY d.id DESC LIMIT 20`
+  ).all();
+  return c.json(rows.results);
 });
 
 export default miniapp;

@@ -320,10 +320,27 @@ function renderPpobTab() {
       '<label>Cari produk (nama/kode)</label>' +
       '<input id="ppobSearch" placeholder="mis. TSEL5, token, PDAM..." />' +
       '<div id="ppobList" class="spinner">Ketik untuk mencari produk...</div>' +
-    '</div>';
+    '</div>' +
+    '<div class="card">' +
+      '<div class="muted" style="margin-bottom:8px">Kode portalpulsa tidak ikut katalog di atas — kalau kodenya belum pernah dipakai, isi manual di sini:</div>' +
+      '<button class="btn secondary" id="manualPortalpulsaBtn">🆕 Kode Manual (portalpulsa)</button>' +
+    '</div>' +
+    // Deposit menyangkut saldo & rekening — dibatasi role admin, sama seperti
+    // di dashboard web (Pengaturan) & command Telegram /deposit (index.js).
+    // Kasir biasa tidak melihat tombol ini sama sekali (endpoint backend-nya
+    // juga tetap menolak kalau dipaksa panggil langsung, lihat miniapp.js).
+    (ME.employee.role === "admin"
+      ? '<div class="card">' +
+          '<div class="muted" style="margin-bottom:8px">Isi ulang saldo distributor portalpulsa:</div>' +
+          '<button class="btn secondary" id="depositPortalpulsaBtn">💰 Deposit portalpulsa</button>' +
+        '</div>'
+      : "");
   const searchInput = document.getElementById("ppobSearch");
   let timer;
   searchInput.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => loadProducts(searchInput.value), 300); });
+  document.getElementById("manualPortalpulsaBtn").addEventListener("click", () => showManualPortalpulsaForm());
+  const depositBtn = document.getElementById("depositPortalpulsaBtn");
+  if (depositBtn) depositBtn.addEventListener("click", () => showDepositPortalpulsaForm());
   loadProducts("");
 }
 
@@ -342,6 +359,149 @@ async function loadProducts(q) {
     listEl.querySelectorAll(".list-item").forEach((el) => el.addEventListener("click", () => showOrderForm(rows.find((r) => r.code === el.dataset.code))));
   } catch (err) {
     listEl.innerHTML = '<div class="error">' + esc(err.message) + '</div>';
+  }
+}
+
+// Form khusus portalpulsa: kode diketik manual (tidak ada di katalog) + nomor
+// HP tujuan. PIN TIDAK diminta di sini — selalu diambil backend dari secret
+// PORTALPULSA_PIN (lihat getProviderConfig di ppob.js), sama seperti jalur
+// bot & endpoint deposit yang sudah ada. Order dikirim dgn
+// newProductProvider: "portalpulsa" supaya kode baru diprovisi otomatis
+// (lihat placePpobOrder) alih-alih ditolak "tidak ditemukan".
+function showManualPortalpulsaForm() {
+  const body = document.getElementById("tabBody");
+  body.innerHTML =
+    '<span class="back-link" id="backLink">&larr; Kembali</span>' +
+    '<div class="card">' +
+      '<h2>Kode Manual (portalpulsa)</h2>' +
+      '<p class="muted">PIN otomatis dari pengaturan toko — tidak perlu diketik.</p>' +
+      '<label>Kode Produk</label>' +
+      '<input id="manualCodeInput" placeholder="mis. S5" style="text-transform:uppercase" />' +
+      '<label>Nomor HP Tujuan</label>' +
+      '<input id="manualTargetInput" placeholder="mis. 0812xxxxxxxx" inputmode="numeric" />' +
+      '<label>Metode Bayar</label>' +
+      '<div class="pill-row">' +
+        '<div class="pill active" data-method="tunai">Tunai</div>' +
+        '<div class="pill" data-method="utang">Utang</div>' +
+      '</div>' +
+      '<div id="manualContactPickerWrap" class="hidden">' +
+        '<label>Pilih Pelanggan (yang berhutang)</label>' +
+        '<input id="manualContactSearch" placeholder="Cari nama pelanggan..." />' +
+        '<div id="manualContactList"></div>' +
+        '<div id="manualContactSelected" class="muted"></div>' +
+      '</div>' +
+      '<div id="manualOrderMsg"></div>' +
+      '<button class="btn" id="submitManualOrder">Proses Order</button>' +
+    '</div>';
+
+  let paidMethod = "tunai";
+  let selectedContactId = null;
+  document.getElementById("backLink").addEventListener("click", renderPpobTab);
+
+  body.querySelectorAll(".pill").forEach((el) => el.addEventListener("click", () => {
+    paidMethod = el.dataset.method;
+    body.querySelectorAll(".pill").forEach((p) => p.classList.toggle("active", p === el));
+    document.getElementById("manualContactPickerWrap").classList.toggle("hidden", paidMethod !== "utang");
+  }));
+
+  let ctimer;
+  const mcSearch = document.getElementById("manualContactSearch");
+  mcSearch.addEventListener("input", () => {
+    clearTimeout(ctimer);
+    ctimer = setTimeout(async () => {
+      const listEl = document.getElementById("manualContactList");
+      try {
+        const rows = await api("/contacts?q=" + encodeURIComponent(mcSearch.value));
+        listEl.innerHTML = rows.map((c) => '<div class="list-item" data-id="' + c.id + '" data-name="' + esc(c.name) + '">' + esc(c.name) + (c.phone ? " (" + esc(c.phone) + ")" : "") + '</div>').join("");
+        listEl.querySelectorAll(".list-item").forEach((el) => el.addEventListener("click", () => {
+          selectedContactId = el.dataset.id;
+          document.getElementById("manualContactSelected").textContent = "Terpilih: " + el.dataset.name;
+          listEl.innerHTML = "";
+          mcSearch.value = "";
+        }));
+      } catch (err) { /* diamkan, bukan alur kritis */ }
+    }, 300);
+  });
+
+  document.getElementById("submitManualOrder").addEventListener("click", async () => {
+    const code = document.getElementById("manualCodeInput").value.trim().toUpperCase();
+    const target = document.getElementById("manualTargetInput").value.trim();
+    const msgEl = document.getElementById("manualOrderMsg");
+    if (!code) { msgEl.innerHTML = '<div class="error">Kode produk wajib diisi</div>'; return; }
+    if (!target) { msgEl.innerHTML = '<div class="error">Nomor tujuan wajib diisi</div>'; return; }
+    if (paidMethod === "utang" && !selectedContactId) { msgEl.innerHTML = '<div class="error">Pilih pelanggan dulu untuk pembayaran Utang</div>'; return; }
+    msgEl.innerHTML = '<div class="spinner">Mengirim order ke provider...</div>';
+    try {
+      const result = await api("/ppob/order", { method: "POST", body: JSON.stringify({ productCode: code, target, paidMethod, contactId: selectedContactId, newProductProvider: "portalpulsa" }) });
+      haptic("ok");
+      showOrderStatus(result.refId, { code, name: code, sell_price: 0 });
+    } catch (err) {
+      haptic("err");
+      msgEl.innerHTML = '<div class="error">' + esc(err.message) + '</div>';
+    }
+  });
+}
+
+// Form Deposit portalpulsa (khusus admin — tombolnya sudah disembunyikan di
+// renderPpobTab utk role kasir, tapi endpoint backend TETAP menolak sendiri
+// kalau ini dipanggil paksa, jadi fungsi ini aman dipanggil dari mana saja).
+// Sama seperti Deposit di dashboard web (Pengaturan.vue): kirim "D BANK
+// NOMINAL PIN" (PIN otomatis dari secret), balasannya instruksi transfer
+// manual — BUKAN topup otomatis. Riwayat 20 terakhir ditampilkan di bawah
+// form, dari tabel portalpulsa_deposits yang sama dgn jalur web & bot.
+function showDepositPortalpulsaForm() {
+  const body = document.getElementById("tabBody");
+  body.innerHTML =
+    '<span class="back-link" id="backLink">&larr; Kembali</span>' +
+    '<div class="card">' +
+      '<h2>Deposit portalpulsa</h2>' +
+      '<p class="muted">PIN otomatis dari pengaturan toko. Balasannya berupa instruksi transfer manual (nominal+kode unik, bank, no rekening) — tetap transfer manual sesuai instruksi setelah ini.</p>' +
+      '<label>Bank</label>' +
+      '<input id="depBank" placeholder="mis. BCA" style="text-transform:uppercase" />' +
+      '<label>Nominal (Rp)</label>' +
+      '<input id="depNominal" type="number" min="1" placeholder="mis. 500000" />' +
+      '<div id="depMsg"></div>' +
+      '<button class="btn" id="submitDeposit">Kirim Deposit</button>' +
+    '</div>' +
+    '<div class="card"><div class="section-title">Riwayat Deposit Terakhir</div><div id="depHistory" class="spinner">Memuat...</div></div>';
+  document.getElementById("backLink").addEventListener("click", renderPpobTab);
+
+  document.getElementById("submitDeposit").addEventListener("click", async () => {
+    const bank = document.getElementById("depBank").value.trim();
+    const nominal = Number(document.getElementById("depNominal").value);
+    const msgEl = document.getElementById("depMsg");
+    if (!bank || !nominal) { msgEl.innerHTML = '<div class="error">Bank dan nominal wajib diisi</div>'; return; }
+    msgEl.innerHTML = '<div class="spinner">Mengirim ke provider...</div>';
+    try {
+      const result = await api("/portalpulsa/deposit", { method: "POST", body: JSON.stringify({ bank, nominal }) });
+      haptic("ok");
+      msgEl.innerHTML = '<div class="success" style="white-space:pre-wrap">' + esc(result.reply) + '</div>';
+      loadDepositHistory();
+    } catch (err) {
+      haptic("err");
+      msgEl.innerHTML = '<div class="error">' + esc(err.message) + '</div>';
+    }
+  });
+
+  loadDepositHistory();
+}
+
+async function loadDepositHistory() {
+  const el = document.getElementById("depHistory");
+  if (!el) return;
+  try {
+    const rows = await api("/portalpulsa/deposits");
+    el.innerHTML = !rows.length
+      ? '<p class="muted">Belum ada riwayat.</p>'
+      : rows.map((d) =>
+          '<div class="list-item">' +
+            '<div class="row"><b>' + esc(d.bank) + '</b><span class="badge">' + rupiah(d.nominal) + '</span></div>' +
+            '<div class="muted">' + esc(d.employee_name || "?") + ' · ' + esc(d.created_at) + '</div>' +
+            '<div class="muted" style="white-space:pre-wrap;margin-top:4px">' + esc(d.raw_reply || "") + '</div>' +
+          '</div>'
+        ).join("");
+  } catch (err) {
+    el.innerHTML = '<div class="error">' + esc(err.message) + '</div>';
   }
 }
 

@@ -1,5 +1,6 @@
 import { sendTelegramMessage, editTelegramMessage, answerCallbackQuery } from "./telegram.js";
-import { finalizePpobOrder, placePpobOrder } from "./ppob.js";
+import { finalizePpobOrder, placePpobOrder, usesDynamicCost, parseTagihanListrikDetail, parsePortalpulsaDetail, getProviderConfig, assertCfgComplete } from "./ppob.js";
+import { sendJabberCommand } from "./jabber.js";
 import { bayarHutang } from "./debt.js";
 
 // ---------------------------------------------------------------------------
@@ -88,21 +89,28 @@ export async function handleLinkCommand(env, chatId, text) {
 // sebagai Telegram Mini App penuh (bukan cuma pesan tombol biasa) — di situ
 // karyawan bisa catat/bayar hutang & transaksi PPOB dengan UI form, bukan
 // cuma alur "kirim nominal" lewat chat seperti menu di bawah ini.
-function mainMenuKeyboard(env) {
+function mainMenuKeyboard(env, employee) {
   const rows = [];
   if (env?.MINIAPP_URL) {
     rows.push([{ text: "🧮 Buka Mini App Kasir", web_app: { url: env.MINIAPP_URL } }]);
   }
   rows.push([{ text: "📋 Cek Hutang Pelanggan", callback_data: "h:l:0" }]);
-  rows.push([{ text: "🛍️ Transaksi PPOB (Katalog)", callback_data: "b:cari:0" }]);
+  rows.push([{ text: "🗂️ Katalog PPOB", callback_data: "k:kat" }]);
+  rows.push([{ text: "🔎 Transaksi PPOB (cari cepat)", callback_data: "b:cari:0" }]);
   rows.push([{ text: "🧾 Konfirmasi Order PPOB", callback_data: "p:l:0" }]);
   rows.push([{ text: "💳 Saldo Distributor", callback_data: "m:saldo" }]);
+  // Deposit menyangkut saldo & rekening — dibatasi role admin, sama seperti
+  // di web (Pengaturan) & Mini App. employee bisa undefined di beberapa
+  // titik panggil lama (aman: fallback ke tidak ditampilkan).
+  if (employee?.role === "admin") {
+    rows.push([{ text: "💰 Deposit portalpulsa", callback_data: "dep:start" }]);
+  }
   return { inline_keyboard: rows };
 }
 
 export async function sendMainMenu(env, chatId, employee) {
   await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `Halo, *${employee.name}*! 👋\nMau kelola apa hari ini?`, {
-    reply_markup: mainMenuKeyboard(env),
+    reply_markup: mainMenuKeyboard(env, employee),
   });
 }
 
@@ -155,6 +163,109 @@ async function renderHutangDetail(env, contactId) {
     [{ text: "🔙 Kembali ke Daftar", callback_data: "h:l:0" }],
   ];
   return { text, reply_markup: { inline_keyboard: keyboard } };
+}
+
+// ---------------------------------------------------------------------------
+// KATALOG PPOB — GRID KATEGORI (ala tampilan OrderKuota: kotak ikon per
+// kategori -> kotak provider dalam kategori itu -> daftar harga -> pilih item
+// lanjut ke alur target/metode bayar yang SAMA dgn pencarian teks di bawah
+// (reuse pilihProdukPpob). Bedanya cuma cara nemuin kode produknya — Telegram
+// tidak punya grid visual asli, jadi didekati dgn tombol 2 per baris.
+//
+// Cuma nampilin produk yg category-nya TERISI (katalog OkeConnect hasil
+// sync) — portalpulsa sengaja NUL category-nya (lihat placePpobOrder di
+// ppob.js), jadi tidak akan pernah muncul di grid ini; itu tetap lewat jalur
+// "cari cepat" -> tombol kode manual.
+//
+// Ikon per kategori DISALIN dari KATEGORI_ICON di miniapp-page.js — kalau
+// salah satu diubah, ubah juga yang satunya biar konsisten.
+// ---------------------------------------------------------------------------
+const KATALOG_PAGE_SIZE = 8;
+const KATEGORI_ICON = [
+  [/pulsa/i, "📱"],
+  [/kuota|internet|data/i, "📶"],
+  [/token|listrik|pln/i, "⚡"],
+  [/tagihan|pdam|air|bpjs|tv kabel|multifinance/i, "🧾"],
+  [/e-?wallet|saldo|dompet/i, "💳"],
+  [/voucher|game|top ?up game/i, "🎮"],
+  [/sms|telp/i, "☎️"],
+];
+function iconUntukKategori(kategori) {
+  const found = KATEGORI_ICON.find(([re]) => re.test(kategori || ""));
+  return found ? found[1] : "🛒";
+}
+// Susun array jadi baris isi 2 tombol, biar mirip kesan grid tanpa bikin
+// teks tombol kepotong (Telegram tidak muat 4 kolom dgn label kepanjangan).
+function baris2(items) {
+  const rows = [];
+  for (let i = 0; i < items.length; i += 2) rows.push(items.slice(i, i + 2));
+  return rows;
+}
+
+async function renderKatalogKategori(env) {
+  const { results } = await env.DB.prepare(
+    "SELECT DISTINCT category FROM products WHERE active = 1 AND category IS NOT NULL ORDER BY category"
+  ).all();
+  if (!results.length) {
+    return {
+      text: "Katalog masih kosong. Sinkron dulu dari dashboard web (tombol \"Sinkron Harga PPOB\").",
+      reply_markup: { inline_keyboard: [[{ text: "🏠 Menu Utama", callback_data: "m:main" }]] },
+    };
+  }
+  const tombol = results.map((r) => ({
+    text: `${iconUntukKategori(r.category)} ${r.category}`,
+    callback_data: `k:grp:${r.category}`,
+  }));
+  const keyboard = baris2(tombol);
+  keyboard.push([{ text: "🏠 Menu Utama", callback_data: "m:main" }]);
+  return { text: "*Katalog PPOB* — pilih kategori:", reply_markup: { inline_keyboard: keyboard } };
+}
+
+async function renderKatalogGrup(env, kategori) {
+  const { results } = await env.DB.prepare(
+    "SELECT DISTINCT product_group FROM products WHERE active = 1 AND category = ? AND product_group IS NOT NULL ORDER BY product_group"
+  )
+    .bind(kategori)
+    .all();
+  // Cuma 1 grup (atau tidak ada grup sama sekali di kategori ini) -> langsung
+  // daftar item, tidak usah nampilin grid provider isi 1 kotak doang.
+  if (results.length <= 1) return renderKatalogItem(env, kategori, null, 0);
+
+  const tombol = results.map((r) => ({
+    text: `${iconUntukKategori(r.product_group)} ${r.product_group}`,
+    callback_data: `k:itg:${kategori}|${r.product_group}|0`,
+  }));
+  const keyboard = baris2(tombol);
+  keyboard.push([{ text: "🔙 Kembali ke Kategori", callback_data: "k:kat" }]);
+  return { text: `*${kategori}* — pilih provider:`, reply_markup: { inline_keyboard: keyboard } };
+}
+
+async function renderKatalogItem(env, kategori, grup, page) {
+  const offset = page * KATALOG_PAGE_SIZE;
+  const where = grup ? "category = ? AND product_group = ?" : "category = ?";
+  const params = grup ? [kategori, grup] : [kategori];
+  const { results } = await env.DB.prepare(
+    `SELECT code, name, sell_price FROM products WHERE active = 1 AND ${where} ORDER BY sell_price ASC LIMIT ? OFFSET ?`
+  )
+    .bind(...params, KATALOG_PAGE_SIZE + 1, offset)
+    .all();
+  const hasMore = results.length > KATALOG_PAGE_SIZE;
+  const rows = results.slice(0, KATALOG_PAGE_SIZE);
+
+  const backCb = grup ? `k:grp:${kategori}` : "k:kat";
+  const keyboard = rows.map((p) => [{ text: `${p.name} — ${rupiah(p.sell_price)}`, callback_data: `b:pick:${p.code}` }]);
+  const navRow = [];
+  const pageArg = grup ? `k:itg:${kategori}|${grup}|` : `k:itk:${kategori}|`;
+  if (page > 0) navRow.push({ text: "⬅️ Sebelumnya", callback_data: `${pageArg}${page - 1}` });
+  if (hasMore) navRow.push({ text: "Berikutnya ➡️", callback_data: `${pageArg}${page + 1}` });
+  if (navRow.length) keyboard.push(navRow);
+  keyboard.push([{ text: "🔙 Kembali", callback_data: backCb }]);
+
+  const judul = grup ? `${kategori} — ${grup}` : kategori;
+  return {
+    text: rows.length ? `*${judul}*` : `Tidak ada produk di *${judul}*.`,
+    reply_markup: { inline_keyboard: keyboard },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -246,7 +357,25 @@ async function renderPpobConfirm(env, refId) {
   }
   const product = await env.DB.prepare("SELECT * FROM products WHERE code = ?").bind(order.product_code).first();
   const defaultPrice = order.sell_price || product?.sell_price || 0;
-  const text = `*${order.ref_id}*\n${order.product_code} → ${order.target}\nModal: ${rupiah(order.cost_price)}\nHarga jual saat ini: *${rupiah(defaultPrice)}*\n\nBalasan provider:\n${order.raw_reply || "-"}`;
+  // Modal produk pascabayar (tagihan/PDAM) & portalpulsa BARU DIKETAHUI dari
+  // balasan provider tiap transaksi — order.cost_price/product.cost_price
+  // TIDAK BOLEH ditampilkan mentah-mentah di sini, itu bukan modal riilnya
+  // (lihat parseTagihanListrikDetail/parsePortalpulsaDetail & usesDynamicCost
+  // di ppob.js — logika yang SAMA dipakai finalizePpobOrder saat mencatat,
+  // jadi apa yang tampil di sini konsisten dengan yang benar-benar tercatat).
+  let modalTampil = order.cost_price;
+  let modalCatatan = "";
+  if (product && usesDynamicCost(product)) {
+    const detail = product.provider === "portalpulsa" ? parsePortalpulsaDetail(order.raw_reply) : parseTagihanListrikDetail(order.raw_reply);
+    const modalRiil = product.provider === "portalpulsa" ? detail.hpp : detail.modalRiil;
+    if (modalRiil != null) {
+      modalTampil = modalRiil;
+    } else {
+      modalTampil = null;
+      modalCatatan = "\n⚠️ Modal tidak terdeteksi otomatis dari balasan provider — akan dicoba lagi saat dicatat, tapi cek dulu balasan mentahnya di bawah kalau meleset.";
+    }
+  }
+  const text = `*${order.ref_id}*\n${order.product_code} → ${order.target}\nModal: ${modalTampil != null ? rupiah(modalTampil) : "belum diketahui"}${modalCatatan}\nHarga jual saat ini: *${rupiah(defaultPrice)}*\n\nBalasan provider:\n${order.raw_reply || "-"}`;
   const keyboard = [
     [{ text: `✅ Pakai ${rupiah(defaultPrice)}`, callback_data: `p:ok:${refId}` }],
     [{ text: "✏️ Ubah Harga", callback_data: `p:edit:${refId}` }],
@@ -326,7 +455,7 @@ export async function handleAdminCallback(env, callbackQuery) {
   try {
     if (ns === "m" && action === "main") {
       await clearSession(env, chatId);
-      payload = { text: `Halo, *${employee.name}*! 👋\nMau kelola apa hari ini?`, reply_markup: mainMenuKeyboard(env) };
+      payload = { text: `Halo, *${employee.name}*! 👋\nMau kelola apa hari ini?`, reply_markup: mainMenuKeyboard(env, employee) };
     } else if (ns === "m" && action === "saldo") {
       const { results } = await env.DB.prepare("SELECT name, balance FROM wallets WHERE type = 'distributor_ppob'").all();
       const lines = results.map((w) => `${w.name}: ${rupiah(w.balance)}`);
@@ -413,6 +542,16 @@ export async function handleAdminCallback(env, callbackQuery) {
         text: `Kirim harga jual baru untuk *${arg}* (angka saja, mis. 12000):`,
         reply_markup: { inline_keyboard: [[{ text: "❌ Batal", callback_data: `p:s:${arg}` }]] },
       };
+    } else if (ns === "k" && action === "kat") {
+      payload = await renderKatalogKategori(env);
+    } else if (ns === "k" && action === "grp") {
+      payload = await renderKatalogGrup(env, arg);
+    } else if (ns === "k" && action === "itg") {
+      const [kategori, grup, pageStr] = arg.split("|");
+      payload = await renderKatalogItem(env, kategori, grup, Number(pageStr) || 0);
+    } else if (ns === "k" && action === "itk") {
+      const [kategori, pageStr] = arg.split("|");
+      payload = await renderKatalogItem(env, kategori, null, Number(pageStr) || 0);
     } else if (ns === "b" && action === "cari") {
       await setSession(env, chatId, "awaiting_ppob_search", {});
       payload = {
@@ -449,8 +588,17 @@ export async function handleAdminCallback(env, callbackQuery) {
       }
       const { productCode, target, isNew } = session.data;
       payload = await eksekusiOrderPpob(env, chatId, { productCode, target, paidMethod: "utang", contactId: Number(arg), isNew });
+    } else if (ns === "dep" && action === "start") {
+      if (employee.role !== "admin") {
+        throw new Error("Cuma admin yang boleh kirim deposit portalpulsa.");
+      }
+      await setSession(env, chatId, "awaiting_deposit_bank", {});
+      payload = {
+        text: "Ketik nama bank tujuan deposit (mis. BCA):",
+        reply_markup: { inline_keyboard: [[{ text: "❌ Batal", callback_data: "m:main" }]] },
+      };
     } else {
-      payload = { text: "Perintah tidak dikenal.", reply_markup: mainMenuKeyboard(env) };
+      payload = { text: "Perintah tidak dikenal.", reply_markup: mainMenuKeyboard(env, employee) };
     }
   } catch (err) {
     alert = err.message;
@@ -509,6 +657,54 @@ export async function handleAdminSessionMessage(env, chatId, text) {
         ],
       },
     });
+    return true;
+  }
+
+  if (session.state === "awaiting_deposit_bank") {
+    const bank = String(text).trim().toUpperCase();
+    if (!bank) {
+      await sendTelegramMessage(token, chatId, "Nama bank tidak boleh kosong. Ketik mis. BCA.");
+      return true;
+    }
+    await setSession(env, chatId, "awaiting_deposit_nominal", { bank });
+    await sendTelegramMessage(token, chatId, `Bank: ${bank}. Ketik nominal deposit (mis. 500000):`, {
+      reply_markup: { inline_keyboard: [[{ text: "❌ Batal", callback_data: "m:main" }]] },
+    });
+    return true;
+  }
+
+  if (session.state === "awaiting_deposit_nominal") {
+    const { bank } = session.data;
+    if (!nominal || nominal <= 0) {
+      await sendTelegramMessage(token, chatId, "Nominal tidak valid. Ketik angka saja, mis. 500000.");
+      return true;
+    }
+    await clearSession(env, chatId);
+    const employee = await getEmployeeByChatId(env, chatId);
+    try {
+      const cfg = getProviderConfig(env, "portalpulsa");
+      assertCfgComplete(cfg);
+      const body = `D ${bank} ${nominal} ${cfg.pin}`;
+      // Deposit 2 tahap (ack dulu, baru instruksi transfer beneran) — lihat
+      // catatan panjang di endpoint web/index.js ttg firstReplyIsFinal & kata
+      // kunci "transfer" di FINAL_REPLY_KEYWORDS (jabber.js).
+      const reply = await sendJabberCommand({
+        jid: cfg.jid,
+        password: cfg.password,
+        to: cfg.target,
+        body,
+        refSeparator: cfg.separator,
+        acceptAnyFromTarget: true,
+      });
+      await env.DB.prepare(
+        "INSERT INTO portalpulsa_deposits (bank, nominal, raw_reply, employee_id) VALUES (?, ?, ?, ?)"
+      )
+        .bind(bank, nominal, reply, employee ? employee.employeeId : null)
+        .run();
+      await sendTelegramMessage(token, chatId, `Balasan portalpulsa:\n${reply}`, { reply_markup: mainMenuKeyboard(env, employee) });
+    } catch (err) {
+      await sendTelegramMessage(token, chatId, `Gagal kirim deposit: ${err.message}`, { reply_markup: mainMenuKeyboard(env, employee) });
+    }
     return true;
   }
 

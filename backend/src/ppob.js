@@ -2,9 +2,10 @@ import { sendJabberCommand } from "./jabber.js";
 import { rencanaPakaiTitipan, stmtsPakaiTitipan } from "./debt.js";
 
 // ---------------------------------------------------------------------------
-// Konfigurasi provider PPOB (jalur Jabber). Hanya OkeConnect yang didukung —
-// dipilih per-produk lewat kolom products.provider (nilainya selalu
-// 'okeconnect' sekarang, kolom dipertahankan untuk kompatibilitas data lama).
+// Konfigurasi provider PPOB (jalur Jabber). Dua provider didukung: OkeConnect
+// (lengkap, punya price list) dan portalpulsa (tanpa price list — modal baru
+// diketahui dari balasan tiap transaksi, lihat usesDynamicCost di bawah).
+// Dipilih per-produk lewat kolom products.provider.
 export function getProviderConfig(env, provider) {
   if (provider === "portalpulsa") {
     return {
@@ -189,7 +190,7 @@ function isPostpaid(product) {
 // portalpulsa diperlakukan sama seperti kategori pascabayar — walau perintah
 // yang dikirim ke provider tetap format prabayar biasa (lihat isPostpaid()
 // yang dipakai KHUSUS utk pemilihan format perintah, terpisah dari ini).
-function usesDynamicCost(product) {
+export function usesDynamicCost(product) {
   return isPostpaid(product) || product.provider === "portalpulsa";
 }
 
