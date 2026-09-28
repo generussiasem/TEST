@@ -275,7 +275,7 @@ function openConfirm(o) {
   };
   confirmForm.value = {
     sellPrice: o.sell_price || product.sell_price || 0,
-    costTotal: o.cost_price || product.cost_price || 0,
+    costTotal: (product.provider === "portalpulsa" ? o.portalpulsa_detail?.hpp : null) || o.cost_price || product.cost_price || 0,
     tokenCode: o.token_code || "",
     paidMethod: o.paid_method === "utang" ? "utang" : "tunai",
     contactId: o.contact_id || null,

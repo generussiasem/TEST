@@ -12,7 +12,7 @@ const editingWallet = ref(null);
 const modal = ref(null);
 const modalAwalForm = ref(0);
 const modalMsg = ref("");
-const depositForm = ref({ bank: "", nominal: null });
+const depositForm = ref({ bank: "", nominal: null, walletId: "" });
 const depositMsg = ref("");
 const depositError = ref("");
 const depositLoading = ref(false);
@@ -56,6 +56,10 @@ async function kirimDepositPortalpulsa() {
   depositMsg.value = "";
   if (!depositForm.value.bank || !depositForm.value.nominal) {
     depositError.value = "Bank dan nominal wajib diisi.";
+    return;
+  }
+  if (!depositForm.value.walletId) {
+    depositError.value = "Pilih dulu dompet sumber uang transfer (mis. Kas/Bank).";
     return;
   }
   depositLoading.value = true;
@@ -181,6 +185,18 @@ onMounted(() => {
         <form @submit.prevent="kirimDepositPortalpulsa">
           <div class="field"><label>Bank</label><input v-model="depositForm.bank" placeholder="mis. BCA" required /></div>
           <div class="field"><label>Nominal (Rp)</label><input v-model.number="depositForm.nominal" type="number" min="1" required /></div>
+          <div class="field">
+            <label>Dompet sumber (uang beneran keluar dari sini)</label>
+            <select v-model.number="depositForm.walletId" required>
+              <option value="" disabled>Pilih dompet...</option>
+              <option v-for="w in wallets.filter((w) => w.type !== 'distributor_ppob')" :key="w.id" :value="w.id">
+                {{ w.name }} ({{ rupiah(w.balance) }})
+              </option>
+            </select>
+          </div>
+          <p class="muted" style="font-size: 12px; margin: -4px 0 8px">
+            Nominal ini otomatis dicatat sebagai <b>Mutasi</b> dari dompet sumber ke dompet Saldo Distributor portalpulsa (bukan biaya — tidak memengaruhi Laba Rugi).
+          </p>
           <button class="btn" type="submit" :disabled="depositLoading">{{ depositLoading ? "Mengirim..." : "Kirim Deposit" }}</button>
         </form>
         <div v-if="depositMsg" class="ok-box" style="white-space: pre-wrap; margin-top: 12px">{{ depositMsg }}</div>

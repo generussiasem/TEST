@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { sendJabberCommand } from "./jabber.js";
+import { sendJabberCommand, listenJabberMessages } from "./jabber.js";
 import { sendTelegramMessage } from "./telegram.js";
-import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, extractTokenCode, syncPpobPrices, getProviderConfig, finalizePpobOrder, checkDistributorBalance, parseTagihanListrikDetail, assertCfgComplete } from "./ppob.js";
+import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, extractTokenCode, syncPpobPrices, getProviderConfig, finalizePpobOrder, checkDistributorBalance, parseTagihanListrikDetail, parsePortalpulsaDetail, assertCfgComplete, kirimDepositPortalpulsa, parseDepositSusulan, selesaikanDepositSusulan, tandaiDepositKadaluwarsa } from "./ppob.js";
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
 import { getEmployeeByChatId, handleLinkCommand, sendMainMenu, handleAdminCallback, handleAdminSessionMessage } from "./bot-admin.js";
 import { hitungAsetBersih, catatSnapshotModalHarian } from "./modal.js";
@@ -349,41 +349,46 @@ app.delete("/api/wallets/:id", requireAdmin, async (c) => {
 
 // Kirim perintah Deposit ke portalpulsa langsung dari web ("D BANK NOMINAL
 // PIN") — PIN otomatis dari secret PORTALPULSA_PIN, admin cukup isi bank +
-// nominal. Balasannya berupa instruksi transfer manual (nominal+kode unik,
-// no rekening, dst) — BUKAN topup otomatis, tetap harus transfer manual
-// sesuai instruksi. Dibatasi requireAdmin karena menyangkut saldo & rekening
-// (sama seperti command Telegram /deposit yang sudah ada).
+// nominal + dompet sumber. Balasannya berupa instruksi transfer manual
+// (nominal+kode unik, no rekening, dst) — BUKAN topup otomatis, tetap harus
+// transfer manual sesuai instruksi. Dibatasi requireAdmin karena menyangkut
+// saldo & rekening (sama seperti command Telegram /deposit yang sudah ada).
+//
+// PENCATATAN SALDO: begitu balasan provider SUKSES diterima, dompet sumber
+// (walletId, mis. Kas/Bank) otomatis dikurangi & dompet distributor
+// portalpulsa otomatis ditambah sebesar nominal, dicatat sebagai SATU baris
+// transactions type='mutation' — SENGAJA bukan 'expense', supaya tidak
+// dobel hitung sbg biaya (modal PPOB sudah kehitung sendiri lewat cost_total
+// tiap transaksi 'sale', lihat /api/reports/profit yang cuma jumlahkan
+// type='sale' & 'expense', TIDAK 'mutation'). Nominal ini perkiraan/sementara
+// (baru instruksi transfer) — saldo distributor yang sebenarnya tetap
+// ditimpa otomatis tiap 6 jam oleh cron checkDistributorBalance, jadi kalau
+// meleset akan otomatis terkoreksi sendiri. Kalau kirim ke provider GAGAL,
+// tidak ada mutasi yang dibuat sama sekali (saldo dompet tidak berubah).
+// Kirim perintah Deposit ke portalpulsa langsung dari web ("D BANK NOMINAL
+// PIN") — PIN otomatis dari secret PORTALPULSA_PIN, admin cukup isi bank +
+// nominal + dompet sumber.
+//
+// PENCATATAN SALDO: TIDAK LAGI langsung dicatat di sini begitu balasan
+// instruksi transfer diterima (dulu begitu, TERNYATA SALAH — lihat catatan
+// panjang di ppob.js bagian "DEPOSIT PORTALPULSA"). Alurnya ternyata 3 TAHAP,
+// bukan 2: ack -> instruksi transfer -> baru SUKSES/GAGAL beneran yang datang
+// BELAKANGAN & TERPISAH setelah admin transfer manual. Jadi di sini cuma
+// dicatat 'pending', mutasi dompet baru terjadi nanti lewat cron
+// checkPendingPortalpulsaDeposits begitu balasan susulan itu ketangkep.
 app.post("/api/admin/portalpulsa/deposit", requireAdmin, async (c) => {
   const employee = c.get("employee");
-  const { bank, nominal } = await c.req.json();
+  const { bank, nominal, walletId } = await c.req.json();
   if (!bank || !nominal) {
     return c.json({ ok: false, error: "bank dan nominal wajib diisi" }, 400);
   }
+  if (!walletId) {
+    return c.json({ ok: false, error: "Pilih dulu dompet sumber uang transfer (mis. Kas/Bank)." }, 400);
+  }
   try {
-    const cfg = getProviderConfig(c.env, "portalpulsa");
-    assertCfgComplete(cfg);
-    const body = `D ${bank} ${nominal} ${cfg.pin}`;
-    // Deposit itu 2 tahap (ack "Telah kami terima..." dulu, baru balasan
-    // instruksi transfer beneran) — SAMA seperti transaksi pulsa, BUKAN
-    // seperti Cek Saldo yang cuma 1 balasan. Makanya TIDAK pakai
-    // firstReplyIsFinal:true di sini (kalau dipakai, kode berhenti di ack
-    // duluan). FINAL_REPLY_KEYWORDS di jabber.js sudah ditambah kata
-    // "transfer" supaya balasan instruksi transfer langsung dikenali final,
-    // tidak perlu nunggu penuh sampai timeout 25 detik.
-    const reply = await sendJabberCommand({
-      jid: cfg.jid,
-      password: cfg.password,
-      to: cfg.target,
-      body,
-      refSeparator: cfg.separator,
-      acceptAnyFromTarget: true,
-    });
-    await c.env.DB.prepare(
-      "INSERT INTO portalpulsa_deposits (bank, nominal, raw_reply, employee_id) VALUES (?, ?, ?, ?)"
-    )
-      .bind(bank, nominal, reply, employee ? employee.employeeId : null)
-      .run();
-    return c.json({ ok: true, reply });
+    await assertSufficientBalance(c.env.DB, walletId, nominal);
+    const result = await kirimDepositPortalpulsa(c.env, { bank, nominal, walletId, employeeId: employee ? employee.employeeId : null });
+    return c.json({ ok: true, reply: result.replyText, nominalTransfer: result.nominalTransfer, status: "pending" });
   } catch (err) {
     return c.json({ ok: false, error: err.message }, 500);
   }
@@ -1524,6 +1529,9 @@ app.get("/api/ppob-orders", async (c) => {
   const withDetail = results.map((row) => ({
     ...row,
     tagihan_detail: row.status === "sukses" ? parseTagihanListrikDetail(row.raw_reply) : null,
+    // Modal riil portalpulsa (field "Harga" di balasan) — dipakai dashboard
+    // utk mengisi kotak Modal otomatis saat konfirmasi.
+    portalpulsa_detail: row.status === "sukses" && row.provider === "portalpulsa" ? parsePortalpulsaDetail(row.raw_reply) : null,
   }));
   return c.json(withDetail);
 });
@@ -1804,37 +1812,14 @@ app.post("/telegram/webhook", async (c) => {
     // portalpulsa karena OkeConnect topup saldo distributor lewat cara lain
     // (bukan lewat command Jabber). Sengaja dibatasi employee/karyawan saja
     // (bukan command publik seperti /beli) karena ini menyangkut saldo & rekening.
+    // Command teks lama "/deposit BANK NOMINAL" — DIGANTI alur menu
+    // ("🛒 Katalog & Beli PPOB" -> "💰 Deposit portalpulsa" di /menu), yang
+    // sekarang wajib pilih dompet sumber & mencatat status pending dengan
+    // benar (lihat kirimDepositPortalpulsa di ppob.js). Command teks ini
+    // TIDAK diupdate ikut logika baru (supaya tidak ada 2 jalur beda
+    // perilaku untuk hal yang sama) — cukup diarahkan ke menu.
     if (text.startsWith("/deposit")) {
-      const parts = text.split(/\s+/);
-      const bank = parts[1];
-      const nominal = parts[2];
-      if (!bank || !nominal) {
-        await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, "Format: /deposit BANK NOMINAL\nContoh: /deposit BCA 500000");
-        return c.text("ok");
-      }
-      try {
-        const cfg = getProviderConfig(env, "portalpulsa");
-        assertCfgComplete(cfg);
-        const body = `D ${bank} ${nominal} ${cfg.pin}`;
-        // Lihat catatan sama di endpoint web /api/admin/portalpulsa/deposit —
-        // deposit 2 tahap (ack dulu), jadi TIDAK pakai firstReplyIsFinal:true.
-        const reply = await sendJabberCommand({
-          jid: cfg.jid,
-          password: cfg.password,
-          to: cfg.target,
-          body,
-          refSeparator: cfg.separator,
-          acceptAnyFromTarget: true,
-        });
-        await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `Balasan portalpulsa:\n${reply}`);
-        await env.DB.prepare(
-          "INSERT INTO portalpulsa_deposits (bank, nominal, raw_reply, employee_id) VALUES (?, ?, ?, ?)"
-        )
-          .bind(bank, nominal, reply, employee.employeeId)
-          .run();
-      } catch (err) {
-        await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `Gagal kirim deposit: ${err.message}`);
-      }
+      await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, "Sekarang deposit portalpulsa lewat menu ya — kirim /menu lalu pilih \"🛒 Katalog & Beli PPOB\" → \"💰 Deposit portalpulsa\" (sekaligus bisa pilih dompet sumbernya).");
       return c.text("ok");
     }
 
@@ -2089,6 +2074,33 @@ async function prosesPesanJabber(env, text) {
       if (m.matched && m.by !== "ref") await terapkan(order, m.status, text);
     }
   }
+  // 3) Balasan susulan deposit portalpulsa (tahap 3: SUKSES/DIBATALKAN) —
+  // pola teksnya ("Deposit ... SUKSES/DIBATALKAN") sangat spesifik & tidak
+  // pernah muncul di balasan transaksi PPOB biasa, jadi aman dicoba selalu,
+  // tidak cuma kalau langkah 1/2 di atas tidak cocok. selesaikanDepositSusulan
+  // sendiri no-op (return null) kalau tidak ada deposit pending yang nominal
+  // transfernya cocok, jadi tidak beresiko salah proses pesan lain.
+  //
+  // Ini MELENGKAPI, bukan menggantikan, cron checkPendingPortalpulsaDeposits
+  // (index.js) — cron tetap jalan tiap 5 menit sebagai cadangan kalau relay
+  // sedang mati/belum di-setup dengar target portalpulsa (lihat
+  // relay/.env.example, JABBER_TARGET boleh diisi >1 target dipisah koma).
+  const depositHasil = parseDepositSusulan(text);
+  if (depositHasil) {
+    try {
+      const r = await selesaikanDepositSusulan(env, {
+        nominal: depositHasil.nominal,
+        status: depositHasil.status,
+        saldoAkhir: depositHasil.saldoAkhir,
+        alasan: depositHasil.alasan,
+        rawText: text,
+      });
+      if (r) hasil.push({ depositId: r.depositId, status: r.status });
+    } catch (err) {
+      console.error("[relay] selesaikanDepositSusulan gagal:", err.message);
+    }
+  }
+
   return hasil;
 }
 
@@ -2170,6 +2182,35 @@ async function checkPendingOrders(env) {
   }
 }
 
+// Cek balasan SUSULAN (tahap 3) deposit portalpulsa yang masih 'pending' —
+// lihat catatan panjang di ppob.js bagian "DEPOSIT PORTALPULSA" kenapa ini
+// perlu dengerin PASIF (listenJabberMessages), BUKAN kirim ulang command
+// deposit (beresiko kebaca provider sebagai deposit baru).
+async function checkPendingPortalpulsaDeposits(env) {
+  const pending = await env.DB.prepare("SELECT COUNT(*) AS n FROM portalpulsa_deposits WHERE status = 'pending'").first();
+  if (!pending || pending.n === 0) return; // tidak ada yang ditunggu -> jangan buang-buang login Jabber
+
+  const cfg = getProviderConfig(env, "portalpulsa");
+  assertCfgComplete(cfg);
+  // Dengerin selama 20 detik — cukup buat nangkep pesan yang sudah nunggu di
+  // antrean server (offline message), tidak perlu lama-lama karena ini jalan
+  // tiap 5 menit lewat cron yang sama dengan checkPendingOrders.
+  const messages = await listenJabberMessages({ jid: cfg.jid, password: cfg.password, to: cfg.target, timeoutMs: 20000 });
+  for (const text of messages) {
+    const hasil = parseDepositSusulan(text);
+    if (!hasil) continue; // bukan balasan deposit (mungkin balasan order PPOB lain yg kebetulan lewat) -> abaikan
+    try {
+      const r = await selesaikanDepositSusulan(env, { nominal: hasil.nominal, status: hasil.status, saldoAkhir: hasil.saldoAkhir, alasan: hasil.alasan, rawText: text });
+      if (r) console.log(`[cron] deposit portalpulsa #${r.depositId} -> ${r.status}`);
+    } catch (err) {
+      console.error("[cron] selesaikanDepositSusulan gagal:", err.message);
+    }
+  }
+  // Jaga-jaga kalau provider tidak selalu kirim notifikasi "hangus" — deposit
+  // yang sudah lewat 13 jam tanpa balasan apa pun ditandai gagal otomatis.
+  await tandaiDepositKadaluwarsa(env).catch((err) => console.error("[cron] tandaiDepositKadaluwarsa gagal:", err.message));
+}
+
 // ---------------------------------------------------------------------------
 // CRON — pembersihan riwayat rolling 1 tahun (jalan harian, jadwal terpisah
 // dari cek order pending). MURNI hapus riwayat lama — TIDAK membalikkan
@@ -2242,6 +2283,13 @@ export default {
       (async () => {
         await checkPendingOrders(env).catch((err) =>
           console.error("[cron] checkPendingOrders gagal:", err.message)
+        );
+        // Cek balasan susulan deposit portalpulsa (SUKSES/GAGAL tahap 3) —
+        // lihat checkPendingPortalpulsaDeposits & catatan panjang di ppob.js.
+        // Dijalankan berurutan SETELAH checkPendingOrders (bukan bersamaan),
+        // supaya tidak ada 2 login Jabber portalpulsa dalam waktu bersamaan.
+        await checkPendingPortalpulsaDeposits(env).catch((err) =>
+          console.error("[cron] checkPendingPortalpulsaDeposits gagal:", err.message)
         );
         // 00, 06, 12, 18 UTC: sinkron saldo dompet distributor tiap provider
         // aktif (OkeConnect: "Saldo.PIN", portalpulsa: "S PIN" — lihat

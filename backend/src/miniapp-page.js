@@ -451,8 +451,19 @@ function showManualPortalpulsaForm() {
 // NOMINAL PIN" (PIN otomatis dari secret), balasannya instruksi transfer
 // manual — BUKAN topup otomatis. Riwayat 20 terakhir ditampilkan di bawah
 // form, dari tabel portalpulsa_deposits yang sama dgn jalur web & bot.
-function showDepositPortalpulsaForm() {
+async function showDepositPortalpulsaForm() {
   const body = document.getElementById("tabBody");
+  body.innerHTML = '<div class="card"><div class="spinner">Memuat dompet...</div></div>';
+
+  let wallets = [];
+  try {
+    wallets = await api("/wallets"); // dompet distributor_ppob sengaja tidak ikut — itu justru TUJUAN mutasi, bukan pilihan sumber
+  } catch (err) {
+    body.innerHTML = '<div class="card"><div class="error">' + esc(err.message) + '</div></div>';
+    return;
+  }
+  const walletOpts = wallets.map((w) => '<option value="' + w.id + '">' + esc(w.name) + '</option>').join("");
+
   body.innerHTML =
     '<span class="back-link" id="backLink">&larr; Kembali</span>' +
     '<div class="card">' +
@@ -462,6 +473,9 @@ function showDepositPortalpulsaForm() {
       '<input id="depBank" placeholder="mis. BCA" style="text-transform:uppercase" />' +
       '<label>Nominal (Rp)</label>' +
       '<input id="depNominal" type="number" min="1" placeholder="mis. 500000" />' +
+      '<label>Dompet sumber (uang beneran keluar dari sini)</label>' +
+      '<select id="depWallet"><option value="">Pilih dompet...</option>' + walletOpts + '</select>' +
+      '<p class="muted" style="margin-top:-4px">Otomatis dicatat sebagai Mutasi ke dompet Saldo Distributor portalpulsa (bukan biaya).</p>' +
       '<div id="depMsg"></div>' +
       '<button class="btn" id="submitDeposit">Kirim Deposit</button>' +
     '</div>' +
@@ -471,11 +485,13 @@ function showDepositPortalpulsaForm() {
   document.getElementById("submitDeposit").addEventListener("click", async () => {
     const bank = document.getElementById("depBank").value.trim();
     const nominal = Number(document.getElementById("depNominal").value);
+    const walletId = Number(document.getElementById("depWallet").value);
     const msgEl = document.getElementById("depMsg");
     if (!bank || !nominal) { msgEl.innerHTML = '<div class="error">Bank dan nominal wajib diisi</div>'; return; }
+    if (!walletId) { msgEl.innerHTML = '<div class="error">Pilih dompet sumber dulu</div>'; return; }
     msgEl.innerHTML = '<div class="spinner">Mengirim ke provider...</div>';
     try {
-      const result = await api("/portalpulsa/deposit", { method: "POST", body: JSON.stringify({ bank, nominal }) });
+      const result = await api("/portalpulsa/deposit", { method: "POST", body: JSON.stringify({ bank, nominal, walletId }) });
       haptic("ok");
       msgEl.innerHTML = '<div class="success" style="white-space:pre-wrap">' + esc(result.reply) + '</div>';
       loadDepositHistory();
@@ -524,12 +540,12 @@ async function loadMutasiForm() {
   const body = document.getElementById("tabBody");
   let wallets = [];
   try {
-    wallets = await api("/wallets");
+    wallets = await api("/wallets?all=1"); // termasuk dompet distributor_ppob — sama seperti Mutasi Akun di web
   } catch (err) {
     body.innerHTML = '<div class="card"><div class="error">' + esc(err.message) + '</div></div>';
     return;
   }
-  const walletOpts = wallets.map((w) => '<option value="' + w.id + '">' + esc(w.name) + '</option>').join("");
+  const walletOpts = wallets.map((w) => '<option value="' + w.id + '">' + esc(w.name) + (w.type === "distributor_ppob" ? " (Distributor)" : "") + '</option>').join("");
 
   body.innerHTML =
     '<div class="card">' +

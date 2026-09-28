@@ -165,6 +165,8 @@ async function waitForFinalReply(reader, targetBareJid, expectedRefToken, expect
   const decoder = new TextDecoder();
   const deadline = Date.now() + timeoutMs;
   let latest = null;
+  const historySeen = []; // semua balasan.text yang lewat sebelum final (buat collectHistory)
+  const seenTexts = new Set();
   while (Date.now() < deadline) {
     const remaining = deadline - Date.now();
     const { value, done } = await Promise.race([
@@ -175,15 +177,21 @@ async function waitForFinalReply(reader, targetBareJid, expectedRefToken, expect
     if (value === undefined) continue;
     buffer += decoder.decode(value, { stream: true });
     const replies = extractAllReplies(buffer, targetBareJid, expectedRefToken, expectedPrefix, acceptAnyFromTarget);
+    for (const r of replies) {
+      if (!seenTexts.has(r.text)) {
+        seenTexts.add(r.text);
+        historySeen.push(r.text);
+      }
+    }
     if (replies.length) {
       latest = replies[replies.length - 1];
       if (latest.isError || firstReplyIsFinal || FINAL_REPLY_KEYWORDS.test(latest.text)) {
-        return latest; // ini sudah hasil final (atau bounce/error), berhenti sekarang
+        return { ...latest, history: historySeen }; // ini sudah hasil final (atau bounce/error), berhenti sekarang
       }
       // else: baru ack "akan diproses" — lanjut dengar, mungkin ada balasan susulan
     }
   }
-  if (latest) return latest; // waktu habis, tapi setidaknya ada balasan (walau cuma ack)
+  if (latest) return { ...latest, history: historySeen }; // waktu habis, tapi setidaknya ada balasan (walau cuma ack)
   // DIAGNOSTIK SEMENTARA: sertakan cuplikan buffer mentah (300 char terakhir)
   // di pesan error, supaya kelihatan di log/console apakah stream benar-benar
   // kosong (server sama sekali tidak kirim apa-apa) atau ada sesuatu masuk
@@ -210,108 +218,187 @@ async function waitForFinalReply(reader, targetBareJid, expectedRefToken, expect
  * @param {boolean} [opts.acceptAnyFromTarget] - lihat catatan di extractAllReplies;
  *   dipakai untuk provider tanpa ref id sama sekali (portalpulsa).
  */
-export async function sendJabberCommand({ jid, password, to, body, firstReplyIsFinal = false, expectTokens = null, refSeparator = ".", acceptAnyFromTarget = false }) {
+/**
+ * Login & siapkan sesi Jabber siap pakai (buka stream, STARTTLS, SASL auth,
+ * bind resource, presence, matikan Carbons). Dipakai bersama oleh
+ * sendJabberCommand (kirim command, tunggu balasan) dan listenJabberMessages
+ * (TIDAK kirim apa-apa, cuma dengerin pesan masuk — dipakai buat balasan
+ * susulan deposit portalpulsa yang datangnya belakangan tanpa dipicu command).
+ * Caller WAJIB memanggil `cleanup()` di finally-nya sendiri.
+ */
+async function loginJabberSession(jid, password) {
   const [localpart, jabberHost] = jid.split("@");
-  // Login ke server tempat akun Jabber Anda sendiri terdaftar (mis. jabbim.com),
-  // BUKAN ke server tujuan pesan (okeconnect@gojabber.com) — dua server ini beda,
-  // pesan dikirim lintas-server (federasi XMPP) via stanza <message> biasa.
   // secureTransport: "starttls" WAJIB disebut di sini kalau nanti mau panggil
   // socket.startTls() — API TCP Socket Cloudflare menolak startTls() kalau socket
   // dibuat tanpa opsi ini dari awal (persis error yang bikin order selalu pending).
   const socket = connect({ hostname: jabberHost, port: JABBER_PORT }, { secureTransport: "starttls" });
   let writer = socket.writable.getWriter();
   let reader = socket.readable.getReader();
-
   const send = (xml) => writer.write(new TextEncoder().encode(xml));
 
+  // 1. Buka stream & minta STARTTLS
+  await send(
+    `<?xml version="1.0"?><stream:stream to="${jabberHost}" xmlns="jabber:client" ` +
+      `xmlns:stream="http://etherx.jabber.org/streams" version="1.0">`
+  );
+  await readUntil(reader, (buf) => buf.includes("<starttls"));
+  await send(`<starttls xmlns="urn:ietf:params:xml:ns:xmpp-tls"/>`);
+  await readUntil(reader, (buf) => buf.includes("<proceed"));
+
+  // 2. Upgrade koneksi ke TLS. PENTING: lock writer/reader lama WAJIB dilepas
+  // SEBELUM memanggil startTls(), bukan sesudahnya.
+  writer.releaseLock();
+  reader.releaseLock();
+  const tlsSocket = socket.startTls();
+  writer = tlsSocket.writable.getWriter();
+  reader = tlsSocket.readable.getReader();
+
+  // 3. Buka ulang stream di atas TLS, lalu SASL PLAIN auth
+  await send(
+    `<?xml version="1.0"?><stream:stream to="${jabberHost}" xmlns="jabber:client" ` +
+      `xmlns:stream="http://etherx.jabber.org/streams" version="1.0">`
+  );
+  await readUntil(reader, (buf) => buf.includes("<mechanisms"));
+  const authToken = btoa(`\u0000${localpart}\u0000${password}`);
+  await send(`<auth xmlns="urn:ietf:params:xml:ns:xmpp-sasl" mechanism="PLAIN">${authToken}</auth>`);
+  const authReply = await readUntil(reader, (buf) => buf.includes("<success") || buf.includes("<failure"));
+  if (authReply.includes("<failure")) {
+    throw new Error("Login Jabber gagal — cek JID/password.");
+  }
+
+  // 4. Bind resource & buka sesi
+  await send(
+    `<?xml version="1.0"?><stream:stream to="${jabberHost}" xmlns="jabber:client" ` +
+      `xmlns:stream="http://etherx.jabber.org/streams" version="1.0">`
+  );
+  await readUntil(reader, (buf) => buf.includes("</stream:features>"));
+  // Resource unik per koneksi — kalau dihardcode sama terus, dua percobaan yang
+  // tumpang tindih (retry manual, cron, atau sisa koneksi yang belum bersih
+  // ditutup) akan saling tendang dengan error "Replaced by new connection".
+  const resourceId = "kasir-worker-" + Math.random().toString(36).slice(2, 8);
+  await send(`<iq type="set" id="bind1"><bind xmlns="urn:ietf:params:xml:ns:xmpp-bind"><resource>${resourceId}</resource></bind></iq>`);
+  await readUntil(reader, (buf) => buf.includes("bind1"));
+
+  // 4b. Buka sesi (beberapa server XMPP lama/ejabberd masih mengharuskan ini)
+  // dan umumkan status online — TANPA ini, beberapa bot Jabber diam saja.
+  await send(`<iq type="set" id="sess1"><session xmlns="urn:ietf:params:xml:ns:xmpp-session"/></iq>`);
   try {
-    // 1. Buka stream & minta STARTTLS
-    await send(
-      `<?xml version="1.0"?><stream:stream to="${jabberHost}" xmlns="jabber:client" ` +
-        `xmlns:stream="http://etherx.jabber.org/streams" version="1.0">`
-    );
-    await readUntil(reader, (buf) => buf.includes("<starttls"));
-    await send(`<starttls xmlns="urn:ietf:params:xml:ns:xmpp-tls"/>`);
-    await readUntil(reader, (buf) => buf.includes("<proceed"));
+    await readUntil(reader, (buf) => buf.includes("sess1"), 5000);
+  } catch (_) {
+    // Server modern (RFC 6120) sudah tidak mewajibkan session, boleh diabaikan.
+  }
+  // PRIORITY 127 (maksimum): supaya balasan diteruskan ke resource sesi ini,
+  // bukan ke sesi lain yang kebetulan sama-sama login (klien lain, cron lain).
+  await send(`<presence><priority>127</priority></presence>`);
 
-    // 2. Upgrade koneksi ke TLS (didukung TCP Socket API Cloudflare Workers).
-    // PENTING: lock writer/reader lama WAJIB dilepas SEBELUM memanggil startTls(),
-    // bukan sesudahnya — urutan terbalik inilah yang tadinya menyebabkan error
-    // "This WritableStream is currently locked to a writer".
-    writer.releaseLock();
-    reader.releaseLock();
-    const tlsSocket = socket.startTls();
-    writer = tlsSocket.writable.getWriter();
-    reader = tlsSocket.readable.getReader();
+  // 4c. Matikan Message Carbons (XEP-0280) kalau server mendukungnya.
+  await send(`<iq type="set" id="carboff1"><disable xmlns="urn:xmpp:carbons:2"/></iq>`);
+  try {
+    await readUntil(reader, (buf) => buf.includes("carboff1"), 3000);
+  } catch (_) {
+    // Server tidak dukung Carbons — tidak masalah, filter "from" tetap jaga-jaga.
+  }
 
-    // 3. Buka ulang stream di atas TLS, lalu SASL PLAIN auth
-    await send(
-      `<?xml version="1.0"?><stream:stream to="${jabberHost}" xmlns="jabber:client" ` +
-        `xmlns:stream="http://etherx.jabber.org/streams" version="1.0">`
-    );
-    await readUntil(reader, (buf) => buf.includes("<mechanisms"));
-    const authToken = btoa(`\u0000${localpart}\u0000${password}`);
-    await send(
-      `<auth xmlns="urn:ietf:params:xml:ns:xmpp-sasl" mechanism="PLAIN">${authToken}</auth>`
-    );
-    const authReply = await readUntil(
-      reader,
-      (buf) => buf.includes("<success") || buf.includes("<failure")
-    );
-    if (authReply.includes("<failure")) {
-      throw new Error("Login Jabber gagal — cek JID/password.");
-    }
-
-    // 4. Bind resource & buka sesi
-    await send(
-      `<?xml version="1.0"?><stream:stream to="${jabberHost}" xmlns="jabber:client" ` +
-        `xmlns:stream="http://etherx.jabber.org/streams" version="1.0">`
-    );
-    await readUntil(reader, (buf) => buf.includes("</stream:features>"));
-    // Resource unik per koneksi — kalau dihardcode sama terus (mis. selalu
-    // "kasir-worker"), dua percobaan yang tumpang tindih (retry manual, cron,
-    // atau sisa koneksi yang belum bersih ditutup) akan saling tendang dengan
-    // error "Replaced by new connection" dari server XMPP.
-    const resourceId = "kasir-worker-" + Math.random().toString(36).slice(2, 8);
-    await send(
-      `<iq type="set" id="bind1"><bind xmlns="urn:ietf:params:xml:ns:xmpp-bind">` +
-        `<resource>${resourceId}</resource></bind></iq>`
-    );
-    await readUntil(reader, (buf) => buf.includes("bind1"));
-
-    // 4b. Buka sesi (beberapa server XMPP lama/ejabberd masih mengharuskan ini)
-    // dan umumkan status online lewat <presence/> — TANPA ini, beberapa bot
-    // Jabber (termasuk kemungkinan OkeConnect) diam saja dan tidak membalas
-    // pesan dari JID yang belum "online", walau pesan diterima secara teknis.
-    await send(
-      `<iq type="set" id="sess1"><session xmlns="urn:ietf:params:xml:ns:xmpp-session"/></iq>`
-    );
+  const cleanup = async () => {
     try {
-      await readUntil(reader, (buf) => buf.includes("sess1"), 5000);
-    } catch (_) {
-      // Server modern (RFC 6120) sudah tidak mewajibkan session, boleh diabaikan.
-    }
-    // PRIORITY 127 (maksimum): OkeConnect membalas ke JID akun (tanpa resource),
-    // dan server XMPP meneruskan pesan ke resource dengan priority TERTINGGI.
-    // Tanpa ini, kalau akun yang sama juga sedang login di klien lain (Pidgin,
-    // aplikasi HP, dsb.) atau di sesi Worker lain (cron), balasan bisa jatuh ke
-    // sana dan sesi ini timeout walau order sebenarnya sudah diproses provider
-    // (kejadian nyata: balasan "akan diproses" tiba di klien lain, Worker timeout).
-    await send(`<presence><priority>127</priority></presence>`);
-
-    // 4c. Matikan Message Carbons (XEP-0280) kalau server mendukungnya — supaya
-    // server tidak mengirim balik salinan pesan kita sendiri ke resource ini,
-    // yang tadinya salah dikira "balasan" dari OkeConnect.
-    await send(
-      `<iq type="set" id="carboff1"><disable xmlns="urn:xmpp:carbons:2"/></iq>`
-    );
+      await send("</stream:stream>");
+    } catch (_) {}
     try {
-      await readUntil(reader, (buf) => buf.includes("carboff1"), 3000);
-    } catch (_) {
-      // Server tidak dukung Carbons — tidak masalah, filter "from" di bawah tetap jaga-jaga.
-    }
+      writer.releaseLock();
+    } catch (_) {}
+    try {
+      reader.releaseLock();
+    } catch (_) {}
+    try {
+      await socket.close();
+    } catch (_) {}
+  };
+  return { reader, writer, send, cleanup };
+}
 
-    // 5. Kirim perintah transaksi sebagai stanza <message>
+/**
+ * Login ke Jabber lalu DENGERIN PASIF — tidak mengirim command apa pun,
+ * cuma menunggu & mengumpulkan pesan yang masuk dari `to` selama `timeoutMs`.
+ *
+ * Dipakai KHUSUS untuk balasan susulan deposit portalpulsa (SUKSES/DIBATALKAN)
+ * yang datang belakangan, TIDAK dipicu oleh command yang baru dikirim — beda
+ * dari sendJabberCommand yang menunggu balasan atas command yang BARU dikirim.
+ * Re-mengirim ulang command "D BANK NOMINAL PIN" untuk "cek status" BERBAHAYA
+ * (bisa kebaca provider sebagai permintaan deposit baru), jadi satu-satunya
+ * cara aman adalah menunggu pasif seperti ini secara berkala (lihat
+ * checkPendingPortalpulsaDeposits di index.js).
+ *
+ * @returns {Promise<string[]>} daftar teks pesan yang masuk dari `to` selama sesi ini (bisa kosong)
+ */
+export async function listenJabberMessages({ jid, password, to, timeoutMs = 20000 }) {
+  const session = await loginJabberSession(jid, password);
+  const { reader, cleanup } = session;
+  const targetBareJid = to.split("/")[0];
+  try {
+    let buffer = "";
+    const decoder = new TextDecoder();
+    const deadline = Date.now() + timeoutMs;
+    const seen = [];
+    while (Date.now() < deadline) {
+      const remaining = deadline - Date.now();
+      const { value, done } = await Promise.race([
+        reader.read(),
+        new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), remaining)),
+      ]);
+      if (done) break;
+      if (value === undefined) continue;
+      buffer += decoder.decode(value, { stream: true });
+      // acceptAnyFromTarget=true, tanpa expectedRefToken/expectedPrefix — kita
+      // memang sengaja mau SEMUA pesan dari target, bukan mencocokkan ref
+      // tertentu (portalpulsa tidak pernah menyebut ref di balasan deposit).
+      seen.push(...extractAllReplies(buffer, targetBareJid, null, null, true).map((r) => r.text));
+    }
+    // Dedup — extractAllReplies dipanggil berulang atas buffer yang terus
+    // bertambah, jadi pesan yang sama bisa muncul lagi di panggilan berikutnya.
+    return [...new Set(seen)];
+  } finally {
+    await cleanup();
+  }
+}
+
+/**
+ * Kirim satu perintah teks ke Jabber Center OkeConnect dan tunggu balasannya.
+ * @param {object} opts
+ * @param {string} opts.jid       - JID lengkap Anda, mis. "OK310547@gojabber.com"
+ * @param {string} opts.password  - password akun OrderKuota Anda
+ * @param {string} opts.to        - tujuan pesan, mis. "okeconnect@gojabber.com"
+ * @param {string} opts.body      - isi perintah, mis. "TSEL5.081234.PIN.R#REF123"
+ * @param {boolean} [opts.firstReplyIsFinal] - anggap balasan PERTAMA yang cocok
+ *   dari target sebagai final, walau tidak mengandung kata kunci "sukses/gagal"
+ *   dst. Dipakai untuk perintah non-transaksi seperti cek saldo ("Saldo.PIN"),
+ *   supaya tidak menunggu penuh sampai timeout tiap kali dipanggil.
+ * @param {string} [opts.refSeparator] - pemisah antar-segmen body dipakai untuk
+ *   membangun expectedPrefix fallback (default "."; portalpulsa pakai " " karena
+ *   formatnya "kode target pin" tanpa titik).
+ * @param {boolean} [opts.acceptAnyFromTarget] - lihat catatan di extractAllReplies;
+ *   dipakai untuk provider tanpa ref id sama sekali (portalpulsa).
+ * @param {boolean} [opts.collectHistory] - kalau true, kembalikan
+ *   { text, history } alih-alih string biasa — `history` berisi SEMUA balasan
+ *   yang masuk selama sesi ini (termasuk ack tahap-1 sebelum balasan final),
+ *   digabung urut. Dipakai untuk deposit portalpulsa, supaya ack "Telah kami
+ *   terima..." ikut tersimpan, bukan cuma balasan instruksi transfer di
+ *   tahap 2 (lihat kirimDepositPortalpulsa di ppob.js).
+ */
+export async function sendJabberCommand({
+  jid,
+  password,
+  to,
+  body,
+  firstReplyIsFinal = false,
+  expectTokens = null,
+  refSeparator = ".",
+  acceptAnyFromTarget = false,
+  collectHistory = false,
+}) {
+  const session = await loginJabberSession(jid, password);
+  const { reader, send, cleanup } = session;
+
+  try {
     const msgId = "trx-" + Date.now();
     console.log(`[jabber-debug] mengirim ke "${to}" — body: ${body}`);
     await send(
@@ -338,19 +425,12 @@ export async function sendJabberCommand({ jid, password, to, body, firstReplyIsF
     if (parsed.isError) {
       throw new Error(parsed.text);
     }
+    if (collectHistory) {
+      // history sudah termasuk parsed.text di dalamnya (lihat waitForFinalReply)
+      return { text: parsed.text, history: parsed.history };
+    }
     return parsed.text;
   } finally {
-    try {
-      await send("</stream:stream>");
-    } catch (_) {}
-    try {
-      writer.releaseLock();
-    } catch (_) {}
-    try {
-      reader.releaseLock();
-    } catch (_) {}
-    try {
-      await socket.close();
-    } catch (_) {}
+    await cleanup();
   }
 }

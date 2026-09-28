@@ -56,7 +56,7 @@ function toInt(n) {
   return Math.round(Number(n) || 0);
 }
 
-async function getOpenShiftId(env, employeeId) {
+export async function getOpenShiftId(env, employeeId) {
   if (!employeeId) return null;
   const s = await env.DB.prepare("SELECT id FROM shifts WHERE employee_id = ? AND status = 'open'")
     .bind(employeeId)

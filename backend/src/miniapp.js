@@ -1,7 +1,6 @@
 import { Hono } from "hono";
 import { verifyTelegramInitData } from "./telegram-miniapp-auth.js";
-import { placePpobOrder, cekTagihan, finalizePpobOrder, getProviderConfig, assertCfgComplete } from "./ppob.js";
-import { sendJabberCommand } from "./jabber.js";
+import { placePpobOrder, cekTagihan, finalizePpobOrder, kirimDepositPortalpulsa } from "./ppob.js";
 import { DebtError, bayarHutang, titipUang, catatHutangManual } from "./debt.js";
 
 // ---------------------------------------------------------------------------
@@ -104,9 +103,17 @@ miniapp.post("/contacts", async (c) => {
 
 // Dompet tempat uang pembayaran hutang/titipan diterima (dompet saldo
 // distributor PPOB sengaja tidak ikut — itu bukan tempat uang pelanggan).
+// Kirim ?all=1 untuk dapat SEMUA tipe dompet termasuk distributor_ppob —
+// dipakai khusus menu Mutasi Antar Akun, yang (sama seperti di web,
+// index.js POST /api/transactions type='mutation') tidak membatasi tipe
+// dompet: dompet distributor PPOB boleh jadi asal/tujuan mutasi, mis. buat
+// koreksi manual saldo distributor.
 miniapp.get("/wallets", async (c) => {
+  const includeAll = c.req.query("all") === "1";
   const { results } = await c.env.DB.prepare(
-    "SELECT id, name, type FROM wallets WHERE type != 'distributor_ppob' ORDER BY id"
+    includeAll
+      ? "SELECT id, name, type FROM wallets ORDER BY id"
+      : "SELECT id, name, type FROM wallets WHERE type != 'distributor_ppob' ORDER BY id"
   ).all();
   return c.json(results);
 });
@@ -236,36 +243,35 @@ miniapp.post("/ppob-orders/:refId/konfirmasi", async (c) => {
 // supaya riwayatnya satu tempat terlepas dari mana dikirimnya. Dibatasi role
 // admin (bukan kasir biasa) — konsisten dengan pembatasan di web & bot.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// PENCATATAN SALDO: TIDAK LAGI langsung dicatat begitu balasan instruksi
+// transfer diterima — lihat catatan panjang di ppob.js bagian "DEPOSIT
+// PORTALPULSA". Alurnya 3 tahap (ack -> instruksi -> SUKSES/GAGAL susulan),
+// jadi di sini cuma dicatat 'pending'; mutasi dompet baru terjadi lewat cron
+// checkPendingPortalpulsaDeposits begitu balasan susulan itu ketangkep.
 miniapp.post("/portalpulsa/deposit", async (c) => {
   const employee = c.get("employee");
   if (employee.role !== "admin") {
     return c.json({ ok: false, error: "Cuma admin yang boleh kirim deposit portalpulsa." }, 403);
   }
-  const { bank, nominal } = await c.req.json();
+  const { bank, nominal, walletId } = await c.req.json();
   if (!bank || !nominal) {
     return c.json({ ok: false, error: "bank dan nominal wajib diisi" }, 400);
   }
+  if (!walletId) {
+    return c.json({ ok: false, error: "Pilih dulu dompet sumber uang transfer (mis. Kas/Bank)." }, 400);
+  }
+  const sourceWallet = await c.env.DB.prepare("SELECT * FROM wallets WHERE id = ?").bind(walletId).first();
+  if (!sourceWallet) return c.json({ ok: false, error: "Dompet sumber tidak ditemukan" }, 404);
+  if (sourceWallet.balance < nominal) {
+    return c.json(
+      { ok: false, error: `Saldo "${sourceWallet.name}" tidak cukup (saldo Rp${sourceWallet.balance.toLocaleString("id-ID")}, butuh Rp${Number(nominal).toLocaleString("id-ID")})` },
+      400
+    );
+  }
   try {
-    const cfg = getProviderConfig(c.env, "portalpulsa");
-    assertCfgComplete(cfg);
-    const body = `D ${bank} ${nominal} ${cfg.pin}`;
-    // Deposit 2 tahap (ack dulu, baru instruksi transfer beneran) — lihat
-    // catatan panjang di endpoint web ttg firstReplyIsFinal & kata kunci
-    // "transfer" di FINAL_REPLY_KEYWORDS (jabber.js).
-    const reply = await sendJabberCommand({
-      jid: cfg.jid,
-      password: cfg.password,
-      to: cfg.target,
-      body,
-      refSeparator: cfg.separator,
-      acceptAnyFromTarget: true,
-    });
-    await c.env.DB.prepare(
-      "INSERT INTO portalpulsa_deposits (bank, nominal, raw_reply, employee_id) VALUES (?, ?, ?, ?)"
-    )
-      .bind(bank, nominal, reply, employee.employeeId)
-      .run();
-    return c.json({ ok: true, reply });
+    const result = await kirimDepositPortalpulsa(c.env, { bank, nominal, walletId, employeeId: employee.employeeId });
+    return c.json({ ok: true, reply: result.replyText, nominalTransfer: result.nominalTransfer, status: "pending" });
   } catch (err) {
     return c.json({ ok: false, error: err.message }, 500);
   }

@@ -1,6 +1,5 @@
 import { sendTelegramMessage, editTelegramMessage, answerCallbackQuery } from "./telegram.js";
-import { finalizePpobOrder, placePpobOrder, usesDynamicCost, parseTagihanListrikDetail, parsePortalpulsaDetail, getProviderConfig, assertCfgComplete } from "./ppob.js";
-import { sendJabberCommand } from "./jabber.js";
+import { finalizePpobOrder, placePpobOrder, usesDynamicCost, parseTagihanListrikDetail, parsePortalpulsaDetail, kirimDepositPortalpulsa } from "./ppob.js";
 import { bayarHutang } from "./debt.js";
 
 // ---------------------------------------------------------------------------
@@ -433,6 +432,22 @@ async function selesaikanBayarHutang(env, chatId, employee, { contactId, nominal
   return { text, reply_markup: { inline_keyboard: [[{ text: "🏠 Menu Utama", callback_data: "m:main" }]] } };
 }
 
+// Eksekusi akhir deposit portalpulsa: kirim command ke provider, catat
+// sebagai 'pending' — TIDAK LAGI mencatat mutasi otomatis begitu balasan
+// diterima (lihat catatan panjang di ppob.js bagian "DEPOSIT PORTALPULSA").
+// Alurnya 3 tahap, mutasi dompet baru terjadi lewat cron begitu balasan
+// susulan SUKSES/GAGAL ketangkep, bukan optimis di sini.
+async function eksekusiDeposit(env, chatId, employee, { bank, nominal, walletId }) {
+  const sourceWallet = await env.DB.prepare("SELECT * FROM wallets WHERE id = ?").bind(walletId).first();
+  if (!sourceWallet) throw new Error("Dompet sumber tidak ditemukan");
+  if (sourceWallet.balance < nominal) {
+    throw new Error(`Saldo "${sourceWallet.name}" tidak cukup (saldo ${rupiah(sourceWallet.balance)}, butuh ${rupiah(nominal)})`);
+  }
+  const result = await kirimDepositPortalpulsa(env, { bank, nominal, walletId, employeeId: employee ? employee.id : null });
+  await clearSession(env, chatId);
+  return `Balasan portalpulsa:\n${result.replyText}\n\n⏳ Dicatat *pending* — belum ada mutasi dompet dulu, tunggu balasan provider berikutnya (SUKSES/GAGAL) yang dicek otomatis tiap beberapa menit. Cek riwayat via web kalau mau tahu statusnya.`;
+}
+
 // ---------------------------------------------------------------------------
 // MUTASI ANTAR AKUN — pindah saldo antar dompet lewat bot (mis. setor tunai
 // dari Kas ke Bank). Alur: pilih akun asal (tombol) -> pilih akun tujuan
@@ -444,13 +459,17 @@ async function selesaikanBayarHutang(env, chatId, employee, { contactId, nominal
 // ---------------------------------------------------------------------------
 
 async function renderMutasiWalletPicker(env, { purpose, excludeId, callbackPrefix }) {
-  const { results: wallets } = await env.DB.prepare(
-    "SELECT id, name FROM wallets WHERE type != 'distributor_ppob' ORDER BY id"
-  ).all();
+  // SENGAJA tidak mengecualikan type='distributor_ppob' di sini — beda dari
+  // daftar dompet di alur Hutang/Deposit (lihat getPayWallet di debt.js).
+  // Mutasi Antar Akun di web (index.js POST /api/transactions type='mutation')
+  // juga tidak membatasi tipe dompet: dompet distributor PPOB boleh jadi
+  // asal/tujuan, mis. buat koreksi manual saldo distributor — jadi bot & mini
+  // app disamakan biar konsisten.
+  const { results: wallets } = await env.DB.prepare("SELECT id, name, type FROM wallets ORDER BY id").all();
   const filtered = excludeId ? wallets.filter((w) => w.id !== excludeId) : wallets;
   if (!filtered.length) {
     return {
-      text: "⚠️ Belum ada dompet (Tunai/Bank/E-Wallet) yang bisa dipilih. Tambahkan dulu lewat halaman Akun di web.",
+      text: "⚠️ Belum ada dompet yang bisa dipilih. Tambahkan dulu lewat halaman Akun di web.",
       reply_markup: { inline_keyboard: [[{ text: "🏠 Menu Utama", callback_data: "m:main" }]] },
     };
   }
@@ -458,7 +477,9 @@ async function renderMutasiWalletPicker(env, { purpose, excludeId, callbackPrefi
     text: purpose,
     reply_markup: {
       inline_keyboard: [
-        ...filtered.map((w) => [{ text: `👛 ${w.name}`, callback_data: `${callbackPrefix}${w.id}` }]),
+        ...filtered.map((w) => [
+          { text: `${w.type === "distributor_ppob" ? "🏦" : "👛"} ${w.name}`, callback_data: `${callbackPrefix}${w.id}` },
+        ]),
         [{ text: "❌ Batal", callback_data: "m:main" }],
       ],
     },
@@ -662,6 +683,19 @@ export async function handleAdminCallback(env, callbackQuery) {
         text: "Ketik nama bank tujuan deposit (mis. BCA):",
         reply_markup: { inline_keyboard: [[{ text: "❌ Batal", callback_data: "m:main" }]] },
       };
+    } else if (ns === "dep" && action === "w") {
+      const session = await getSession(env, chatId);
+      if (!session || session.state !== "awaiting_deposit_wallet") {
+        throw new Error("Sesi deposit sudah kedaluwarsa. Mulai lagi dari menu Deposit portalpulsa.");
+      }
+      const { bank, nominal } = session.data;
+      try {
+        const text = await eksekusiDeposit(env, chatId, employee, { bank, nominal, walletId: Number(arg) });
+        payload = { text, reply_markup: { inline_keyboard: [[{ text: "🏠 Menu Utama", callback_data: "m:main" }]] } };
+      } catch (err) {
+        await clearSession(env, chatId);
+        throw err;
+      }
     } else if (ns === "mut" && action === "start") {
       await clearSession(env, chatId);
       payload = await renderMutasiWalletPicker(env, {
@@ -773,32 +807,30 @@ export async function handleAdminSessionMessage(env, chatId, text) {
       await sendTelegramMessage(token, chatId, "Nominal tidak valid. Ketik angka saja, mis. 500000.");
       return true;
     }
-    await clearSession(env, chatId);
-    const employee = await getEmployeeByChatId(env, chatId);
-    try {
-      const cfg = getProviderConfig(env, "portalpulsa");
-      assertCfgComplete(cfg);
-      const body = `D ${bank} ${nominal} ${cfg.pin}`;
-      // Deposit 2 tahap (ack dulu, baru instruksi transfer beneran) — lihat
-      // catatan panjang di endpoint web/index.js ttg firstReplyIsFinal & kata
-      // kunci "transfer" di FINAL_REPLY_KEYWORDS (jabber.js).
-      const reply = await sendJabberCommand({
-        jid: cfg.jid,
-        password: cfg.password,
-        to: cfg.target,
-        body,
-        refSeparator: cfg.separator,
-        acceptAnyFromTarget: true,
-      });
-      await env.DB.prepare(
-        "INSERT INTO portalpulsa_deposits (bank, nominal, raw_reply, employee_id) VALUES (?, ?, ?, ?)"
-      )
-        .bind(bank, nominal, reply, employee ? employee.id : null)
-        .run();
-      await sendTelegramMessage(token, chatId, `Balasan portalpulsa:\n${reply}`, { reply_markup: mainMenuKeyboard(env, employee) });
-    } catch (err) {
-      await sendTelegramMessage(token, chatId, `Gagal kirim deposit: ${err.message}`, { reply_markup: mainMenuKeyboard(env, employee) });
+    // Sebelum kirim ke provider, tanya dulu dompet SUMBER (Kas/Bank) — dipakai
+    // buat catat mutasi otomatis begitu deposit sukses (lihat eksekusiDeposit).
+    const { results: wallets } = await env.DB.prepare(
+      "SELECT id, name FROM wallets WHERE type != 'distributor_ppob' ORDER BY id"
+    ).all();
+    if (!wallets.length) {
+      await clearSession(env, chatId);
+      await sendTelegramMessage(token, chatId, "⚠️ Belum ada dompet (Tunai/Bank/E-Wallet). Tambahkan dulu lewat halaman Akun di web.");
+      return true;
     }
+    await setSession(env, chatId, "awaiting_deposit_wallet", { bank, nominal });
+    await sendTelegramMessage(token, chatId, `Deposit ${rupiah(nominal)} ke ${bank}. Uang keluar dari dompet mana?`, {
+      reply_markup: {
+        inline_keyboard: [
+          ...wallets.map((w) => [{ text: `👛 ${w.name}`, callback_data: `dep:w:${w.id}` }]),
+          [{ text: "❌ Batal", callback_data: "m:main" }],
+        ],
+      },
+    });
+    return true;
+  }
+
+  if (session.state === "awaiting_deposit_wallet") {
+    await sendTelegramMessage(token, chatId, "Silakan pilih dompet lewat tombol di atas, atau kirim /menu untuk batal.");
     return true;
   }
 

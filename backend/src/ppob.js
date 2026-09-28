@@ -1,4 +1,5 @@
 import { sendJabberCommand } from "./jabber.js";
+import { getOpenShiftId } from "./debt.js";
 import { rencanaPakaiTitipan, stmtsPakaiTitipan } from "./debt.js";
 
 // ---------------------------------------------------------------------------
@@ -256,7 +257,181 @@ export function parsePortalpulsaDetail(rawReply) {
   };
 }
 
-// Coba tebak kode token PLN dari balasan mentah OkeConnect — pola umum:
+// ---------------------------------------------------------------------------
+// DEPOSIT PORTALPULSA — perintah "D BANK NOMINAL PIN", alurnya 3 TAHAP
+// (ketahuan dari contoh balasan asli, BUKAN dari dokumentasi resmi):
+//   1) "Telah kami terima... Silakan tunggu reply selanjutnya"     (ack, diabaikan)
+//   2) "Silakan transfer Rp 50.094 Ke Bank: JATENG..."             (instruksi —
+//      nominal DI SINI beda dari yang diketik, ada kode unik tambahan)
+//   3) "Deposit 50.094 SUKSES ... Saldo sekarang Rp 57.536"        ATAU
+//      "Request Deposit 50090 DIBATALKAN karena hangus (lebih dari 12jam)"
+//      — datang BELAKANGAN, terpisah, kadang berjam-jam kemudian, SETELAH
+//      admin beneran transfer manual sesuai instruksi tahap 2. TIDAK bisa
+//      langsung didapat dari sendJabberCommand (yang berhenti di tahap 2,
+//      karena mengandung kata "transfer" yang cocok FINAL_REPLY_KEYWORDS).
+//
+// Konsekuensinya: pencatatan mutasi dompet TIDAK BOLEH terjadi optimis di
+// tahap 2 (uangnya belum tentu ditransfer) — harus nunggu tahap 3 baru
+// dicatat. Balasan tahap 3 dicek berkala lewat cron yang DENGERIN PASIF
+// (listenJabberMessages), BUKAN dengan mengirim ulang command deposit (itu
+// beresiko kebaca provider sebagai permintaan deposit baru).
+// ---------------------------------------------------------------------------
+
+/** Parse balasan INSTRUKSI TRANSFER (tahap 2) — ambil nominal ASLI yang harus ditransfer (sudah + kode unik). */
+export function parseDepositInstruksi(rawReply) {
+  const text = String(rawReply || "");
+  const toNumber = (s) => (s == null ? null : parseInt(String(s).replace(/\./g, ""), 10) || 0);
+  const m = text.match(/[Tt]ransfer\s+Rp\.?\s*([\d.,]+)/);
+  return { nominalTransfer: m ? toNumber(m[1]) : null };
+}
+
+/**
+ * Parse balasan SUSULAN (tahap 3) — SUKSES atau DIBATALKAN/GAGAL. Dipanggil
+ * per pesan hasil listenJabberMessages, dicocokkan ke deposit `pending` mana
+ * lewat nominalTransfer yang disebut di teksnya (unik per deposit, beda dari
+ * nominal yang diketik admin).
+ * @returns {{nominal:number, status:'sukses'|'gagal', saldoAkhir:?number, alasan:?string}|null}
+ *   null kalau teksnya tidak cocok pola SUKSES maupun DIBATALKAN/GAGAL sama sekali.
+ */
+export function parseDepositSusulan(text) {
+  const toNumber = (s) => (s == null ? null : parseInt(String(s).replace(/\./g, ""), 10) || 0);
+  const sukses = text.match(/Deposit\s+([\d.,]+)\s+SUKSES/i);
+  if (sukses) {
+    const saldo = text.match(/Saldo sekarang\s+Rp\.?\s*([\d.,]+)/i);
+    return { nominal: toNumber(sukses[1]), status: "sukses", saldoAkhir: saldo ? toNumber(saldo[1]) : null, alasan: null };
+  }
+  const gagal = text.match(/Deposit\s+([\d.,]+)\s+(DIBATALKAN|GAGAL)\s*(?:karena\s*)?([^#]*)/i);
+  if (gagal) {
+    return { nominal: toNumber(gagal[1]), status: "gagal", saldoAkhir: null, alasan: (gagal[3] || "").trim() || null };
+  }
+  return null;
+}
+
+/**
+ * Kirim command deposit "D BANK NOMINAL PIN" & catat sebagai `pending` —
+ * TIDAK mencatat mutasi dompet apa pun di sini (lihat catatan 3-tahap di
+ * atas). Dipakai bersama oleh endpoint web, mini app, dan bot Telegram,
+ * supaya perilakunya konsisten di ketiga jalur itu.
+ *
+ * @param {Object} p
+ * @param {string} p.bank
+ * @param {number} p.nominal - nominal yang DIKETIK admin (tanpa kode unik)
+ * @param {number} p.walletId - dompet sumber yang DIRENCANAKAN dipotong (baru beneran dipotong setelah status jadi 'sukses')
+ * @param {number} [p.employeeId]
+ * @returns {Promise<{depositId:number, replyText:string}>}
+ */
+export async function kirimDepositPortalpulsa(env, { bank, nominal, walletId, employeeId }) {
+  const cfg = getProviderConfig(env, "portalpulsa");
+  assertCfgComplete(cfg);
+  if (!bank) throw new Error("Bank tujuan wajib diisi.");
+  if (!nominal || nominal <= 0) throw new Error("Nominal deposit harus lebih dari 0.");
+  if (!walletId) throw new Error("Pilih dompet sumber dulu.");
+
+  const distributor = await env.DB.prepare(
+    "SELECT * FROM wallets WHERE type = 'distributor_ppob' AND provider = 'portalpulsa' LIMIT 1"
+  ).first();
+  if (!distributor) throw new Error("Dompet distributor portalpulsa belum ada — buat dulu di menu Dompet.");
+
+  const body = `D ${bank} ${nominal} ${cfg.pin}`;
+  const result = await sendJabberCommand({
+    jid: cfg.jid,
+    password: cfg.password,
+    to: cfg.target,
+    body,
+    acceptAnyFromTarget: true,
+    collectHistory: true,
+  });
+  // result = { text, history } karena collectHistory: true — gabung SEMUA
+  // balasan yang masuk (ack tahap-1 + instruksi tahap-2), bukan cuma yang
+  // terakhir, supaya jejaknya lengkap kalau perlu ditelusuri manual nanti.
+  const rawReplyGabungan = result.history.join("\n---\n");
+  const { nominalTransfer } = parseDepositInstruksi(result.text);
+
+  const insert = await env.DB.prepare(
+    `INSERT INTO portalpulsa_deposits (bank, nominal, nominal_transfer, raw_reply, employee_id, wallet_id, distributor_wallet_id, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`
+  )
+    .bind(bank, nominal, nominalTransfer, rawReplyGabungan, employeeId || null, walletId, distributor.id)
+    .run();
+
+  return { depositId: insert.meta.last_row_id, replyText: result.text, nominalTransfer };
+}
+
+/**
+ * Cocokkan & selesaikan deposit `pending` berdasarkan balasan susulan (tahap
+ * 3) yang baru masuk. Dipanggil dari cron (checkPendingPortalpulsaDeposits di
+ * index.js) — bukan dipanggil manual dari endpoint kasir.
+ *
+ * Balasan dicocokkan ke deposit lewat `nominal_transfer` (unik per deposit,
+ * beda dari `nominal` yang diketik) — kalau tidak ketemu deposit pending yang
+ * nominal_transfer-nya sama persis, balasan itu DIABAIKAN (bukan error keras;
+ * bisa saja balasan buat deposit yang sudah lama/lewat window pencarian).
+ */
+export async function selesaikanDepositSusulan(env, { nominal, status, saldoAkhir, alasan, rawText }) {
+  const deposit = await env.DB.prepare(
+    "SELECT * FROM portalpulsa_deposits WHERE status = 'pending' AND nominal_transfer = ? LIMIT 1"
+  )
+    .bind(nominal)
+    .first();
+  if (!deposit) return null; // tidak ada yang cocok — biarkan, jangan sok tahu itu punya siapa
+
+  const rawReplyBaru = `${deposit.raw_reply}\n---\n${rawText}`;
+
+  if (status === "gagal") {
+    await env.DB.prepare("UPDATE portalpulsa_deposits SET status = 'gagal', raw_reply = ? WHERE id = ?")
+      .bind(rawReplyBaru, deposit.id)
+      .run();
+    return { depositId: deposit.id, status: "gagal", alasan };
+  }
+
+  // status === 'sukses' -> BARU SEKARANG catat mutasi dompet, pakai nominal
+  // TRANSFER (uang yang beneran keluar dari rekening), bukan nominal yang
+  // diketik. Kalau saldoAkhir ketemu di balasan, TIMPA saldo dompet
+  // distributor jadi persis itu (lebih akurat daripada tambah-tambahan,
+  // otomatis mengoreksi kalau ada drift sebelumnya).
+  const shiftId = await getOpenShiftId(env, deposit.employee_id);
+  const note = `Deposit portalpulsa via ${deposit.bank} (Rp ${nominal})`;
+  const tx = await env.DB.prepare(
+    `INSERT INTO transactions (type, category, wallet_id, to_wallet_id, amount, cost_total, note, employee_id, shift_id)
+     VALUES ('mutation', 'Deposit portalpulsa', ?, ?, ?, 0, ?, ?, ?)`
+  )
+    .bind(deposit.wallet_id, deposit.distributor_wallet_id, nominal, note, deposit.employee_id || null, shiftId)
+    .run();
+  const transactionId = tx.meta.last_row_id;
+
+  await env.DB.batch([
+    env.DB.prepare("UPDATE wallets SET balance = balance - ? WHERE id = ?").bind(nominal, deposit.wallet_id),
+    saldoAkhir != null
+      ? env.DB.prepare("UPDATE wallets SET balance = ? WHERE id = ?").bind(saldoAkhir, deposit.distributor_wallet_id)
+      : env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?").bind(nominal, deposit.distributor_wallet_id),
+    env.DB.prepare("UPDATE portalpulsa_deposits SET status = 'sukses', raw_reply = ?, transaction_id = ? WHERE id = ?").bind(
+      rawReplyBaru,
+      transactionId,
+      deposit.id
+    ),
+  ]);
+
+  return { depositId: deposit.id, status: "sukses", transactionId };
+}
+
+/** Fallback: deposit `pending` yang sudah lewat window (13 jam, kasih buffer
+ * dari batas resmi 12 jam) TANPA balasan susulan apa pun sama sekali —
+ * jaga-jaga kalau provider tidak selalu mengirim notifikasi "hangus". */
+export async function tandaiDepositKadaluwarsa(env) {
+  const { results } = await env.DB.prepare(
+    `SELECT id FROM portalpulsa_deposits WHERE status = 'pending' AND created_at <= datetime('now', '-13 hours')`
+  ).all();
+  for (const d of results) {
+    await env.DB.prepare(
+      "UPDATE portalpulsa_deposits SET status = 'gagal', raw_reply = raw_reply || ? WHERE id = ?"
+    )
+      .bind("\n---\n[Sistem] Tidak ada balasan provider dalam 13 jam, ditandai gagal/kadaluwarsa otomatis.", d.id)
+      .run();
+  }
+  return results.length;
+}
+
+
 // deret 16-20 digit angka, kadang dipisah strip. BELUM ada contoh balasan
 // sukses token PLN asli, jadi ini pola tebakan yang bisa meleset; kasir
 // tetap bisa koreksi manual di kotak konfirmasi kalau salah/tidak ketemu.
@@ -595,6 +770,11 @@ export async function finalizePpobOrder(env, { refId, sellPrice, costTotal, toke
   // riil dari selisih saldo di raw_reply order ini; product.cost_price cuma
   // dipakai sebagai upaya terakhir kalau balasan tidak bisa diparse sama sekali.
   let effectiveCostTotal = costTotal;
+  // portalpulsa: costTotal 0/kosong dari klien (mis. kotak Modal dashboard yang
+  // terisi default 0 karena product.cost_price selalu 0) dianggap "tidak
+  // diisi" — modal riil diambil dari field "Harga" di raw_reply. Modal 0 tidak
+  // pernah valid utk portalpulsa. Angka > 0 yg diketik kasir tetap dihormati.
+  if (product.provider === "portalpulsa" && !(effectiveCostTotal > 0)) effectiveCostTotal = null;
   if (effectiveCostTotal == null && usesDynamicCost(product)) {
     if (product.provider === "portalpulsa") {
       const detail = parsePortalpulsaDetail(order.raw_reply);
