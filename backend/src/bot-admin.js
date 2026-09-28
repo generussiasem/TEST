@@ -98,6 +98,7 @@ function mainMenuKeyboard(env, employee) {
   rows.push([{ text: "🔎 Transaksi PPOB (cari cepat)", callback_data: "b:cari:0" }]);
   rows.push([{ text: "🧾 Konfirmasi Order PPOB", callback_data: "p:l:0" }]);
   rows.push([{ text: "💳 Saldo Distributor", callback_data: "m:saldo" }]);
+  rows.push([{ text: "📊 Laporan Transaksi", callback_data: "lap:menu" }]);
   rows.push([{ text: "🔁 Mutasi Antar Akun", callback_data: "mut:start" }]);
   // Deposit menyangkut saldo & rekening — dibatasi role admin, sama seperti
   // di web (Pengaturan) & Mini App. employee bisa undefined di beberapa
@@ -221,7 +222,7 @@ async function renderKatalogKategori(env) {
   return { text: "*Katalog PPOB* — pilih kategori:", reply_markup: { inline_keyboard: keyboard } };
 }
 
-async function renderKatalogGrup(env, kategori) {
+async function renderKatalogGrup(env, kategori, isAdmin = false) {
   const { results } = await env.DB.prepare(
     "SELECT DISTINCT product_group FROM products WHERE active = 1 AND category = ? AND product_group IS NOT NULL ORDER BY product_group"
   )
@@ -229,7 +230,7 @@ async function renderKatalogGrup(env, kategori) {
     .all();
   // Cuma 1 grup (atau tidak ada grup sama sekali di kategori ini) -> langsung
   // daftar item, tidak usah nampilin grid provider isi 1 kotak doang.
-  if (results.length <= 1) return renderKatalogItem(env, kategori, null, 0);
+  if (results.length <= 1) return renderKatalogItem(env, kategori, null, 0, isAdmin);
 
   const tombol = results.map((r) => ({
     text: `${iconUntukKategori(r.product_group)} ${r.product_group}`,
@@ -240,12 +241,19 @@ async function renderKatalogGrup(env, kategori) {
   return { text: `*${kategori}* — pilih provider:`, reply_markup: { inline_keyboard: keyboard } };
 }
 
-async function renderKatalogItem(env, kategori, grup, page) {
+// Nama produk masuk ke pesan ber-parse_mode Markdown — karakter _ * ` [ di
+// namanya bisa bikin Telegram menolak seluruh pesan ("can't parse entities"),
+// jadi di-escape dulu khusus di daftar HPP di bawah.
+function escMd(str) {
+  return String(str ?? "").replace(/([_*`\[])/g, "\\$1");
+}
+
+async function renderKatalogItem(env, kategori, grup, page, isAdmin = false) {
   const offset = page * KATALOG_PAGE_SIZE;
   const where = grup ? "category = ? AND product_group = ?" : "category = ?";
   const params = grup ? [kategori, grup] : [kategori];
   const { results } = await env.DB.prepare(
-    `SELECT code, name, sell_price FROM products WHERE active = 1 AND ${where} ORDER BY sell_price ASC LIMIT ? OFFSET ?`
+    `SELECT code, name, sell_price, cost_price, provider FROM products WHERE active = 1 AND ${where} ORDER BY sell_price ASC LIMIT ? OFFSET ?`
   )
     .bind(...params, KATALOG_PAGE_SIZE + 1, offset)
     .all();
@@ -262,8 +270,24 @@ async function renderKatalogItem(env, kategori, grup, page) {
   keyboard.push([{ text: "🔙 Kembali", callback_data: backCb }]);
 
   const judul = grup ? `${kategori} — ${grup}` : kategori;
+  // Admin: tampilkan HPP + harga jual + laba per produk di badan pesan (tombol
+  // tetap ringkas). Kasir biasa TIDAK melihat modal — sama seperti aturan di
+  // detail konfirmasi order & Mini App. portalpulsa tidak punya price list
+  // (modal baru ketahuan dari balasan tiap transaksi), jadi tidak ada angka HPP.
+  let daftar = "";
+  if (isAdmin && rows.length) {
+    daftar =
+      "\n\n" +
+      rows
+        .map((p) =>
+          p.provider === "portalpulsa"
+            ? `• ${escMd(p.name)}\n   HPP: dari balasan · Jual ${rupiah(p.sell_price)}`
+            : `• ${escMd(p.name)}\n   HPP ${rupiah(p.cost_price)} · Jual ${rupiah(p.sell_price)} · Laba ${rupiah(p.sell_price - p.cost_price)}`
+        )
+        .join("\n");
+  }
   return {
-    text: rows.length ? `*${judul}*` : `Tidak ada produk di *${judul}*.`,
+    text: rows.length ? `*${judul}*${daftar}` : `Tidak ada produk di *${judul}*.`,
     reply_markup: { inline_keyboard: keyboard },
   };
 }
@@ -519,6 +543,155 @@ async function eksekusiMutasi(env, chatId, employee, { fromWalletId, toWalletId,
 }
 
 // ---------------------------------------------------------------------------
+// LAPORAN TRANSAKSI PPOB + DEPOSIT — tampil seperti pesan chat (1 baris per
+// kejadian, urut terbaru dulu, halaman-halaman lewat tombol).
+//
+// Waktu di DB = UTC, laporan ditampilkan & dipilah per hari dalam WIB (UTC+7),
+// sama seperti asumsi jam di ppob.js. Role admin melihat modal/laba & deposit;
+// karyawan biasa cuma melihat daftar transaksi PPOB dan penjualannya.
+// ---------------------------------------------------------------------------
+const LAPORAN_PAGE_SIZE = 12;
+const BULAN = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"];
+
+// Buang karakter yg merusak Markdown Telegram dari teks dinamis (kode produk, nama bank).
+function lapEsc(s) {
+  return String(s ?? "").replace(/[_*`\[\]]/g, "");
+}
+
+// Rentang tanggal WIB utk periode: h = hari ini, k = kemarin, w = 7 hari terakhir.
+function lapRentang(periode) {
+  const wibNow = new Date(Date.now() + 7 * 3600 * 1000);
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  const geser = (d, hari) => new Date(d.getTime() + hari * 86400 * 1000);
+  const label = (d) => `${d.getUTCDate()} ${BULAN[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+  if (periode === "k") {
+    const d = geser(wibNow, -1);
+    return { dari: fmt(d), sampai: fmt(d), judul: `Kemarin — ${label(d)}`, multiHari: false };
+  }
+  if (periode === "w") {
+    const d0 = geser(wibNow, -6);
+    return { dari: fmt(d0), sampai: fmt(wibNow), judul: `7 Hari Terakhir — ${label(d0)} s/d ${label(wibNow)}`, multiHari: true };
+  }
+  return { dari: fmt(wibNow), sampai: fmt(wibNow), judul: `Hari Ini — ${label(wibNow)}`, multiHari: false };
+}
+
+function renderLaporanMenu() {
+  return {
+    text: "*Laporan Transaksi PPOB & Deposit* — pilih periode:",
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "📅 Hari Ini", callback_data: "lap:h:0" }, { text: "🕘 Kemarin", callback_data: "lap:k:0" }],
+        [{ text: "🗓️ 7 Hari Terakhir", callback_data: "lap:w:0" }],
+        [{ text: "🏠 Menu Utama", callback_data: "m:main" }],
+      ],
+    },
+  };
+}
+
+async function renderLaporan(env, employee, periode, page) {
+  const isAdmin = employee?.role === "admin";
+  const { dari, sampai, judul, multiHari } = lapRentang(periode);
+
+  // Order PPOB (semua provider) dalam rentang hari WIB.
+  const { results: orders } = await env.DB.prepare(
+    `SELECT product_code, target, status, finalized, sell_price, cost_price, provider,
+            datetime(created_at, '+7 hours') AS waktu
+     FROM ppob_orders
+     WHERE date(created_at, '+7 hours') BETWEEN ? AND ?
+     ORDER BY created_at DESC LIMIT 500`
+  )
+    .bind(dari, sampai)
+    .all();
+
+  // Deposit portalpulsa — cuma admin. Dibungkus try/catch: kalau migrasi
+  // 2026-09-27-add-portalpulsa-deposit-status.sql belum dijalankan, kolom
+  // status/nominal_transfer belum ada dan query ini error; laporan PPOB tetap tampil.
+  let deposits = [];
+  let depositCatatan = "";
+  if (isAdmin) {
+    try {
+      const r = await env.DB.prepare(
+        `SELECT bank, nominal, nominal_transfer, status, datetime(created_at, '+7 hours') AS waktu
+         FROM portalpulsa_deposits
+         WHERE date(created_at, '+7 hours') BETWEEN ? AND ?
+         ORDER BY created_at DESC LIMIT 200`
+      )
+        .bind(dari, sampai)
+        .all();
+      deposits = r.results;
+    } catch (err) {
+      depositCatatan = "\n_(Data deposit belum bisa dibaca — migrasi tabel deposit belum dijalankan.)_";
+    }
+  }
+
+  // Gabung jadi satu daftar "chat", terbaru di atas.
+  const kejadian = [
+    ...orders.map((o) => ({ tipe: "ppob", waktu: o.waktu, o })),
+    ...deposits.map((d) => ({ tipe: "deposit", waktu: d.waktu, d })),
+  ].sort((a, b) => (a.waktu < b.waktu ? 1 : a.waktu > b.waktu ? -1 : 0));
+
+  // Ringkasan dihitung dari SEMUA kejadian periode ini, bukan cuma halaman yang tampil.
+  const sukses = orders.filter((o) => o.status === "sukses");
+  const final = sukses.filter((o) => o.finalized);
+  const gagal = orders.filter((o) => o.status === "gagal").length;
+  const pending = orders.filter((o) => o.status === "pending").length;
+  const jual = final.reduce((n, o) => n + (o.sell_price || 0), 0);
+  const modal = final.reduce((n, o) => n + (o.cost_price || 0), 0);
+  const depSukses = deposits.filter((d) => d.status === "sukses");
+  const depTotal = depSukses.reduce((n, d) => n + (d.nominal_transfer || d.nominal || 0), 0);
+
+  const ringkas = [
+    `*Laporan ${judul}*`,
+    `PPOB: ${sukses.length} sukses (${final.length} sudah konfirmasi harga), ${gagal} gagal, ${pending} pending`,
+    `Penjualan: ${rupiah(jual)}` + (isAdmin ? ` · Modal: ${rupiah(modal)} · Laba: ${rupiah(jual - modal)}` : ""),
+  ];
+  if (isAdmin) ringkas.push(`Deposit: ${depSukses.length} sukses = ${rupiah(depTotal)} (dari ${deposits.length} permintaan)`);
+  if (depositCatatan) ringkas.push(depositCatatan.trim());
+
+  if (!kejadian.length) {
+    return {
+      text: ringkas.join("\n") + "\n\n_Belum ada transaksi di periode ini._",
+      reply_markup: { inline_keyboard: [[{ text: "🔙 Ganti Periode", callback_data: "lap:menu" }], [{ text: "🏠 Menu Utama", callback_data: "m:main" }]] },
+    };
+  }
+
+  const totalPage = Math.ceil(kejadian.length / LAPORAN_PAGE_SIZE);
+  const pageAman = Math.min(Math.max(page, 0), totalPage - 1);
+  const tampil = kejadian.slice(pageAman * LAPORAN_PAGE_SIZE, (pageAman + 1) * LAPORAN_PAGE_SIZE);
+
+  const jam = (w) => (multiHari ? `${w.slice(8, 10)}/${w.slice(5, 7)} ${w.slice(11, 16)}` : w.slice(11, 16));
+  const baris = tampil.map((k) => {
+    if (k.tipe === "deposit") {
+      const d = k.d;
+      const ikon = d.status === "sukses" ? "✅" : d.status === "gagal" ? "❌" : "⏳";
+      const nominalTampil = d.nominal_transfer || d.nominal;
+      return `${jam(k.waktu)} 💰${ikon} *Deposit ${lapEsc(d.bank)}* ${rupiah(nominalTampil)} (${d.status})`;
+    }
+    const o = k.o;
+    const badge = o.provider === "portalpulsa" ? "PP" : "OKE";
+    const ikon = o.status === "gagal" ? "❌" : o.status === "pending" ? "⏳" : o.finalized ? "✅" : "🟡";
+    let detail;
+    if (o.status !== "sukses") detail = o.status;
+    else if (!o.finalized) detail = "sukses, belum konfirmasi harga";
+    else detail = `jual ${rupiah(o.sell_price)}` + (isAdmin ? ` · modal ${rupiah(o.cost_price)} · laba ${rupiah(o.sell_price - o.cost_price)}` : "");
+    return `${jam(k.waktu)} ${ikon} [${badge}] *${lapEsc(o.product_code)}* ${lapEsc(o.target)} — ${detail}`;
+  });
+
+  const nav = [];
+  if (pageAman > 0) nav.push({ text: "⬅️ Lebih baru", callback_data: `lap:${periode}:${pageAman - 1}` });
+  if (pageAman < totalPage - 1) nav.push({ text: "Lebih lama ➡️", callback_data: `lap:${periode}:${pageAman + 1}` });
+  const keyboard = [];
+  if (nav.length) keyboard.push(nav);
+  keyboard.push([{ text: "🔙 Ganti Periode", callback_data: "lap:menu" }]);
+  keyboard.push([{ text: "🏠 Menu Utama", callback_data: "m:main" }]);
+
+  return {
+    text: `${ringkas.join("\n")}\n\n${baris.join("\n")}\n\n_Halaman ${pageAman + 1}/${totalPage} · ✅ final · 🟡 belum konfirmasi harga · ⏳ pending · ❌ gagal_`,
+    reply_markup: { inline_keyboard: keyboard },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // ROUTER: tombol ditekan (callback_query)
 // ---------------------------------------------------------------------------
 
@@ -549,6 +722,10 @@ export async function handleAdminCallback(env, callbackQuery) {
         text: lines.length ? lines.join("\n") : "Belum ada akun saldo distributor.",
         reply_markup: { inline_keyboard: [[{ text: "🏠 Menu Utama", callback_data: "m:main" }]] },
       };
+    } else if (ns === "lap" && action === "menu") {
+      payload = renderLaporanMenu();
+    } else if (ns === "lap" && ["h", "k", "w"].includes(action)) {
+      payload = await renderLaporan(env, employee, action, Number(arg) || 0);
     } else if (ns === "h" && action === "l") {
       payload = await renderHutangList(env, Number(arg) || 0);
     } else if (ns === "h" && action === "s") {
@@ -631,13 +808,13 @@ export async function handleAdminCallback(env, callbackQuery) {
     } else if (ns === "k" && action === "kat") {
       payload = await renderKatalogKategori(env);
     } else if (ns === "k" && action === "grp") {
-      payload = await renderKatalogGrup(env, arg);
+      payload = await renderKatalogGrup(env, arg, employee.role === "admin");
     } else if (ns === "k" && action === "itg") {
       const [kategori, grup, pageStr] = arg.split("|");
-      payload = await renderKatalogItem(env, kategori, grup, Number(pageStr) || 0);
+      payload = await renderKatalogItem(env, kategori, grup, Number(pageStr) || 0, employee.role === "admin");
     } else if (ns === "k" && action === "itk") {
       const [kategori, pageStr] = arg.split("|");
-      payload = await renderKatalogItem(env, kategori, null, Number(pageStr) || 0);
+      payload = await renderKatalogItem(env, kategori, null, Number(pageStr) || 0, employee.role === "admin");
     } else if (ns === "b" && action === "cari") {
       await setSession(env, chatId, "awaiting_ppob_search", {});
       payload = {

@@ -22,6 +22,13 @@ function rupiah(n) {
   return "Rp" + Number(n || 0).toLocaleString("id-ID");
 }
 
+// SUKSES -> hijau, PENDING -> kuning, EXPIRED/GAGAL -> merah (kelas .badge di style.css)
+function badgeDeposit(label) {
+  if (label === "SUKSES") return "sukses";
+  if (label === "PENDING") return "pending";
+  return "gagal";
+}
+
 async function load() {
   const [s, w, m] = await Promise.all([api.get("/api/store-settings"), api.get("/api/wallets"), api.get("/api/modal")]);
   settings.value = s;
@@ -202,10 +209,25 @@ onMounted(() => {
         <div v-if="depositMsg" class="ok-box" style="white-space: pre-wrap; margin-top: 12px">{{ depositMsg }}</div>
 
         <div v-if="depositHistory.length" style="margin-top: 16px">
-          <h4 style="font-size: 14px; margin-bottom: 8px">Riwayat Deposit Terakhir</h4>
-          <div v-for="d in depositHistory" :key="d.id" style="border-top: 1px solid #eee; padding: 8px 0; font-size: 13px">
-            <div><b>{{ d.bank }}</b> — Rp {{ rupiah(d.nominal) }} <span class="muted">({{ d.employee_name || "?" }}, {{ d.created_at }})</span></div>
-            <div class="muted" style="white-space: pre-wrap; margin-top: 4px">{{ d.raw_reply }}</div>
+          <h4 style="font-size: 14px; margin-bottom: 8px">Riwayat Deposit</h4>
+          <!-- Satu kartu per deposit, gaya riwayat deposit di aplikasi portalpulsa:
+               Bank / Nominal (yang benar-benar ditransfer, termasuk kode unik) / Status / Update. -->
+          <div
+            v-for="d in depositHistory"
+            :key="d.id"
+            style="border: 1px solid #d9d9d9; border-radius: 4px; padding: 4px 12px; margin-bottom: 10px; font-size: 14px"
+          >
+            <div class="dep-row"><b>Bank</b><span>{{ d.bank }}</span></div>
+            <div class="dep-row"><b>Nominal</b><span class="num">{{ rupiah(d.nominal_tampil) }}</span></div>
+            <div class="dep-row">
+              <b>Status</b>
+              <span class="badge" :class="badgeDeposit(d.status_label)">{{ d.status_label }}</span>
+            </div>
+            <div class="dep-row"><b>Update</b><span class="num">{{ d.waktu_update }}</span></div>
+            <details style="padding: 4px 0 8px">
+              <summary class="muted" style="font-size: 12px; cursor: pointer">Balasan provider · oleh {{ d.employee_name || "?" }}</summary>
+              <div class="muted" style="white-space: pre-wrap; margin-top: 4px; font-size: 12px">{{ d.raw_reply }}</div>
+            </details>
           </div>
         </div>
       </div>
@@ -281,3 +303,8 @@ onMounted(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.dep-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #ececec; }
+.dep-row b { font-weight: 600; }
+</style>

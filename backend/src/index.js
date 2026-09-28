@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { sendJabberCommand, listenJabberMessages } from "./jabber.js";
+import { sendJabberCommand, listenJabberMessages, setJabberReplyHook } from "./jabber.js";
 import { sendTelegramMessage } from "./telegram.js";
-import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, extractTokenCode, syncPpobPrices, getProviderConfig, finalizePpobOrder, checkDistributorBalance, parseTagihanListrikDetail, parsePortalpulsaDetail, assertCfgComplete, kirimDepositPortalpulsa, parseDepositSusulan, selesaikanDepositSusulan, tandaiDepositKadaluwarsa } from "./ppob.js";
+import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, extractTokenCode, syncPpobPrices, getProviderConfig, finalizePpobOrder, checkDistributorBalance, parseTagihanListrikDetail, parsePortalpulsaDetail, assertCfgComplete, kirimDepositPortalpulsa, parseDepositSusulan, selesaikanDepositSusulan, tandaiDepositKadaluwarsa, formatBarisDeposit } from "./ppob.js";
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
 import { getEmployeeByChatId, handleLinkCommand, sendMainMenu, handleAdminCallback, handleAdminSessionMessage } from "./bot-admin.js";
 import { hitungAsetBersih, catatSnapshotModalHarian } from "./modal.js";
@@ -398,11 +398,12 @@ app.post("/api/admin/portalpulsa/deposit", requireAdmin, async (c) => {
 // tidak kehilangan instruksi transfer kalau sudah tertutup/lupa dicatat.
 app.get("/api/admin/portalpulsa/deposits", requireAdmin, async (c) => {
   const rows = await c.env.DB.prepare(
-    `SELECT d.*, e.name AS employee_name FROM portalpulsa_deposits d
+    `SELECT d.*, e.name AS employee_name, datetime(COALESCE(d.updated_at, d.created_at), '+7 hours') AS waktu_update
+     FROM portalpulsa_deposits d
      LEFT JOIN employees e ON e.id = d.employee_id
      ORDER BY d.id DESC LIMIT 20`
   ).all();
-  return c.json({ ok: true, deposits: rows.results });
+  return c.json({ ok: true, deposits: rows.results.map(formatBarisDeposit) });
 });
 
 // Kompatibel mundur: tanpa parameter apa pun, tetap balas array polos semua
@@ -2104,6 +2105,51 @@ async function prosesPesanJabber(env, text) {
   return hasil;
 }
 
+// ---------------------------------------------------------------------------
+// FEED BALASAN JABBER -> TELEGRAM. Setiap pesan yang diterima dari JID target
+// (OkeConnect / portalpulsa) dikirim ke chat Telegram admin apa adanya, seperti
+// chat. Sumbernya dua: (1) sesi Worker sendiri (waktu kirim order / cron cek
+// ulang / deposit — lewat setJabberReplyHook di jabber.js) dan (2) relay 24 jam
+// (webhook /api/relay/jabber) utk balasan telat yang tidak tertangkap sesi Worker.
+// Satu pesan hanya masuk ke SATU koneksi Jabber (yg prioritasnya tertinggi),
+// jadi tidak dobel.
+//
+// Penerima: JABBER_FEED_CHAT_ID (daftar chat id dipisah koma) kalau diisi,
+// selain itu semua admin aktif yang sudah /hubung ke Telegram. Matikan dengan
+// JABBER_FEED_OFF=1.
+// ---------------------------------------------------------------------------
+function labelProviderDariJid(env, from) {
+  const f = String(from || "").toLowerCase();
+  const pp = String(env.PORTALPULSA_TARGET || "trx@im.portalpulsa.com").toLowerCase();
+  const oke = String(env.JABBER_TARGET || "okeconnect@gojabber.com").toLowerCase();
+  if (f === pp) return "portalpulsa";
+  if (f === oke) return "OkeConnect";
+  return from || "?";
+}
+
+async function teruskanJabberKeTelegram(env, { from, text, isError, sumber }) {
+  if (env.JABBER_FEED_OFF === "1" || !env.TELEGRAM_BOT_TOKEN) return;
+  let chatIds;
+  if (env.JABBER_FEED_CHAT_ID) {
+    chatIds = String(env.JABBER_FEED_CHAT_ID).split(",").map((s) => s.trim()).filter(Boolean);
+  } else {
+    const { results } = await env.DB.prepare(
+      "SELECT telegram_id FROM employees WHERE role = 'admin' AND active = 1 AND telegram_id IS NOT NULL"
+    ).all();
+    chatIds = results.map((r) => r.telegram_id);
+  }
+  if (!chatIds.length) return;
+
+  const wib = new Date(Date.now() + 7 * 3600 * 1000).toISOString().slice(11, 16);
+  const isi = String(text).replace(/`/g, "'").slice(0, 3500); // backtick merusak blok kode Markdown
+  const pesan = `📨 *${labelProviderDariJid(env, from)}*${isError ? " ⚠️" : ""} · ${wib} · _${sumber}_\n\`\`\`\n${isi}\n\`\`\``;
+  await Promise.all(chatIds.map((id) => sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, id, pesan).catch(() => {})));
+}
+
+function pasangFeedJabber(env) {
+  setJabberReplyHook((r) => teruskanJabberKeTelegram(env, { ...r, sumber: "sesi Worker" }));
+}
+
 app.post("/api/relay/jabber", async (c) => {
   if (!c.env.RELAY_SECRET) {
     return c.json({ ok: false, error: "RELAY_SECRET belum diatur di Worker" }, 503);
@@ -2132,6 +2178,11 @@ app.post("/api/relay/jabber", async (c) => {
   if (data.type === "message") {
     const text = String(data.body || "").slice(0, 4000);
     if (!text.trim()) return c.json({ ok: true, updated: [] });
+    try {
+      await teruskanJabberKeTelegram(c.env, { from: data.from, text, isError: false, sumber: "relay" });
+    } catch (err) {
+      console.error("[relay] feed Telegram gagal:", err?.message || err);
+    }
     const updated = await prosesPesanJabber(c.env, text);
     console.log("[relay] pesan diproses:", JSON.stringify({ updated, body: text.slice(0, 200) }));
     return c.json({ ok: true, updated });
@@ -2269,8 +2320,12 @@ async function cleanupOldData(env) {
 }
 
 export default {
-  fetch: app.fetch,
+  fetch(request, env, ctx) {
+    pasangFeedJabber(env);
+    return app.fetch(request, env, ctx);
+  },
   async scheduled(event, env, ctx) {
+    pasangFeedJabber(env);
     // Hanya ada SATU cron (*/5 * * * *) di wrangler.toml; jadwal lain dibedakan
     // dari waktu jadwal (UTC) supaya hemat kuota cron akun Workers Free.
     const t = new Date(event.scheduledTime);

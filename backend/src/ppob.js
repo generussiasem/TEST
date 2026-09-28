@@ -163,10 +163,22 @@ function cocokkanBalasanCekPortalpulsa(order, reply) {
   for (const line of lines) {
     const h = line.match(/^@\s*(\d{4})-(\d{2})-(\d{2})/);
     if (h) continue; // header tanggal — tidak dipakai utk penyaringan (tak ada jam pembanding)
+    // Format daftar balasan "STATUS NoHp": "{id_provider} {kode} {nohp} {status...}"
     const e = line.match(/^(\S+)\s+([A-Za-z0-9]+)\s+(\d{6,})\s+(.*)$/);
-    if (!e) continue;
-    if (e[2].toLowerCase() !== kode || digits(e[3]) !== tujuan) continue;
-    kandidat.push({ line, providerRefId: e[1], status: detectPpobStatus(e[4]) });
+    if (e && e[2].toLowerCase() === kode && digits(e[3]) === tujuan) {
+      kandidat.push({ line, providerRefId: e[1], status: detectPpobStatus(e[4]) });
+      continue;
+    }
+    // Format balasan transaksi SPONTAN (yang datang sendiri lewat relay begitu
+    // provider selesai memproses, tanpa didahului perintah STATUS) — TIDAK ada
+    // id_provider di depan, cuma "{kode} {nohp} {status...}", mis.
+    // "S5 085225492482 SUKSES. SN: ..." atau "S50 0852... Tidak diproses Saldo
+    // tidak cukup...". Tanpa jalur ini, balasan telat portalpulsa yang
+    // ditangkap relay tidak akan pernah cocok ke order pending-nya.
+    const f = line.match(/^([A-Za-z0-9]+)\s+(\d{6,})\s+(.*)$/);
+    if (f && f[1].toLowerCase() === kode && digits(f[2]) === tujuan) {
+      kandidat.push({ line, providerRefId: null, status: detectPpobStatus(f[3]) });
+    }
   }
   if (!kandidat.length) {
     return { matched: false, reason: "tidak ada baris dengan kode produk dan nomor tujuan yang cocok" };
@@ -378,7 +390,7 @@ export async function selesaikanDepositSusulan(env, { nominal, status, saldoAkhi
   const rawReplyBaru = `${deposit.raw_reply}\n---\n${rawText}`;
 
   if (status === "gagal") {
-    await env.DB.prepare("UPDATE portalpulsa_deposits SET status = 'gagal', raw_reply = ? WHERE id = ?")
+    await env.DB.prepare("UPDATE portalpulsa_deposits SET status = 'gagal', raw_reply = ?, updated_at = datetime('now') WHERE id = ?")
       .bind(rawReplyBaru, deposit.id)
       .run();
     return { depositId: deposit.id, status: "gagal", alasan };
@@ -404,7 +416,7 @@ export async function selesaikanDepositSusulan(env, { nominal, status, saldoAkhi
     saldoAkhir != null
       ? env.DB.prepare("UPDATE wallets SET balance = ? WHERE id = ?").bind(saldoAkhir, deposit.distributor_wallet_id)
       : env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?").bind(nominal, deposit.distributor_wallet_id),
-    env.DB.prepare("UPDATE portalpulsa_deposits SET status = 'sukses', raw_reply = ?, transaction_id = ? WHERE id = ?").bind(
+    env.DB.prepare("UPDATE portalpulsa_deposits SET status = 'sukses', raw_reply = ?, transaction_id = ?, updated_at = datetime('now') WHERE id = ?").bind(
       rawReplyBaru,
       transactionId,
       deposit.id
@@ -412,6 +424,37 @@ export async function selesaikanDepositSusulan(env, { nominal, status, saldoAkhi
   ]);
 
   return { depositId: deposit.id, status: "sukses", transactionId };
+}
+
+/**
+ * Bentuk baris riwayat deposit siap tampil (web, Mini App) — SATU tempat
+ * supaya label & angkanya sama di semua tampilan:
+ *  - nominal_tampil: nominal yang BENAR-BENAR ditransfer (ada kode unik, mis.
+ *    Rp 50.094) kalau sudah diketahui dari balasan tahap-2, kalau belum baru
+ *    nominal yang diketik.
+ *  - status_label: SUKSES / PENDING / EXPIRED / GAGAL. EXPIRED = gagal karena
+ *    hangus/kadaluwarsa (balasan provider "DIBATALKAN karena hangus" atau
+ *    penanda otomatis kita setelah 13 jam) — dicek cuma di potongan balasan
+ *    TERAKHIR, karena instruksi transfer tahap-2 juga menyebut "12jam" dan
+ *    tidak boleh salah dikira hangus.
+ */
+export function formatBarisDeposit(row) {
+  const potonganAkhir = String(row.raw_reply || "").split("\n---\n").pop();
+  let statusLabel;
+  if (row.status === "sukses") statusLabel = "SUKSES";
+  else if (row.status === "pending") statusLabel = "PENDING";
+  else statusLabel = /hangus|kadaluwarsa|expired|lebih dari 12/i.test(potonganAkhir) ? "EXPIRED" : "GAGAL";
+  return {
+    id: row.id,
+    bank: row.bank,
+    nominal: row.nominal,
+    nominal_tampil: row.nominal_transfer || row.nominal,
+    status: row.status,
+    status_label: statusLabel,
+    waktu_update: row.waktu_update,
+    employee_name: row.employee_name,
+    raw_reply: row.raw_reply,
+  };
 }
 
 /** Fallback: deposit `pending` yang sudah lewat window (13 jam, kasih buffer
@@ -423,7 +466,7 @@ export async function tandaiDepositKadaluwarsa(env) {
   ).all();
   for (const d of results) {
     await env.DB.prepare(
-      "UPDATE portalpulsa_deposits SET status = 'gagal', raw_reply = raw_reply || ? WHERE id = ?"
+      "UPDATE portalpulsa_deposits SET status = 'gagal', raw_reply = raw_reply || ?, updated_at = datetime('now') WHERE id = ?"
     )
       .bind("\n---\n[Sistem] Tidak ada balasan provider dalam 13 jam, ditandai gagal/kadaluwarsa otomatis.", d.id)
       .run();

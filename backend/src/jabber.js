@@ -19,6 +19,56 @@ function xmlEscape(str) {
     .replace(/"/g, "&quot;");
 }
 
+// ---------------------------------------------------------------------------
+// FEED BALASAN JABBER — setiap pesan yang masuk dari JID target (OkeConnect /
+// portalpulsa) diteruskan ke hook ini, TERLEPAS dari cocok atau tidaknya dgn
+// transaksi yg sedang ditunggu. index.js memasang hook yang mengirimnya ke
+// Telegram admin (seperti chat). Hook dipasang per-request oleh index.js
+// (setJabberReplyHook) karena butuh `env`; kalau tidak dipasang, tidak ada efek.
+// ---------------------------------------------------------------------------
+let replyHook = null;
+export function setJabberReplyHook(fn) {
+  replyHook = typeof fn === "function" ? fn : null;
+}
+
+function decodeXmlEntities(t) {
+  return String(t)
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+// Ambil SEMUA <message> dari target di buffer yg belum pernah diteruskan
+// (seenAll = Set milik satu sesi login, supaya buffer yg terus membesar tidak
+// meneruskan pesan yg sama berulang). Tidak menulis log (beda dgn
+// extractAllReplies) supaya console tidak dobel-noisy.
+async function feedNewReplies(buffer, targetBareJid, seenAll) {
+  if (!replyHook) return;
+  const regex = /<message\b([^>]*)>([\s\S]*?)<\/message>/g;
+  let m;
+  while ((m = regex.exec(buffer))) {
+    const attrs = m[1];
+    const fromMatch = attrs.match(/from=["']([^"']+)["']/);
+    if (!fromMatch) continue;
+    const fromBare = fromMatch[1].split("/")[0];
+    if (fromBare.toLowerCase() !== targetBareJid.toLowerCase()) continue;
+    const isError = /type=["']error["']/.test(attrs);
+    const bodyMatch = m[2].match(/<body[^>]*>([\s\S]*?)<\/body>/);
+    if (!bodyMatch && !isError) continue; // stanza tanpa isi teks (mis. chat-state) — bukan balasan
+    const text = decodeXmlEntities(bodyMatch ? bodyMatch[1] : "(pesan error dari server Jabber)");
+    const key = (isError ? "E:" : "M:") + text;
+    if (seenAll.has(key)) continue;
+    seenAll.add(key);
+    try {
+      await replyHook({ from: fromBare, text, isError });
+    } catch (err) {
+      console.error("[jabber-feed] hook gagal:", err?.message || err);
+    }
+  }
+}
+
 // Ambil SEMUA stanza <message> di buffer yang BENAR datang dari targetBareJid
 // DAN benar-benar menjawab ref_id yang kita kirim (expectedRefToken).
 // Ini untuk menghindari 2 sumber salah-tangkap:
@@ -167,6 +217,7 @@ async function waitForFinalReply(reader, targetBareJid, expectedRefToken, expect
   let latest = null;
   const historySeen = []; // semua balasan.text yang lewat sebelum final (buat collectHistory)
   const seenTexts = new Set();
+  const feedSeen = new Set(); // dedup utk feed Telegram (lihat feedNewReplies)
   while (Date.now() < deadline) {
     const remaining = deadline - Date.now();
     const { value, done } = await Promise.race([
@@ -176,6 +227,7 @@ async function waitForFinalReply(reader, targetBareJid, expectedRefToken, expect
     if (done) break;
     if (value === undefined) continue;
     buffer += decoder.decode(value, { stream: true });
+    await feedNewReplies(buffer, targetBareJid, feedSeen);
     const replies = extractAllReplies(buffer, targetBareJid, expectedRefToken, expectedPrefix, acceptAnyFromTarget);
     for (const r of replies) {
       if (!seenTexts.has(r.text)) {
@@ -339,6 +391,7 @@ export async function listenJabberMessages({ jid, password, to, timeoutMs = 2000
     const decoder = new TextDecoder();
     const deadline = Date.now() + timeoutMs;
     const seen = [];
+    const feedSeen = new Set();
     while (Date.now() < deadline) {
       const remaining = deadline - Date.now();
       const { value, done } = await Promise.race([
@@ -348,6 +401,7 @@ export async function listenJabberMessages({ jid, password, to, timeoutMs = 2000
       if (done) break;
       if (value === undefined) continue;
       buffer += decoder.decode(value, { stream: true });
+      await feedNewReplies(buffer, targetBareJid, feedSeen);
       // acceptAnyFromTarget=true, tanpa expectedRefToken/expectedPrefix — kita
       // memang sengaja mau SEMUA pesan dari target, bukan mencocokkan ref
       // tertentu (portalpulsa tidak pernah menyebut ref di balasan deposit).

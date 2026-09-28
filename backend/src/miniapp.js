@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { verifyTelegramInitData } from "./telegram-miniapp-auth.js";
-import { placePpobOrder, cekTagihan, finalizePpobOrder, kirimDepositPortalpulsa } from "./ppob.js";
+import { placePpobOrder, cekTagihan, finalizePpobOrder, kirimDepositPortalpulsa, formatBarisDeposit } from "./ppob.js";
 import { DebtError, bayarHutang, titipUang, catatHutangManual } from "./debt.js";
 
 // ---------------------------------------------------------------------------
@@ -159,8 +159,12 @@ miniapp.get("/products", async (c) => {
     where.push("(name LIKE ? OR code LIKE ? OR product_group LIKE ?)");
     params.push(`%${q}%`, `%${q}%`, `%${q}%`);
   }
+  // cost_price (HPP/modal) HANYA dikirim ke admin — kasir biasa tidak boleh
+  // melihat modal toko (sama seperti aturan di bot & dashboard web).
+  const employee = c.get("employee");
+  const kolomHpp = employee.role === "admin" ? ", cost_price, provider" : "";
   const { results } = await c.env.DB.prepare(
-    `SELECT code, name, category, product_group, sell_price FROM products WHERE ${where.join(" AND ")} ORDER BY product_group, sell_price ASC LIMIT 25`
+    `SELECT code, name, category, product_group, sell_price${kolomHpp} FROM products WHERE ${where.join(" AND ")} ORDER BY product_group, sell_price ASC LIMIT 25`
   )
     .bind(...params)
     .all();
@@ -169,11 +173,14 @@ miniapp.get("/products", async (c) => {
 
 // Katalog PPOB lengkap (bukan cuma hasil pencarian terbatas 25 seperti
 // /products) — dipakai tab "Katalog" buat lihat-lihat semua harga per
-// kategori sebelum order, tanpa wajib ketik kata kunci dulu. Cuma kolom
-// publik (TIDAK termasuk cost_price/modal — itu urusan internal toko).
+// kategori sebelum order, tanpa wajib ketik kata kunci dulu. cost_price
+// (HPP/modal) cuma ikut untuk admin — urusan internal toko, kasir biasa
+// tidak melihatnya.
 miniapp.get("/catalog", async (c) => {
+  const employee = c.get("employee");
+  const kolomHpp = employee.role === "admin" ? ", cost_price, provider" : "";
   const { results } = await c.env.DB.prepare(
-    `SELECT code, name, category, product_group, sell_price FROM products
+    `SELECT code, name, category, product_group, sell_price${kolomHpp} FROM products
      WHERE active = 1 AND code IS NOT NULL
      ORDER BY category, product_group, sell_price ASC`
   ).all();
@@ -279,11 +286,12 @@ miniapp.post("/portalpulsa/deposit", async (c) => {
 
 miniapp.get("/portalpulsa/deposits", async (c) => {
   const rows = await c.env.DB.prepare(
-    `SELECT d.*, e.name AS employee_name FROM portalpulsa_deposits d
+    `SELECT d.*, e.name AS employee_name, datetime(COALESCE(d.updated_at, d.created_at), '+7 hours') AS waktu_update
+     FROM portalpulsa_deposits d
      LEFT JOIN employees e ON e.id = d.employee_id
      ORDER BY d.id DESC LIMIT 20`
   ).all();
-  return c.json(rows.results);
+  return c.json(rows.results.map(formatBarisDeposit));
 });
 
 // ---------------------------------------------------------------------------

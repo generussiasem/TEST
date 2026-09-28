@@ -346,6 +346,18 @@ function renderPpobTab() {
   loadProducts("");
 }
 
+// Baris kecil "HPP … · Jual … · Laba …" utk admin. cost_price cuma dikirim
+// backend ke admin (lihat /products & /catalog di miniapp.js), jadi utk kasir
+// biasa p.cost_price undefined -> baris ini kosong, tidak ada bocor modal.
+// portalpulsa tidak punya price list (modal baru ketahuan dari balasan
+// transaksi) — tampil "HPP: dari balasan" bukan angka 0 yang menyesatkan.
+function hppLine(p) {
+  if (p.cost_price === undefined) return "";
+  if (p.provider === "portalpulsa") return '<div class="muted">HPP: dari balasan transaksi · Jual ' + rupiah(p.sell_price) + '</div>';
+  const laba = (p.sell_price || 0) - (p.cost_price || 0);
+  return '<div class="muted">HPP ' + rupiah(p.cost_price) + ' · Jual ' + rupiah(p.sell_price) + ' · Laba ' + rupiah(laba) + '</div>';
+}
+
 async function loadProducts(q) {
   const listEl = document.getElementById("ppobList");
   listEl.innerHTML = '<div class="spinner">Memuat...</div>';
@@ -356,6 +368,7 @@ async function loadProducts(q) {
       '<div class="list-item" data-code="' + esc(p.code) + '">' +
         '<div class="row"><b>' + esc(p.name) + '</b><span class="badge">' + rupiah(p.sell_price) + '</span></div>' +
         '<div class="muted">' + esc(p.code) + (p.product_group ? " · " + esc(p.product_group) : "") + '</div>' +
+        hppLine(p) +
       '</div>'
     ).join("");
     listEl.querySelectorAll(".list-item").forEach((el) => el.addEventListener("click", () => showOrderForm(rows.find((r) => r.code === el.dataset.code))));
@@ -504,18 +517,34 @@ async function showDepositPortalpulsaForm() {
   loadDepositHistory();
 }
 
+// Riwayat deposit — satu kartu per deposit (Bank / Nominal yang benar-benar
+// ditransfer / Status / Update), gaya riwayat deposit di aplikasi portalpulsa.
+// Field siap tampil (nominal_tampil, status_label, waktu_update) dihitung di
+// backend (formatBarisDeposit, ppob.js) supaya sama dengan tampilan web.
+function badgeDepositStyle(label) {
+  if (label === "SUKSES") return "background:#dcefe4;color:#1f6f54";
+  if (label === "PENDING") return "background:#fbeccb;color:#7a5514";
+  return "background:#f6d9d3;color:#a8412a"; // EXPIRED / GAGAL
+}
+
 async function loadDepositHistory() {
   const el = document.getElementById("depHistory");
   if (!el) return;
   try {
     const rows = await api("/portalpulsa/deposits");
+    const baris = (label, isi) =>
+      '<div class="row" style="padding:7px 0;border-bottom:1px solid #ececec"><b>' + label + '</b><span>' + isi + '</span></div>';
     el.innerHTML = !rows.length
       ? '<p class="muted">Belum ada riwayat.</p>'
       : rows.map((d) =>
-          '<div class="list-item">' +
-            '<div class="row"><b>' + esc(d.bank) + '</b><span class="badge">' + rupiah(d.nominal) + '</span></div>' +
-            '<div class="muted">' + esc(d.employee_name || "?") + ' · ' + esc(d.created_at) + '</div>' +
-            '<div class="muted" style="white-space:pre-wrap;margin-top:4px">' + esc(d.raw_reply || "") + '</div>' +
+          '<div style="border:1px solid #d9d9d9;border-radius:6px;padding:2px 10px;margin-bottom:10px">' +
+            baris("Bank", esc(d.bank)) +
+            baris("Nominal", rupiah(d.nominal_tampil)) +
+            baris("Status", '<span class="badge" style="' + badgeDepositStyle(d.status_label) + '">' + esc(d.status_label) + '</span>') +
+            baris("Update", esc(d.waktu_update || "")) +
+            '<details style="padding:4px 0 8px"><summary class="muted" style="cursor:pointer">Balasan provider · oleh ' + esc(d.employee_name || "?") + '</summary>' +
+              '<div class="muted" style="white-space:pre-wrap;margin-top:4px">' + esc(d.raw_reply || "") + '</div>' +
+            '</details>' +
           '</div>'
         ).join("");
   } catch (err) {
@@ -658,6 +687,7 @@ function renderKatalogTab() {
             '<div class="list-item" data-code="' + esc(p.code) + '">' +
               '<div class="row"><b>' + esc(p.name) + '</b><span class="badge">' + rupiah(p.sell_price) + '</span></div>' +
               '<div class="muted">' + esc(p.code) + '</div>' +
+              hppLine(p) +
             '</div>'
           ).join("")) +
       '</div>';

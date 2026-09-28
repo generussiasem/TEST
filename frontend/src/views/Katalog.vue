@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { api } from "../api.js";
+import { isAdmin } from "../store.js";
 
 const router = useRouter();
 const products = ref([]);
@@ -165,17 +166,33 @@ onMounted(load);
           <input v-model="search" placeholder="Cari dalam grup ini…" style="max-width: 240px" />
         </div>
         <table>
+          <thead>
+            <tr>
+              <th>Produk</th>
+              <!-- HPP (modal) cuma utk admin — sama seperti di bot & Mini App, kasir biasa tidak melihat modal toko -->
+              <th v-if="isAdmin()" style="text-align: right">HPP</th>
+              <th style="text-align: right">Harga Jual</th>
+              <th></th>
+            </tr>
+          </thead>
           <tbody>
             <tr v-for="p in productsInGroup" :key="p.id">
               <td>
                 {{ p.name }}
                 <div class="muted num" style="font-size: 12px">#{{ p.code }}</div>
               </td>
-              <td class="num" style="text-align: right">{{ rupiah(p.sell_price) }}</td>
+              <td v-if="isAdmin()" class="num" style="text-align: right">
+                <template v-if="p.provider === 'portalpulsa'"><span class="muted" title="portalpulsa tidak punya price list — modal dari balasan tiap transaksi">–</span></template>
+                <template v-else>{{ rupiah(p.cost_price) }}</template>
+              </td>
+              <td class="num" style="text-align: right">
+                {{ rupiah(p.sell_price) }}
+                <div v-if="isAdmin() && p.provider !== 'portalpulsa'" class="muted" style="font-size: 11.5px">laba {{ rupiah(p.sell_price - p.cost_price) }}</div>
+              </td>
               <td style="width: 90px"><button class="btn ghost" style="padding: 4px 10px" @click="orderProduct(p)">Order</button></td>
             </tr>
             <tr v-if="!productsInGroup.length">
-              <td colspan="3" class="muted">Tidak ada produk cocok.</td>
+              <td :colspan="isAdmin() ? 4 : 3" class="muted">Tidak ada produk cocok.</td>
             </tr>
           </tbody>
         </table>
