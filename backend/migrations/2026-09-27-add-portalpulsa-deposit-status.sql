@@ -38,7 +38,11 @@ ALTER TABLE portalpulsa_deposits ADD COLUMN distributor_wallet_id INTEGER REFERE
 -- (bukan cuma di-lookup ulang saat cron jalan) supaya kalau suatu saat ada
 -- lebih dari satu dompet distributor portalpulsa, tidak salah sasaran.
 
-ALTER TABLE portalpulsa_deposits ADD COLUMN transaction_id INTEGER REFERENCES transactions(id);
+ALTER TABLE portalpulsa_deposits ADD COLUMN transaction_id INTEGER;
+-- SENGAJA TANPA FOREIGN KEY ke transactions (sama seperti debts.transaction_id di
+-- schema.sql): cron cleanupOldData menghapus transaksi > 1 tahun, dan kalau kolom
+-- ini pakai REFERENCES, DELETE-nya gagal "FOREIGN KEY constraint failed" begitu
+-- ada deposit lama yang tertaut — seluruh pembersihan harian ikut berhenti.
 -- ID baris transactions (type='mutation') yang tercatat begitu status jadi
 -- 'sukses' — dipakai kalau nanti perlu membalikkan (mis. deposit ini
 -- ternyata salah/dihapus manual).

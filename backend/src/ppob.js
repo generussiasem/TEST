@@ -1154,12 +1154,22 @@ export async function checkDistributorBalance(env, provider = "okeconnect") {
   // ("Saldo.PIN"), portalpulsa pakai spasi ("S PIN") — lihat screenshot format
   // resmi portalpulsa yang dikirim user.
   const body = cfg.provider === "portalpulsa" ? `S ${cfg.pin}` : `Saldo.${cfg.pin}`;
+  // firstReplyIsFinal cuma valid utk OkeConnect: balasan "Saldo.PIN"-nya
+  // memang satu tahap ("Yth...Saldo 3.523!"). portalpulsa TERNYATA (dibuktikan
+  // dari balasan asli: "'S <pin>' Telah kami terima... Silakan tunggu reply
+  // selanjutnya") juga 2 tahap sama seperti transaksi & deposit — balasan
+  // PERTAMA cuma ack, angka saldo aslinya baru menyusul. Kalau dipaksa
+  // firstReplyIsFinal:true, sesi berhenti tepat di ack itu: parseBalanceReply
+  // gagal (tidak ada "Saldo:" di teks ack) dan fungsi ini selalu ok:false utk
+  // portalpulsa, PLUS balasan susulannya tidak sempat ke-feed ke Telegram
+  // karena sesi Worker sudah keburu tutup sebelum balasan itu datang.
+  const firstReplyIsFinal = cfg.provider !== "portalpulsa";
   const reply = await sendJabberCommand({
     jid: cfg.jid,
     password: cfg.password,
     to: cfg.target,
     body,
-    firstReplyIsFinal: true,
+    firstReplyIsFinal,
     refSeparator: cfg.separator,
     acceptAnyFromTarget: cfg.provider === "portalpulsa",
   });

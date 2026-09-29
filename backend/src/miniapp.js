@@ -285,6 +285,14 @@ miniapp.post("/portalpulsa/deposit", async (c) => {
 });
 
 miniapp.get("/portalpulsa/deposits", async (c) => {
+  const employee = c.get("employee");
+  // Sama seperti POST di atas — riwayat deposit menyangkut saldo & rekening,
+  // dibatasi admin. Sebelumnya cek ini TIDAK ADA di sini (cuma tombolnya yg
+  // disembunyikan di miniapp-page.js), jadi kasir non-admin yang tahu bentuk
+  // endpoint-nya tetap bisa memanggilnya langsung dan melihat riwayat deposit.
+  if (employee.role !== "admin") {
+    return c.json({ ok: false, error: "Cuma admin yang boleh melihat riwayat deposit portalpulsa." }, 403);
+  }
   const rows = await c.env.DB.prepare(
     `SELECT d.*, e.name AS employee_name, datetime(COALESCE(d.updated_at, d.created_at), '+7 hours') AS waktu_update
      FROM portalpulsa_deposits d

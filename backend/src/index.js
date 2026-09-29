@@ -414,6 +414,15 @@ app.get("/api/products", async (c) => {
   const type = c.req.query("type"); // "fisik" | "ppob" (opsional)
   const q = (c.req.query("q") || "").trim();
   const activeOnly = c.req.query("active") === "1";
+  // cost_price (HPP/modal) HANYA untuk admin — sama seperti aturan yg sudah
+  // dipakai di bot & Mini App (miniapp.js). SELECT * tetap dipakai (kolom lain
+  // dibutuhkan admin & kasir), jadi disaring di sini, bukan di kolom SQL.
+  const isAdminReq = c.get("employee")?.role === "admin";
+  const sembunyikanHpp = (row) => {
+    if (isAdminReq || !row) return row;
+    const { cost_price, ...tanpaHpp } = row;
+    return tanpaHpp;
+  };
 
   const where = [];
   const params = [];
@@ -439,20 +448,22 @@ app.get("/api/products", async (c) => {
     )
       .bind(...params, pageSize, offset)
       .all();
-    return c.json({ items: results, total: totalRow.n, page, pageSize });
+    return c.json({ items: results.map(sembunyikanHpp), total: totalRow.n, page, pageSize });
   }
 
   const { results } = await c.env.DB.prepare(`SELECT * FROM products ${whereSql} ORDER BY id`)
     .bind(...params)
     .all();
-  return c.json(results);
+  return c.json(results.map(sembunyikanHpp));
 });
 
 app.get("/api/products/barcode/:code", async (c) => {
   const product = await c.env.DB.prepare("SELECT * FROM products WHERE barcode = ?")
     .bind(c.req.param("code"))
     .first();
-  return product ? c.json(product) : c.json({ error: "Produk tidak ditemukan" }, 404);
+  if (!product) return c.json({ error: "Produk tidak ditemukan" }, 404);
+  if (c.get("employee")?.role !== "admin") delete product.cost_price;
+  return c.json(product);
 });
 
 app.post("/api/products", async (c) => {
@@ -1964,10 +1975,19 @@ async function recheckOrder(env, order, { autoRecord } = {}) {
   // ppob.js). Kalau tidak bisa dicocokkan dengan yakin, status TIDAK
   // diubah — kasir memeriksa balasannya lalu memakai "Ubah Status".
   const cocok = cocokkanBalasanCek(order, rawReply);
-  const reply = cocok.matched
+  let reply = cocok.matched
     ? rawReply
     : `[Balasan ini tidak bisa dicocokkan otomatis dengan order ${order.ref_id} (${cocok.reason}) — periksa manual lalu pakai "Ubah Status"]\n${rawReply}`;
   const status = cocok.matched ? cocok.status : order.status;
+
+  // portalpulsa: balasan "STATUS NoHp" TIDAK PERNAH memuat field "Harga"
+  // (beda dari balasan sukses spontan yg mungkin sudah tertangkap lebih dulu
+  // lewat relay/sesi awal pengiriman order). Kalau balasan LAMA order ini
+  // sudah punya Harga dan balasan STATUS yg baru ini tidak, gabungkan (bukan
+  // timpa) — supaya finalizePpobOrder masih bisa membaca HPP dari raw_reply.
+  if (order.provider === "portalpulsa" && /Harga:/i.test(order.raw_reply || "") && !/Harga:/i.test(reply)) {
+    reply = `${order.raw_reply}\n---\n${reply}`;
+  }
 
   await terapkanStatusPpob(env, order, status, reply, { autoRecord, tandaiDicek: true });
   return { status, reply };
@@ -2170,7 +2190,15 @@ app.post("/api/relay/jabber", async (c) => {
       `INSERT INTO app_state (key, value, updated_at) VALUES ('relay_status', ?, datetime('now'))
        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
     )
-      .bind(JSON.stringify({ connected: !!data.connected, since: data.since || null, at: new Date().toISOString() }))
+      .bind(
+        JSON.stringify({
+          connected: !!data.connected,
+          since: data.since || null,
+          // Relay versi lama tidak mengirim targets -> null (dianggap TIDAK diketahui, bukan "mencakup semua").
+          targets: Array.isArray(data.targets) ? data.targets.map((t) => String(t).toLowerCase()).slice(0, 20) : null,
+          at: new Date().toISOString(),
+        })
+      )
       .run();
     return c.json({ ok: true });
   }
@@ -2191,22 +2219,40 @@ app.post("/api/relay/jabber", async (c) => {
   return c.json({ ok: false, error: "type harus 'message' atau 'heartbeat'" }, 400);
 });
 
-// Status Relay untuk lencana di halaman PPOB (perlu login biasa).
-app.get("/api/relay/status", async (c) => {
-  const configured = !!c.env.RELAY_SECRET;
-  const row = await c.env.DB.prepare("SELECT value FROM app_state WHERE key = 'relay_status'").first();
+// Status relay dari detak jantung terakhir. Dipakai lencana di halaman PPOB
+// DAN cron deposit portalpulsa (lihat checkPendingPortalpulsaDeposits).
+async function readRelayStatus(env) {
+  const row = await env.DB.prepare("SELECT value FROM app_state WHERE key = 'relay_status'").first();
   let seconds = null;
   let connected = false;
+  let targets = null;
   if (row) {
     try {
       const v = JSON.parse(row.value);
       seconds = Math.round((Date.now() - new Date(v.at).getTime()) / 1000);
       connected = !!v.connected;
+      targets = Array.isArray(v.targets) ? v.targets : null;
     } catch (_) {}
   }
   // Detak jantung dikirim tiap ~60 detik; lebih dari 3 menit tanpa kabar = mati.
   const online = seconds !== null && seconds <= 180 && connected;
-  return c.json({ configured, seen: !!row, online, secondsAgo: seconds, connected });
+  return { seen: !!row, online, secondsAgo: seconds, connected, targets };
+}
+
+// Relay dianggap "menangani" target tertentu HANYA kalau online DAN daftar
+// targets-nya memuat JID itu. Online saja TIDAK cukup: relay yang cuma
+// dikonfigurasi untuk OkeConnect (default .env.example) akan MEMBUANG balasan
+// dari portalpulsa. Relay lama tanpa laporan targets -> dianggap tidak menangani.
+function relayMenangani(status, targetJid) {
+  const jid = String(targetJid || "").split("/")[0].toLowerCase();
+  return !!jid && status.online && Array.isArray(status.targets) && status.targets.includes(jid);
+}
+
+// Status Relay untuk lencana di halaman PPOB (perlu login biasa).
+app.get("/api/relay/status", async (c) => {
+  const configured = !!c.env.RELAY_SECRET;
+  const st = await readRelayStatus(c.env);
+  return c.json({ configured, seen: st.seen, online: st.online, secondsAgo: st.secondsAgo, connected: st.connected });
 });
 
 // Cron: cek ulang SEKALI SAJA tiap order, 5 menit setelah dibuat — bukan
@@ -2243,18 +2289,36 @@ async function checkPendingPortalpulsaDeposits(env) {
 
   const cfg = getProviderConfig(env, "portalpulsa");
   assertCfgComplete(cfg);
-  // Dengerin selama 20 detik — cukup buat nangkep pesan yang sudah nunggu di
-  // antrean server (offline message), tidak perlu lama-lama karena ini jalan
-  // tiap 5 menit lewat cron yang sama dengan checkPendingOrders.
-  const messages = await listenJabberMessages({ jid: cfg.jid, password: cfg.password, to: cfg.target, timeoutMs: 20000 });
-  for (const text of messages) {
-    const hasil = parseDepositSusulan(text);
-    if (!hasil) continue; // bukan balasan deposit (mungkin balasan order PPOB lain yg kebetulan lewat) -> abaikan
-    try {
-      const r = await selesaikanDepositSusulan(env, { nominal: hasil.nominal, status: hasil.status, saldoAkhir: hasil.saldoAkhir, alasan: hasil.alasan, rawText: text });
-      if (r) console.log(`[cron] deposit portalpulsa #${r.depositId} -> ${r.status}`);
-    } catch (err) {
-      console.error("[cron] selesaikanDepositSusulan gagal:", err.message);
+
+  // Kalau relay online DAN target portalpulsa masuk daftar JABBER_TARGET-nya,
+  // balasan susulan deposit sudah diteruskan relay real-time lewat
+  // /api/relay/jabber (prosesPesanJabber) — login Jabber lagi di sini cuma
+  // buang-buang koneksi. Wajib cek TARGET-nya, bukan sekadar "relay online":
+  // relay yang hanya dikonfigurasi untuk OkeConnect akan MEMBUANG balasan
+  // portalpulsa, jadi di kondisi itu cron ini tetap satu-satunya jalan.
+  //
+  // Priority sesi dengerin ini SENGAJA tetap default (127), tidak diturunkan di
+  // bawah relay (10): kalau relay tidak menangani portalpulsa tapi kebetulan
+  // online, priority rendah malah bikin relay yang menang lalu membuang
+  // pesannya, dan cron ini tidak kebagian apa-apa. Kalau relay memang
+  // menangani, cron ini sudah dilewati di sini.
+  const relay = await readRelayStatus(env);
+  if (relayMenangani(relay, cfg.target)) {
+    console.log("[cron] relay menangani portalpulsa — dengerin langsung dilewati");
+  } else {
+    // Dengerin selama 20 detik — cukup buat nangkep pesan yang lagi lewat,
+    // tidak perlu lama-lama karena ini jalan tiap 5 menit lewat cron yang
+    // sama dengan checkPendingOrders.
+    const messages = await listenJabberMessages({ jid: cfg.jid, password: cfg.password, to: cfg.target, timeoutMs: 20000 });
+    for (const text of messages) {
+      const hasil = parseDepositSusulan(text);
+      if (!hasil) continue; // bukan balasan deposit (mungkin balasan order PPOB lain yg kebetulan lewat) -> abaikan
+      try {
+        const r = await selesaikanDepositSusulan(env, { nominal: hasil.nominal, status: hasil.status, saldoAkhir: hasil.saldoAkhir, alasan: hasil.alasan, rawText: text });
+        if (r) console.log(`[cron] deposit portalpulsa #${r.depositId} -> ${r.status}`);
+      } catch (err) {
+        console.error("[cron] selesaikanDepositSusulan gagal:", err.message);
+      }
     }
   }
   // Jaga-jaga kalau provider tidak selalu kirim notifikasi "hangus" — deposit
