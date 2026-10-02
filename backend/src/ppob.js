@@ -578,24 +578,21 @@ export async function placePpobOrder(env, { productCode, target, paidMethod = "t
     // TETAP wajib sudah ada di katalog hasil sinkron, supaya salah ketik kode
     // tidak diam-diam membuat "produk" baru yang sebenarnya cuma typo.
     if (newProductProvider === "portalpulsa") {
-      // products.code UNIQUE utk SELURUH tabel (bukan per-provider) — kalau
-      // kode ini kebetulan sudah dipakai produk provider lain (biasanya hasil
-      // sinkron katalog OkeConnect), INSERT di bawah akan gagal kena UNIQUE
-      // constraint. Dicek dulu di sini supaya errornya jelas & actionable,
-      // bukan pesan mentah dari D1.
-      const existingBeda = await env.DB.prepare("SELECT provider FROM products WHERE code = ?").bind(productCode).first();
-      if (existingBeda) {
-        throw new Error(
-          `Kode "${productCode}" sudah dipakai produk provider "${existingBeda.provider}" di katalog — tidak bisa dipakai juga untuk portalpulsa (satu kode cuma boleh satu produk). Pakai kode lain yang belum ada, mis. tambah awalan/akhiran pembeda.`
-        );
-      }
+      // code sekarang unik PER-PROVIDER (UNIQUE(code, provider), lihat migrasi
+      // 2026-09-30-products-code-unique-per-provider.sql) — kode yang sama
+      // SAH dipakai provider lain (mis. kode OkeConnect "I10" dan kode
+      // portalpulsa "I10" adalah dua produk yang berbeda, kebetulan sama
+      // penulisannya). Tidak perlu lagi dicek/ditolak di sini.
       await env.DB.prepare(
         `INSERT INTO products (code, name, category, provider, cost_price, sell_price, active)
          VALUES (?, ?, NULL, 'portalpulsa', 0, 0, 1)`
       )
         .bind(productCode, productCode)
         .run();
-      product = await env.DB.prepare("SELECT * FROM products WHERE code = ?").bind(productCode).first();
+      // AND provider = 'portalpulsa' WAJIB di sini — kalau tidak, dan ada
+      // produk OkeConnect dgn kode yg sama, .first() bisa salah ambil baris
+      // OkeConnect-nya alih-alih produk portalpulsa yg baru saja dibuat.
+      product = await env.DB.prepare("SELECT * FROM products WHERE code = ? AND provider = 'portalpulsa'").bind(productCode).first();
     } else {
       throw new Error(`Kode produk "${productCode}" tidak ditemukan. Coba /cari dulu.`);
     }
