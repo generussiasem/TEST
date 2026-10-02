@@ -556,9 +556,17 @@ export async function cekTagihan(env, { productCode, target }) {
  * tercatat pakai harga default — itu ditangani terpisah di index.js.
  */
 export async function placePpobOrder(env, { productCode, target, paidMethod = "tunai", contactId = null, batchId = null, telegramChatId = "", newProductProvider = null }) {
-  let product = await env.DB.prepare("SELECT * FROM products WHERE code = ?")
-    .bind(productCode)
-    .first();
+  // Kalau pemanggil eksplisit bilang "ini portalpulsa" (3 jalur khusus
+  // portalpulsa: tab web, tombol bot, form Mini App), pencarian produknya
+  // WAJIB ikut difilter provider juga. Tanpa ini, kode yang KEBETULAN sudah
+  // ada di katalog OkeConnect (hasil sinkron) bakal "menang" duluan dan
+  // newProductProvider diabaikan total — order jadi kekirim ke JID/PIN
+  // OkeConnect walau user eksplisit pilih portalpulsa.
+  let product = newProductProvider
+    ? await env.DB.prepare("SELECT * FROM products WHERE code = ? AND provider = ?")
+        .bind(productCode, newProductProvider)
+        .first()
+    : await env.DB.prepare("SELECT * FROM products WHERE code = ?").bind(productCode).first();
   if (!product) {
     // portalpulsa tidak punya katalog/price-list (lihat getProviderConfig) —
     // kasir mengetik kode manual, jadi produk baru diprovisi otomatis di sini

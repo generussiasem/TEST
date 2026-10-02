@@ -18,11 +18,16 @@ const formProductCode = ref("");
 const formTarget = ref("");
 const formPaidMethod = ref("tunai");
 const formContactId = ref(null);
-// Dipakai HANYA kalau kode produk belum ada di katalog (products.value) —
-// portalpulsa tidak punya price list, jadi kode baru diketik manual dan
-// produknya diprovisi otomatis di backend dgn provider ini. Diabaikan
-// backend kalau kode sudah ada di katalog (mis. kode OkeConnect lama).
-const formNewProvider = ref("okeconnect");
+// Tab form: "okeconnect" (cari dari katalog) atau "portalpulsa" (kode diketik
+// manual langsung — portalpulsa memang tidak pernah ikut katalog/price-list).
+// Dipakai jadi newProductProvider kalau kode produknya belum ada di katalog;
+// diabaikan backend kalau kodenya sudah dikenal (mis. kode OkeConnect lama).
+const formMode = ref("okeconnect");
+function pilihModeForm(m) {
+  formMode.value = m;
+  search.value = "";
+  formProductCode.value = "";
+}
 
 // ---- Antrean (keranjang) order, diproses satu-satu ----
 const queue = ref([]); // { productCode, name, target, paidMethod, contactId }
@@ -189,7 +194,11 @@ function tambahAntrean() {
     error.value = "Pilih kontak dulu untuk pembayaran Utang.";
     return;
   }
-  const product = ppobProducts.value.find((p) => p.code === formProductCode.value);
+  // Di tab portalpulsa, HARUS ikut cocokkan provider-nya juga — kalau cuma
+  // cocokkan kode, kode yg kebetulan sudah ada di katalog OkeConnect akan
+  // "ketemu" duluan, newProductProvider jadi diabaikan, dan order ujung-
+  // ujungnya kekirim ke JID/target OkeConnect walau user pilih tab portalpulsa.
+  const product = ppobProducts.value.find((p) => p.code === formProductCode.value && p.provider === formMode.value);
   queue.value.push({
     productCode: formProductCode.value,
     name: product ? product.name : formProductCode.value,
@@ -198,7 +207,7 @@ function tambahAntrean() {
     contactId: formContactId.value,
     // Cuma dipakai backend kalau kode BELUM ada di katalog (products.value) —
     // diabaikan kalau kode sudah dikenal.
-    newProductProvider: product ? null : formNewProvider.value,
+    newProductProvider: product ? null : formMode.value,
   });
   formTarget.value = "";
   search.value = "";
@@ -475,24 +484,30 @@ onMounted(load);
     <div class="grid cols-2" style="align-items: start; margin-bottom: 22px">
       <div class="card">
         <h3 style="margin-bottom: 12px">Tambah ke Antrean</h3>
-        <div class="field" style="position: relative">
-          <label>Cari produk</label>
-          <input v-model="search" placeholder="mis. telkomsel 5000" />
-          <div v-if="searchResults.length" class="card" style="position: absolute; top: 100%; left: 0; right: 0; z-index: 5; padding: 6px; max-height: 220px; overflow: auto">
-            <div v-for="p in searchResults" :key="p.id" @click="pick(p)" style="padding: 8px; cursor: pointer; display: flex; justify-content: space-between">
-              <span>{{ p.name }} <span class="muted num" style="font-size: 12px">#{{ p.code }}</span></span>
-              <span class="num">{{ rupiah(p.sell_price) }}</span>
+        <div style="display: flex; gap: 8px; margin-bottom: 14px">
+          <button type="button" class="btn" :class="{ ghost: formMode !== 'okeconnect' }" style="flex: 1; justify-content: center" @click="pilihModeForm('okeconnect')">OkeConnect</button>
+          <button type="button" class="btn" :class="{ ghost: formMode !== 'portalpulsa' }" style="flex: 1; justify-content: center" @click="pilihModeForm('portalpulsa')">portalpulsa</button>
+        </div>
+
+        <template v-if="formMode === 'okeconnect'">
+          <div class="field" style="position: relative">
+            <label>Cari produk</label>
+            <input v-model="search" placeholder="mis. telkomsel 5000" />
+            <div v-if="searchResults.length" class="card" style="position: absolute; top: 100%; left: 0; right: 0; z-index: 5; padding: 6px; max-height: 220px; overflow: auto">
+              <div v-for="p in searchResults" :key="p.id" @click="pick(p)" style="padding: 8px; cursor: pointer; display: flex; justify-content: space-between">
+                <span>{{ p.name }} <span class="muted num" style="font-size: 12px">#{{ p.code }}</span></span>
+                <span class="num">{{ rupiah(p.sell_price) }}</span>
+              </div>
             </div>
           </div>
-        </div>
-        <div class="field"><label>Kode produk</label><input v-model="formProductCode" placeholder="mis. TSEL5 (OkeConnect) / S5 (portalpulsa)" /></div>
-        <div class="field">
-          <label>Provider (kalau kode baru/belum ada di katalog)</label>
-          <select v-model="formNewProvider">
-            <option value="okeconnect">OkeConnect</option>
-            <option value="portalpulsa">portalpulsa</option>
-          </select>
-        </div>
+          <div class="field"><label>Kode produk</label><input v-model="formProductCode" placeholder="mis. TSEL5" /></div>
+        </template>
+
+        <template v-else>
+          <div class="field"><label>Kode produk portalpulsa</label><input v-model="formProductCode" placeholder="mis. S5" style="text-transform: uppercase" /></div>
+          <div class="muted" style="font-size: 12px; margin: -8px 0 14px">Kode portalpulsa tidak ikut katalog — diketik manual, modal & harga jual diisi nanti saat konfirmasi.</div>
+        </template>
+
         <div class="field"><label>Nomor HP / ID Pelanggan tujuan</label><input v-model="formTarget" placeholder="mis. 081234567890" /></div>
         <div class="field">
           <label>Metode Bayar</label>

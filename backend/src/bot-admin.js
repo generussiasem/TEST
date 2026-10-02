@@ -94,8 +94,9 @@ function mainMenuKeyboard(env, employee) {
     rows.push([{ text: "🧮 Buka Mini App Kasir", web_app: { url: env.MINIAPP_URL } }]);
   }
   rows.push([{ text: "📋 Cek Hutang Pelanggan", callback_data: "h:l:0" }]);
-  rows.push([{ text: "🗂️ Katalog PPOB", callback_data: "k:kat" }]);
+  rows.push([{ text: "🗂️ Katalog PPOB (OkeConnect)", callback_data: "k:kat" }]);
   rows.push([{ text: "🔎 Transaksi PPOB (cari cepat)", callback_data: "b:cari:0" }]);
+  rows.push([{ text: "📦 Transaksi Portalpulsa", callback_data: "pp:start" }]);
   rows.push([{ text: "🧾 Konfirmasi Order PPOB", callback_data: "p:l:0" }]);
   rows.push([{ text: "💳 Saldo Distributor", callback_data: "m:saldo" }]);
   rows.push([{ text: "📊 Laporan Transaksi", callback_data: "lap:menu" }]);
@@ -815,6 +816,12 @@ export async function handleAdminCallback(env, callbackQuery) {
     } else if (ns === "k" && action === "itk") {
       const [kategori, pageStr] = arg.split("|");
       payload = await renderKatalogItem(env, kategori, null, Number(pageStr) || 0, employee.role === "admin");
+    } else if (ns === "pp" && action === "start") {
+      await setSession(env, chatId, "awaiting_pp_newcode", {});
+      payload = {
+        text: "*Transaksi Portalpulsa*\n\nKetik kode produknya langsung (tidak perlu dicari — portalpulsa memang tidak masuk katalog), mis. `S5`:",
+        reply_markup: { inline_keyboard: [[{ text: "🏠 Menu Utama", callback_data: "m:main" }]] },
+      };
     } else if (ns === "b" && action === "cari") {
       await setSession(env, chatId, "awaiting_ppob_search", {});
       payload = {
@@ -1030,6 +1037,17 @@ export async function handleAdminSessionMessage(env, chatId, text) {
       await clearSession(env, chatId);
       await sendTelegramMessage(token, chatId, `⚠️ Gagal: ${err.message}`, { reply_markup: mainMenuKeyboard(env, employee) });
     }
+    return true;
+  }
+
+  if (session.state === "awaiting_pp_newcode") {
+    const kode = String(text).trim().toUpperCase();
+    if (!kode) {
+      await sendTelegramMessage(token, chatId, "Ketik kode produknya dulu.");
+      return true;
+    }
+    const payload = await pilihProdukPpob(env, chatId, kode, true);
+    await sendTelegramMessage(token, chatId, payload.text, { reply_markup: payload.reply_markup });
     return true;
   }
 
