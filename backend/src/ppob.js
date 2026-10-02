@@ -507,7 +507,10 @@ export function assertCfgComplete(cfg) {
  * dan TIDAK memengaruhi laporan keuangan, tapi tetap DISIMPAN ke ppob_orders
  * (status 'cek') supaya balasannya bisa dilihat lagi lain waktu. */
 export async function cekTagihan(env, { productCode, target }) {
-  const product = await env.DB.prepare("SELECT * FROM products WHERE code = ?")
+  // Fitur ini khusus OkeConnect (portalpulsa belum dukung pascabayar, lihat
+  // placePpobOrder) — difilter eksplisit supaya tidak ambigu kalau kode
+  // tagihan kebetulan sama dgn kode produk portalpulsa.
+  const product = await env.DB.prepare("SELECT * FROM products WHERE code = ? AND provider = 'okeconnect'")
     .bind(productCode)
     .first();
   if (!product) {
@@ -575,6 +578,17 @@ export async function placePpobOrder(env, { productCode, target, paidMethod = "t
     // TETAP wajib sudah ada di katalog hasil sinkron, supaya salah ketik kode
     // tidak diam-diam membuat "produk" baru yang sebenarnya cuma typo.
     if (newProductProvider === "portalpulsa") {
+      // products.code UNIQUE utk SELURUH tabel (bukan per-provider) — kalau
+      // kode ini kebetulan sudah dipakai produk provider lain (biasanya hasil
+      // sinkron katalog OkeConnect), INSERT di bawah akan gagal kena UNIQUE
+      // constraint. Dicek dulu di sini supaya errornya jelas & actionable,
+      // bukan pesan mentah dari D1.
+      const existingBeda = await env.DB.prepare("SELECT provider FROM products WHERE code = ?").bind(productCode).first();
+      if (existingBeda) {
+        throw new Error(
+          `Kode "${productCode}" sudah dipakai produk provider "${existingBeda.provider}" di katalog — tidak bisa dipakai juga untuk portalpulsa (satu kode cuma boleh satu produk). Pakai kode lain yang belum ada, mis. tambah awalan/akhiran pembeda.`
+        );
+      }
       await env.DB.prepare(
         `INSERT INTO products (code, name, category, provider, cost_price, sell_price, active)
          VALUES (?, ?, NULL, 'portalpulsa', 0, 0, 1)`
@@ -802,8 +816,12 @@ export async function finalizePpobOrder(env, { refId, sellPrice, costTotal, toke
   if (order.status !== "sukses") throw new Error("Order belum sukses, tidak bisa dikonfirmasi");
   if (order.finalized) throw new Error("Order ini sudah pernah dicatat sebelumnya");
 
-  const product = await env.DB.prepare("SELECT * FROM products WHERE code = ?").bind(order.product_code).first();
-  if (!product) throw new Error(`Produk ${order.product_code} sudah tidak ada di katalog`);
+  // order.provider sudah diketahui sejak order dibuat — ikut difilter supaya
+  // tidak ambigu (code sekarang unik PER-PROVIDER, bukan lintas provider).
+  const product = await env.DB.prepare("SELECT * FROM products WHERE code = ? AND provider = ?")
+    .bind(order.product_code, order.provider)
+    .first();
+  if (!product) throw new Error(`Produk ${order.product_code} (${order.provider}) sudah tidak ada di katalog`);
   const wallet = order.wallet_id
     ? await env.DB.prepare("SELECT * FROM wallets WHERE id = ?").bind(order.wallet_id).first()
     : null;
@@ -954,7 +972,7 @@ export async function syncPpobPrices(env) {
   const stmt = env.DB.prepare(
     `INSERT INTO products (code, name, category, product_group, cost_price, sell_price, active, deactivated_at, last_synced_at, provider)
      VALUES (?, ?, ?, ?, ?, ?, 1, NULL, ?, 'okeconnect')
-     ON CONFLICT(code) DO UPDATE SET
+     ON CONFLICT(code, provider) DO UPDATE SET
        name = excluded.name,
        category = excluded.category,
        product_group = excluded.product_group,

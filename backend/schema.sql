@@ -45,7 +45,11 @@ CREATE INDEX IF NOT EXISTS idx_wallets_provider ON wallets(provider);
 
 CREATE TABLE IF NOT EXISTS products (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  code TEXT UNIQUE,        -- kode produk PPOB, mis. "TSEL5" (kosong utk barang warung biasa)
+  -- code UNIK PER-PROVIDER (lihat UNIQUE(code, provider) di bawah), BUKAN
+  -- unik utk seluruh tabel — kode produk ditentukan distributor (OkeConnect /
+  -- portalpulsa), jadi dua provider boleh kebetulan punya kode yang sama
+  -- utk produk yang berbeda.
+  code TEXT,                -- kode produk PPOB, mis. "TSEL5" (kosong utk barang warung biasa)
   barcode TEXT UNIQUE,     -- barcode fisik barang warung (kosong utk produk PPOB)
   name TEXT NOT NULL,
   category TEXT,           -- kasar: "PULSA", "TAGIHAN", dst (field "kategori" OkeConnect)
@@ -56,8 +60,9 @@ CREATE TABLE IF NOT EXISTS products (
   active INTEGER NOT NULL DEFAULT 1,      -- 0 = produk PPOB sudah hilang dari daftar harga sumbernya (soft-delete)
   deactivated_at TEXT,                    -- kapan jadi nonaktif, dipakai utk hard-delete otomatis setelah >1 tahun
   last_synced_at TEXT,                    -- ditandai tiap kali sinkron melihat kode ini masih ada di sumber
-  provider TEXT NOT NULL DEFAULT 'okeconnect', -- selalu 'okeconnect' — jalur Jabber yang dipakai saat order
-  created_at TEXT DEFAULT (datetime('now'))
+  provider TEXT NOT NULL DEFAULT 'okeconnect', -- 'okeconnect' atau 'portalpulsa' — jalur Jabber yang dipakai saat order
+  created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(code, provider)
 );
 CREATE INDEX IF NOT EXISTS idx_products_code ON products(code);
 CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode);

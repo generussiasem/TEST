@@ -153,7 +153,12 @@ miniapp.post("/debts", async (c) => {
 // Cari produk PPOB aktif (pulsa/kuota/token/tagihan) buat dipilih sebelum order.
 miniapp.get("/products", async (c) => {
   const q = (c.req.query("q") || "").trim();
-  const where = ["active = 1", "code IS NOT NULL"];
+  // Dibatasi ke OkeConnect: hasil pencarian ini dipilih di klien cuma lewat
+  // kecocokan "code" (lihat miniapp-page.js, rows.find(r => r.code === ...)) —
+  // sejak code boleh sama lintas provider, portalpulsa WAJIB tidak ikut di
+  // sini supaya pilihan kasir tidak pernah ambigu. portalpulsa sendiri sudah
+  // py form manual terpisah ("Kode Manual (portalpulsa)").
+  const where = ["active = 1", "code IS NOT NULL", "provider = 'okeconnect'"];
   const params = [];
   if (q) {
     where.push("(name LIKE ? OR code LIKE ? OR product_group LIKE ?)");
@@ -179,9 +184,11 @@ miniapp.get("/products", async (c) => {
 miniapp.get("/catalog", async (c) => {
   const employee = c.get("employee");
   const kolomHpp = employee.role === "admin" ? ", cost_price, provider" : "";
+  // provider = 'okeconnect' eksplisit (bukan cuma mengandalkan category NULL
+  // pada produk portalpulsa) — sama alasannya dgn /products di atas.
   const { results } = await c.env.DB.prepare(
     `SELECT code, name, category, product_group, sell_price${kolomHpp} FROM products
-     WHERE active = 1 AND code IS NOT NULL
+     WHERE active = 1 AND code IS NOT NULL AND provider = 'okeconnect'
      ORDER BY category, product_group, sell_price ASC`
   ).all();
   return c.json(results);

@@ -1880,7 +1880,7 @@ app.post("/telegram/webhook", async (c) => {
       return c.text("ok");
     }
     const { results } = await env.DB.prepare(
-      "SELECT code, name, sell_price FROM products WHERE name LIKE ? OR code LIKE ? ORDER BY name LIMIT 10"
+      "SELECT code, name, sell_price FROM products WHERE provider = 'okeconnect' AND (name LIKE ? OR code LIKE ?) ORDER BY name LIMIT 10"
     )
       .bind(`%${keyword}%`, `%${keyword}%`)
       .all();
@@ -2006,8 +2006,8 @@ async function terapkanStatusPpob(env, order, status, reply, { autoRecord = fals
   // tidak ada uang yang perlu masuk dompet. Order tunai dibiarkan menunggu
   // konfirmasi kasir supaya kasir memilih dompet tempat uangnya diterima.
   if (status === "sukses" && autoRecord && order.paid_method === "utang") {
-    const product = await env.DB.prepare("SELECT * FROM products WHERE code = ?")
-      .bind(order.product_code)
+    const product = await env.DB.prepare("SELECT * FROM products WHERE code = ? AND provider = ?")
+      .bind(order.product_code, order.provider)
       .first();
     const wallet = order.wallet_id
       ? await env.DB.prepare("SELECT * FROM wallets WHERE id = ?").bind(order.wallet_id).first()

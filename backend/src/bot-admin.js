@@ -304,7 +304,10 @@ async function renderKatalogItem(env, kategori, grup, page, isAdmin = false) {
 async function pilihProdukPpob(env, chatId, code, isNew = false) {
   let product = null;
   if (!isNew) {
-    product = await env.DB.prepare("SELECT * FROM products WHERE code = ?").bind(code).first();
+    // Semua sumber yg memanggil ini dgn isNew=false (b:cari, katalog grid)
+    // sudah dibatasi ke OkeConnect — ikut ditegaskan di sini (defense in
+    // depth) supaya tidak ambigu kalau suatu saat ada sumber baru yg lupa membatasi.
+    product = await env.DB.prepare("SELECT * FROM products WHERE code = ? AND provider = 'okeconnect'").bind(code).first();
     if (!product) throw new Error(`Produk "${code}" tidak ditemukan.`);
   }
   await setSession(env, chatId, "awaiting_ppob_target", { productCode: code, isNew });
@@ -380,7 +383,7 @@ async function renderPpobConfirm(env, refId) {
       reply_markup: { inline_keyboard: [[{ text: "🔙 Kembali", callback_data: "p:l:0" }]] },
     };
   }
-  const product = await env.DB.prepare("SELECT * FROM products WHERE code = ?").bind(order.product_code).first();
+  const product = await env.DB.prepare("SELECT * FROM products WHERE code = ? AND provider = ?").bind(order.product_code, order.provider).first();
   const defaultPrice = order.sell_price || product?.sell_price || 0;
   // Modal produk pascabayar (tagihan/PDAM) & portalpulsa BARU DIKETAHUI dari
   // balasan provider tiap transaksi — order.cost_price/product.cost_price
@@ -783,7 +786,7 @@ export async function handleAdminCallback(env, callbackQuery) {
     } else if (ns === "p" && action === "ok") {
       const order = await env.DB.prepare("SELECT * FROM ppob_orders WHERE ref_id = ?").bind(arg).first();
       if (!order) throw new Error("Order tidak ditemukan");
-      const product = await env.DB.prepare("SELECT * FROM products WHERE code = ?").bind(order.product_code).first();
+      const product = await env.DB.prepare("SELECT * FROM products WHERE code = ? AND provider = ?").bind(order.product_code, order.provider).first();
       const defaultPrice = order.sell_price || product?.sell_price || 0;
       payload = await lanjutKonfirmasiPpob(env, chatId, { refId: arg, sellPrice: defaultPrice, employeeId: employee.id });
     } else if (ns === "p" && action === "w") {
@@ -1057,8 +1060,13 @@ export async function handleAdminSessionMessage(env, chatId, text) {
       await sendTelegramMessage(token, chatId, "Ketik kata kunci dulu (nama atau kode produk).");
       return true;
     }
+    // Dibatasi ke OkeConnect: tombol hasilnya (b:pick:<kode>) cuma mengirim
+    // kode, bukan provider — sejak code boleh sama lintas provider, kalau
+    // portalpulsa ikut dicari di sini tombolnya bisa ambigu (match baris
+    // yang salah). portalpulsa sendiri sudah py jalur manual terpisah
+    // (tombol "pakai sbg kode baru" di bawah, atau menu "Transaksi Portalpulsa").
     const { results } = await env.DB.prepare(
-      "SELECT code, name FROM products WHERE active = 1 AND (name LIKE ? OR code LIKE ?) ORDER BY name LIMIT 8"
+      "SELECT code, name FROM products WHERE active = 1 AND provider = 'okeconnect' AND (name LIKE ? OR code LIKE ?) ORDER BY name LIMIT 8"
     )
       .bind(`%${q}%`, `%${q}%`)
       .all();

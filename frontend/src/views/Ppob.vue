@@ -154,7 +154,12 @@ const filteredOrders = computed(() => orders.value);
 const searchResults = computed(() => {
   if (!search.value.trim()) return [];
   const q = search.value.toLowerCase();
-  return ppobProducts.value.filter((p) => p.name.toLowerCase().includes(q) || p.code.toLowerCase().includes(q)).slice(0, 8);
+  // provider dibatasi eksplisit ke okeconnect — kotak cari ini cuma muncul di
+  // tab OkeConnect, dan sejak code boleh sama lintas provider, produk
+  // portalpulsa tidak boleh ikut nyempil di hasil carinya.
+  return ppobProducts.value
+    .filter((p) => p.provider === "okeconnect" && (p.name.toLowerCase().includes(q) || p.code.toLowerCase().includes(q)))
+    .slice(0, 8);
 });
 
 async function load() {
