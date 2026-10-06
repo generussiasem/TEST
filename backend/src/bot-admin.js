@@ -205,8 +205,14 @@ function baris2(items) {
 }
 
 async function renderKatalogKategori(env) {
+  // provider = 'okeconnect' eksplisit — kalau tidak, produk portalpulsa yang
+  // disimpan manual dgn kategori terisi (lewat dashboard, lihat Produk.vue)
+  // bisa ikut nongol di sini, padahal tombol hasilnya (b:pick:<kode>) cuma
+  // bawa kode, bukan provider, dan sejak kode boleh sama lintas provider itu
+  // bikin ambigu / salah nyambung. portalpulsa punya jalur sendiri:
+  // "Transaksi Portalpulsa".
   const { results } = await env.DB.prepare(
-    "SELECT DISTINCT category FROM products WHERE active = 1 AND category IS NOT NULL ORDER BY category"
+    "SELECT DISTINCT category FROM products WHERE active = 1 AND category IS NOT NULL AND provider = 'okeconnect' ORDER BY category"
   ).all();
   if (!results.length) {
     return {
@@ -225,7 +231,7 @@ async function renderKatalogKategori(env) {
 
 async function renderKatalogGrup(env, kategori, isAdmin = false) {
   const { results } = await env.DB.prepare(
-    "SELECT DISTINCT product_group FROM products WHERE active = 1 AND category = ? AND product_group IS NOT NULL ORDER BY product_group"
+    "SELECT DISTINCT product_group FROM products WHERE active = 1 AND category = ? AND product_group IS NOT NULL AND provider = 'okeconnect' ORDER BY product_group"
   )
     .bind(kategori)
     .all();
@@ -251,7 +257,7 @@ function escMd(str) {
 
 async function renderKatalogItem(env, kategori, grup, page, isAdmin = false) {
   const offset = page * KATALOG_PAGE_SIZE;
-  const where = grup ? "category = ? AND product_group = ?" : "category = ?";
+  const where = grup ? "category = ? AND product_group = ? AND provider = 'okeconnect'" : "category = ? AND provider = 'okeconnect'";
   const params = grup ? [kategori, grup] : [kategori];
   const { results } = await env.DB.prepare(
     `SELECT code, name, sell_price, cost_price, provider FROM products WHERE active = 1 AND ${where} ORDER BY sell_price ASC LIMIT ? OFFSET ?`

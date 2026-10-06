@@ -43,6 +43,13 @@ const operators = computed(() => {
   for (const p of products.value) {
     if (!p.code) continue; // cuma produk PPOB, bukan barang warung
     if (p.active === 0) continue; // produk sudah nonaktif (hilang dari sumber OkeConnect), sembunyikan dari pilihan order baru
+    // Halaman ini khusus katalog/price-list OkeConnect. portalpulsa tidak
+    // punya price list, dan tombol "Order" di bawah cuma mengirim kode lewat
+    // URL (bukan provider) — kalau portalpulsa ikut tampil di sini (mis.
+    // kebetulan terisi kategori lewat form tambah manual), tombolnya bisa
+    // ambigu atau salah nyambung provider. portalpulsa transaksi lewat tab
+    // "Transaksi Portalpulsa" di halaman Pulsa & PPOB.
+    if (p.provider !== "okeconnect") continue;
     const op = operatorFor(p);
     if (!map.has(op.key)) map.set(op.key, { ...op, items: [] });
     map.get(op.key).items.push(p);

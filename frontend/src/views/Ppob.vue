@@ -177,8 +177,13 @@ async function load() {
   store.value = st;
   loadRelay();
   if (route.query.code) {
-    const match = products.value.find((x) => x.code === route.query.code);
+    // Datang dari tombol "Order" di halaman Katalog, yang sekarang dibatasi
+    // ke OkeConnect saja — dicocokkan provider juga di sini (bukan cuma
+    // kode) supaya konsisten & tidak ambigu kalau kebetulan ada kode yang
+    // sama di portalpulsa.
+    const match = products.value.find((x) => x.code === route.query.code && x.provider === "okeconnect");
     if (match) {
+      formMode.value = "okeconnect";
       pick(match);
     }
   }
@@ -210,9 +215,12 @@ function tambahAntrean() {
     target: formTarget.value,
     paidMethod: formPaidMethod.value,
     contactId: formContactId.value,
-    // Cuma dipakai backend kalau kode BELUM ada di katalog (products.value) —
-    // diabaikan kalau kode sudah dikenal.
-    newProductProvider: product ? null : formMode.value,
+    // SELALU kirim provider tab ini, bukan cuma waktu kode belum dikenal —
+    // code tidak lagi unik lintas provider (UNIQUE(code, provider)), jadi
+    // kalau ini di-null-kan waktu produk SUDAH dikenal, backend jatuh ke
+    // query tanpa filter provider dan bisa salah ambil baris punya provider
+    // lain yang kebetulan kodenya sama (order kekirim ke JID/PIN yang salah).
+    newProductProvider: formMode.value,
   });
   formTarget.value = "";
   search.value = "";
@@ -262,12 +270,14 @@ async function prosesSemua() {
 }
 
 function openConfirm(o) {
-  // Fallback WAJIB ikut sertakan provider dari order (o.provider) — kalau
-  // tidak, produk portalpulsa yang belum sempat ke-reload ke products.value
-  // (mis. baru saja auto-terprovisi) akan dianggap provider undefined, dan
-  // kotak Modal jadi TIDAK bisa diedit padahal justru itu skenario utamanya
-  // (lihat usesDynamicCost di ppob.js — ini bug yang sempat kejadian).
-  const product = products.value.find((p) => p.code === o.product_code) || {
+  // .find() WAJIB ikut cocokkan o.provider, bukan cuma code — code tidak lagi
+  // unik lintas provider (UNIQUE(code, provider)), jadi tanpa ini bisa salah
+  // ambil baris provider lain yang kodenya kebetulan sama. Fallback-nya
+  // (kalau .find() gagal total, mis. produk portalpulsa yang belum sempat
+  // ke-reload ke products.value) juga ikut sertakan provider dari order —
+  // tanpa itu, kotak Modal jadi TIDAK bisa diedit padahal justru itu
+  // skenario utamanya (lihat usesDynamicCost di ppob.js).
+  const product = products.value.find((p) => p.code === o.product_code && p.provider === o.provider) || {
     code: o.product_code,
     category: "",
     product_group: "",

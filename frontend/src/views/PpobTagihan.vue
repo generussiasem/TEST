@@ -144,7 +144,12 @@ async function cekUlang(o) {
 }
 
 function isPostpaidCode(code) {
-  const p = products.value.find((x) => x.code === code);
+  // Halaman ini khusus OkeConnect (portalpulsa tidak dukung pascabayar) —
+  // provider dipatok di sini, bukan cuma code, karena code tidak lagi unik
+  // lintas provider. Tanpa ini, order tagihan bisa "hilang" dari daftar kalau
+  // kodenya kebetulan sama dengan kode portalpulsa (kategori NULL) yang
+  // ketemu duluan oleh .find().
+  const p = products.value.find((x) => x.code === code && x.provider === "okeconnect");
   return p && (p.category === "TAGIHAN" || p.category === "AIR PDAM");
 }
 
@@ -152,7 +157,7 @@ function isPostpaidCode(code) {
 // DAYA, BULAN, PERIODE, STAND MTR, rincian biaya). Produk lain (BPJS,
 // internet, PDAM) tetap pakai struk umum.
 function looksLikeListrik(code) {
-  const p = products.value.find((x) => x.code === code);
+  const p = products.value.find((x) => x.code === code && x.provider === "okeconnect");
   return !!p && (/listrik|pln/i.test(p.name || "") || /listrik|pln/i.test(p.code || ""));
 }
 
@@ -170,7 +175,10 @@ async function load() {
   receiveWallets.value = w.filter((x) => x.type !== "distributor_ppob");
   store.value = st;
   if (route.query.code) {
-    const match = products.value.find((x) => x.code === route.query.code);
+    // Datang dari tombol "Order" di halaman Katalog (sudah dibatasi ke
+    // OkeConnect saja) — dipatok provider juga di sini supaya tidak ambigu
+    // kalau kebetulan ada kode portalpulsa yang sama persis.
+    const match = products.value.find((x) => x.code === route.query.code && x.provider === "okeconnect");
     if (match) {
       pickCek(match);
     }

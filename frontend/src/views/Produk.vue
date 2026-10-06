@@ -394,6 +394,13 @@ onMounted(async () => {
           </div>
           <div class="form-row">
             <div class="field"><label>Kode produk (SKU)</label><input v-model="ppobAddForm.code" required /></div>
+            <div class="field">
+              <label>Provider</label>
+              <select v-model="ppobAddForm.provider">
+                <option value="okeconnect">OkeConnect</option>
+                <option value="portalpulsa">portalpulsa</option>
+              </select>
+            </div>
           </div>
           <div class="form-row">
             <div class="field"><label>Harga Modal</label><input v-model.number="ppobAddForm.cost_price" type="number" min="0" /></div>
@@ -430,7 +437,7 @@ onMounted(async () => {
                 <td><input v-model="ppobEditing.name" /></td>
                 <td class="muted num" style="font-size: 12.5px">{{ p.code }}</td>
                 <td>
-                  <span class="badge">OkeConnect</span>
+                  <span class="badge" :class="p.provider === 'portalpulsa' ? 'gagal' : 'sukses'">{{ p.provider === "portalpulsa" ? "portalpulsa" : "OkeConnect" }}</span>
                 </td>
                 <td><input v-model.number="ppobEditing.cost_price" type="number" style="width: 90px" /></td>
                 <td><input v-model.number="ppobEditing.sell_price" type="number" style="width: 90px" /></td>
@@ -447,7 +454,7 @@ onMounted(async () => {
                 </td>
                 <td class="muted num" style="font-size: 12.5px">{{ p.code }}</td>
                 <td>
-                  <span class="badge sukses">OkeConnect</span>
+                  <span class="badge" :class="p.provider === 'portalpulsa' ? 'gagal' : 'sukses'">{{ p.provider === "portalpulsa" ? "portalpulsa" : "OkeConnect" }}</span>
                 </td>
                 <td class="num">{{ rupiah(p.cost_price) }}</td>
                 <td class="num">{{ rupiah(p.sell_price) }}</td>

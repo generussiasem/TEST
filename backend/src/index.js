@@ -468,25 +468,42 @@ app.get("/api/products/barcode/:code", async (c) => {
 
 app.post("/api/products", async (c) => {
   const { code, barcode, name, category, cost_price = 0, sell_price = 0, stock = 0, provider = "okeconnect" } = await c.req.json();
-  await c.env.DB.prepare(
-    `INSERT INTO products (code, barcode, name, category, cost_price, sell_price, stock, provider)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  )
-    .bind(code || null, barcode || null, name, category || null, cost_price, sell_price, stock, provider || "okeconnect")
-    .run();
-  return c.json({ ok: true });
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO products (code, barcode, name, category, cost_price, sell_price, stock, provider)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(code || null, barcode || null, name, category || null, cost_price, sell_price, stock, provider || "okeconnect")
+      .run();
+    return c.json({ ok: true });
+  } catch (err) {
+    // code unik PER-PROVIDER (UNIQUE(code, provider)) — pesan D1 mentahnya
+    // ("UNIQUE constraint failed: products.code, products.provider") tidak
+    // jelas buat admin, jadi diterjemahkan di sini.
+    if (code && /UNIQUE constraint failed.*products\.code/.test(err.message || "")) {
+      return c.json({ ok: false, error: `Kode "${code}" sudah dipakai produk lain untuk provider ${provider || "okeconnect"}.` }, 400);
+    }
+    return c.json({ ok: false, error: err.message }, 500);
+  }
 });
 
 app.put("/api/products/:id", async (c) => {
   const id = c.req.param("id");
   const { name, category, cost_price, sell_price, stock, barcode, provider } = await c.req.json();
-  await c.env.DB.prepare(
-    `UPDATE products SET name = ?, category = ?, cost_price = ?, sell_price = ?, stock = ?, barcode = ?, provider = COALESCE(?, provider)
-     WHERE id = ?`
-  )
-    .bind(name, category || null, cost_price, sell_price, stock, barcode || null, provider || null, id)
-    .run();
-  return c.json({ ok: true });
+  try {
+    await c.env.DB.prepare(
+      `UPDATE products SET name = ?, category = ?, cost_price = ?, sell_price = ?, stock = ?, barcode = ?, provider = COALESCE(?, provider)
+       WHERE id = ?`
+    )
+      .bind(name, category || null, cost_price, sell_price, stock, barcode || null, provider || null, id)
+      .run();
+    return c.json({ ok: true });
+  } catch (err) {
+    if (/UNIQUE constraint failed.*products\.code/.test(err.message || "")) {
+      return c.json({ ok: false, error: `Kode produk ini sudah dipakai produk lain untuk provider ${provider || "yang sama"}.` }, 400);
+    }
+    return c.json({ ok: false, error: err.message }, 500);
+  }
 });
 
 app.delete("/api/products/:id", async (c) => {
@@ -1853,7 +1870,12 @@ app.post("/telegram/webhook", async (c) => {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, "Order diterima ✅, sedang diproses...");
 
     try {
-      const { refId, status, reply, warning } = await placePpobOrder(env, { productCode, target });
+      // "/beli" tidak punya cara menanyakan provider ke pengirimnya (beda dari
+      // alur katalog tombol yang selalu tahu dari tab/menu mana asalnya) —
+      // code tidak lagi unik lintas provider, jadi WAJIB dipatok ke
+      // 'okeconnect' di sini (desain command ini memang dari sebelum
+      // portalpulsa ada). Kode portalpulsa tetap bisa lewat /menu -> Katalog.
+      const { refId, status, reply, warning } = await placePpobOrder(env, { productCode, target, newProductProvider: "okeconnect" });
       const pesan =
         (status === "pending"
           ? `Order ${refId} masih diproses server (belum ada balasan cepat). Saya kabari lagi begitu ada update.`

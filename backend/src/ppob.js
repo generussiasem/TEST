@@ -565,11 +565,27 @@ export async function placePpobOrder(env, { productCode, target, paidMethod = "t
   // ada di katalog OkeConnect (hasil sinkron) bakal "menang" duluan dan
   // newProductProvider diabaikan total — order jadi kekirim ke JID/PIN
   // OkeConnect walau user eksplisit pilih portalpulsa.
-  let product = newProductProvider
-    ? await env.DB.prepare("SELECT * FROM products WHERE code = ? AND provider = ?")
-        .bind(productCode, newProductProvider)
-        .first()
-    : await env.DB.prepare("SELECT * FROM products WHERE code = ?").bind(productCode).first();
+  let product;
+  if (newProductProvider) {
+    product = await env.DB.prepare("SELECT * FROM products WHERE code = ? AND provider = ?")
+      .bind(productCode, newProductProvider)
+      .first();
+  } else {
+    // Jaring pengaman: tidak ada caller TERKONFIRMASI yang sampai ke sini
+    // tanpa newProductProvider (semua sudah diaudit & diperbaiki supaya
+    // selalu kirim provider), tapi kalau suatu saat ada kode baru yang lupa
+    // — JANGAN diam-diam .first() ambil baris pertama yang ketemu. Kalau
+    // ternyata ada >1 produk dgn kode yg sama di provider berbeda, lebih
+    // aman gagal tegas drpd salah kirim order ke provider yg salah.
+    const { results } = await env.DB.prepare("SELECT * FROM products WHERE code = ?").bind(productCode).all();
+    if (results.length > 1) {
+      throw new Error(
+        `Kode "${productCode}" ada di lebih dari satu provider (${results.map((p) => p.provider).join(", ")}) — ` +
+          `tidak bisa ditentukan otomatis. Pilih produk lewat katalog/menu, bukan ketik kode polos.`
+      );
+    }
+    product = results[0] || null;
+  }
   if (!product) {
     // portalpulsa tidak punya katalog/price-list (lihat getProviderConfig) —
     // kasir mengetik kode manual, jadi produk baru diprovisi otomatis di sini
