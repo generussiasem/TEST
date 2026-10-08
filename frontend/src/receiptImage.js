@@ -318,10 +318,13 @@ export function buatStrukTokenPLN(d) {
   if (d.denom) y += lineH; // baris nominal
   y += gap;
 
-  for (const [label] of rincian) {
+  for (const [, value] of rincian) {
     measure.font = mono(12);
-    const valLines = wrapAt(String(rincian.find((r) => r[0] === label)[1]), mono(12), contentW - 10);
-    y += Math.max(1, valLines.length) * lineH + gap * 0.3;
+    const valLines = wrapAt(String(value), mono(12), contentW - 10);
+    // +1 baris buat LABEL-nya sendiri (digambar di baris sendiri, baru nilai
+    // di baris berikutnya) — tanpa ini, baris berikutnya numpuk ke baris
+    // nilai sebelumnya (dulu kejadian, hasil structnya jadi berantakan).
+    y += (1 + Math.max(1, valLines.length)) * lineH + gap * 0.3;
   }
   y += gap;
   y += 1 + gap * 2; // garis
@@ -409,9 +412,10 @@ export function buatStrukTokenPLN(d) {
 
   for (const [label, value] of rincian) {
     ctx.fillText(label, pad, y);
+    y += lineH; // maju dulu lewati baris LABEL, baru gambar nilainya
     const valLines = wrapText(ctx, String(value), contentW - 10);
     for (const vl of valLines) {
-      ctx.fillText(vl, pad, y + lineH);
+      ctx.fillText(vl, pad, y);
       y += lineH;
     }
     y += gap * 0.3;
@@ -577,9 +581,10 @@ export function buatStrukTagihanListrik(d) {
   y += judulLines.length * lineH * 1.15 + gap * 2;
   y += 1 + gap * 2; // garis
 
-  for (const [label, value] of rincian) {
+  for (const [, value] of rincian) {
     const valLines = wrapAt(String(value), mono(12), contentW - 10);
-    y += Math.max(1, valLines.length) * lineH + gap * 0.3;
+    // +1 baris buat LABEL-nya sendiri — lihat catatan sama di buatStrukTokenPLN.
+    y += (1 + Math.max(1, valLines.length)) * lineH + gap * 0.3;
   }
   y += gap;
   y += 1 + gap * 2; // garis
@@ -660,9 +665,10 @@ export function buatStrukTagihanListrik(d) {
   for (const [label, value] of rincian) {
     ctx.font = mono(12);
     ctx.fillText(label, pad, y);
+    y += lineH; // maju dulu lewati baris LABEL, baru gambar nilainya
     const valLines = wrapText(ctx, String(value), contentW - 10);
     for (const vl of valLines) {
-      ctx.fillText(vl, pad, y + lineH);
+      ctx.fillText(vl, pad, y);
       y += lineH;
     }
     y += gap * 0.3;
