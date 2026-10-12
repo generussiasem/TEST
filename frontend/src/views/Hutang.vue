@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted } from "vue";
 import { api } from "../api.js";
+import { isAdmin } from "../store.js";
 
 const debts = ref([]);
 const contacts = ref([]);
@@ -453,8 +454,11 @@ onMounted(load);
               <td class="muted">{{ walletName(d.wallet_id) || "—" }}</td>
               <td class="muted">{{ d.note || "—" }}</td>
               <td style="white-space: nowrap">
-                <button class="btn ghost" style="padding: 4px 10px; margin-right: 6px" @click="startEdit(d)">Ubah</button>
-                <button class="btn ghost" style="padding: 4px 10px; color: #b3392c" @click="hapus(d)">Hapus</button>
+                <template v-if="isAdmin()">
+                  <button class="btn ghost" style="padding: 4px 10px; margin-right: 6px" @click="startEdit(d)">Ubah</button>
+                  <button class="btn ghost" style="padding: 4px 10px; color: #b3392c" @click="hapus(d)">Hapus</button>
+                </template>
+                <span v-else class="muted" style="font-size: 12px">—</span>
               </td>
             </template>
           </tr>

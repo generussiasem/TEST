@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, watch } from "vue";
 import { api } from "../api.js";
+import { isAdmin } from "../store.js";
 
 const tab = ref("fisik"); // "fisik" | "ppob"
 
@@ -346,7 +347,7 @@ onMounted(async () => {
 
       <div class="page-head">
         <button class="btn" @click="ppobShowAdd = !ppobShowAdd">{{ ppobShowAdd ? "Batal" : "+ Produk PPOB Manual" }}</button>
-        <button class="btn ghost" :disabled="syncing" @click="syncPrices">{{ syncing ? "Sinkron…" : "Sinkron Harga PPOB (OkeConnect)" }}</button>
+        <button v-if="isAdmin()" class="btn ghost" :disabled="syncing" @click="syncPrices">{{ syncing ? "Sinkron…" : "Sinkron Harga PPOB (OkeConnect)" }}</button>
         <button class="btn ghost" @click="showBlocked = !showBlocked">{{ showBlocked ? "Tutup" : "🚫 Kata Kunci Diblokir" }}</button>
       </div>
 

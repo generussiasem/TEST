@@ -314,7 +314,7 @@ app.get("/api/wallets", async (c) => {
   return c.json(results);
 });
 
-app.post("/api/wallets", async (c) => {
+app.post("/api/wallets", requireAdmin, async (c) => {
   const { name, type = "umum", balance = 0, provider = null } = await c.req.json();
   if (balance < 0) {
     return c.json({ ok: false, error: "Saldo dompet tidak boleh diisi angka minus." }, 400);
@@ -645,7 +645,7 @@ app.get("/api/contact-ids", async (c) => {
 // field umum. Kalau setelah sync tabel products kosong/aneh, cek dulu:
 //   curl "<PRICE_LIST_URL>" | head
 // lalu sesuaikan pemetaan field di bawah.
-app.post("/api/products/sync", async (c) => {
+app.post("/api/products/sync", requireAdmin, async (c) => {
   try {
     const result = await syncPpobPrices(c.env);
     return c.json(result, result.ok ? 200 : (result.error?.includes("PRICE_LIST_URL") ? 400 : 502));
@@ -1244,7 +1244,7 @@ app.post("/api/debts/pinjamkan", async (c) => {
 // Catatan yang tertaut ke dompet/transaksi (pembayaran hutang, titipan) hanya
 // boleh diubah catatannya — nominal & jenisnya terkunci karena memengaruhi
 // saldo dompet; hapus lalu catat ulang kalau salah.
-app.put("/api/debts/:id", async (c) => {
+app.put("/api/debts/:id", requireAdmin, async (c) => {
   const id = c.req.param("id");
   const old = await c.env.DB.prepare("SELECT * FROM debts WHERE id = ?").bind(id).first();
   if (!old) return c.json({ ok: false, error: "Data tidak ditemukan" }, 404);
@@ -1285,7 +1285,7 @@ app.put("/api/debts/:id", async (c) => {
 // Hapus catatan hutang/piutang — otomatis balikkan efeknya ke saldo kontak.
 // Kalau catatannya tertaut ke pembayaran hutang/titipan (ada transaksi
 // dompetnya), seluruh transaksi itu ikut dibatalkan (dompet dikembalikan).
-app.delete("/api/debts/:id", async (c) => {
+app.delete("/api/debts/:id", requireAdmin, async (c) => {
   const id = c.req.param("id");
   const d = await c.env.DB.prepare("SELECT * FROM debts WHERE id = ?").bind(id).first();
   if (!d) return c.json({ ok: false, error: "Data tidak ditemukan" }, 404);
@@ -2396,9 +2396,17 @@ async function cleanupOldData(env) {
 
   // 4. Hard-delete produk PPOB yang sudah nonaktif (soft-deleted) lebih dari
   //    1 tahun — walau pernah laku terjual (nama di laporan lama boleh kosong).
+  // "id NOT IN (SELECT product_id FROM transaction_items ...)" WAJIB ada —
+  // tanpa ini, produk yang nonaktifnya >1 tahun tapi KEBETULAN masih
+  // ditunjuk transaction_items dari transaksi yang BELUM cukup tua buat
+  // dihapus (langkah 1 di atas) bikin DELETE ini gagal "FOREIGN KEY
+  // constraint failed" (transaction_items.product_id -> products.id).
+  // Produk begini dibiarkan dulu — baru ikut terhapus di jalan cron
+  // berikutnya setelah transaksi penunjuknya sendiri cukup tua utk dihapus.
   const delProducts = await env.DB.prepare(
     `DELETE FROM products WHERE active = 0 AND deactivated_at IS NOT NULL
-       AND deactivated_at < datetime('now', '-1 year')`
+       AND deactivated_at < datetime('now', '-1 year')
+       AND id NOT IN (SELECT product_id FROM transaction_items WHERE product_id IS NOT NULL)`
   ).run();
   result.products = delProducts.meta?.changes ?? 0;
 

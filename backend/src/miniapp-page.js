@@ -810,7 +810,12 @@ function showOrderForm(product) {
     if (paidMethod === "utang" && !selectedContactId) { msgEl.innerHTML = '<div class="error">Pilih pelanggan dulu untuk pembayaran Utang</div>'; return; }
     msgEl.innerHTML = '<div class="spinner">Mengirim order ke provider...</div>';
     try {
-      const result = await api("/ppob/order", { method: "POST", body: JSON.stringify({ productCode: product.code, target, paidMethod, contactId: selectedContactId }) });
+      // newProductProvider: "okeconnect" eksplisit — product di sini SELALU
+      // berasal dari /catalog atau /products (sudah dipatok provider='okeconnect'
+      // di backend), tapi kalau tidak ikut dikirim, placePpobOrder jatuh ke
+      // query tanpa filter provider dan bisa gagal/salah kalau kodenya
+      // kebetulan juga ada di portalpulsa (code tidak lagi unik lintas provider).
+      const result = await api("/ppob/order", { method: "POST", body: JSON.stringify({ productCode: product.code, target, paidMethod, contactId: selectedContactId, newProductProvider: "okeconnect" }) });
       haptic("ok");
       showOrderStatus(result.refId, product);
     } catch (err) {

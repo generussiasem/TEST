@@ -39,7 +39,19 @@ export async function verifyPassword(password, stored) {
     key,
     256
   );
-  return toBase64Url(bits) === hashB64;
+  return timingSafeEqual(toBase64Url(bits), hashB64);
+}
+
+// Perbandingan string biasa (===) BOCOR info lewat waktu eksekusi — berhenti
+// di karakter pertama yang beda, jadi penyerang bisa menebak tanda tangan
+// byte demi byte dari selisih waktu respons (timing attack). Ini wajib
+// constant-time: selalu bandingkan semua karakter, waktunya sama rata
+// berapa pun miripnya tebakan dengan yang asli.
+function timingSafeEqual(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
 }
 
 async function hmac(secret, message) {
@@ -66,7 +78,7 @@ export async function verifyToken(env, token) {
   const [payloadB64, sig] = token.split(".");
   if (!payloadB64 || !sig) return null;
   const expectedSig = await hmac(env.AUTH_SECRET, payloadB64);
-  if (expectedSig !== sig) return null;
+  if (!timingSafeEqual(expectedSig, sig)) return null;
   const payload = JSON.parse(new TextDecoder().decode(fromBase64Url(payloadB64)));
   if (payload.exp < Date.now()) return null;
   return payload;

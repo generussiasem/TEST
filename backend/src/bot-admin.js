@@ -334,7 +334,12 @@ async function eksekusiOrderPpob(env, chatId, { productCode, target, paidMethod,
     target,
     paidMethod,
     contactId,
-    newProductProvider: isNew ? "portalpulsa" : null,
+    // SELALU eksplisit, jangan null — pilihProdukPpob SUDAH memastikan kode
+    // non-baru ini provider='okeconnect' saat dipilih (lihat komentarnya),
+    // tapi kalau di sini di-null-kan, placePpobOrder jatuh ke query tanpa
+    // filter provider dan bisa gagal/salah kalau kode yang sama kebetulan
+    // juga ada di portalpulsa (code tidak lagi unik lintas provider).
+    newProductProvider: isNew ? "portalpulsa" : "okeconnect",
   });
   const menuBtn = { inline_keyboard: [[{ text: "🏠 Menu Utama", callback_data: "m:main" }]] };
   let text = `Order *${result.refId}* (${result.status}):\n${result.reply}`;
