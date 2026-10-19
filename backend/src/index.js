@@ -564,8 +564,23 @@ app.delete("/api/contacts/:id", async (c) => {
   if (contact && (contact.total_debt || contact.deposit)) {
     return c.json({ ok: false, error: "Tidak bisa hapus — kontak ini masih punya sisa hutang/piutang atau saldo titipan. Selesaikan dulu di menu Hutang Piutang." }, 400);
   }
-  await c.env.DB.prepare("DELETE FROM contacts WHERE id = ?").bind(id).run();
-  return c.json({ ok: true });
+  try {
+    await c.env.DB.prepare("DELETE FROM contacts WHERE id = ?").bind(id).run();
+    return c.json({ ok: true });
+  } catch (err) {
+    // debts.contact_id TIDAK BOLEH null (NOT NULL REFERENCES contacts) —
+    // kontak yang hutangnya sudah lunas (total_debt/deposit = 0, lolos
+    // pengecekan di atas) tapi PERNAH punya baris riwayat hutang/cicilan/
+    // titipan di masa lalu tetap diblokir constraint ini, pesan D1
+    // mentahnya ("FOREIGN KEY constraint failed") tidak jelas buat kasir.
+    if (/FOREIGN KEY constraint failed/.test(err.message || "")) {
+      return c.json(
+        { ok: false, error: "Tidak bisa hapus — kontak ini masih punya riwayat hutang/piutang/titipan di masa lalu (walau sudah lunas). Riwayat itu tidak boleh dihapus demi jejak audit." },
+        400
+      );
+    }
+    return c.json({ ok: false, error: err.message }, 500);
+  }
 });
 
 // ID pelanggan fleksibel per kontak (No. BPJS, ID PLN, No. PDAM, dst) — tidak
@@ -698,10 +713,29 @@ async function assertSufficientBalance(db, walletId, amountNeeded) {
   }
 }
 
+// Paginasi OPSIONAL lewat ?page=1&perPage=20 (+ ?type=mutation buat Mutasi.vue
+// filter server-side, bukan ambil semua lalu filter di browser). TANPA
+// ?page, perilakunya PERSIS seperti sebelumnya (array polos, LIMIT 200) —
+// supaya pemanggil lain (Dashboard.vue) yang tidak butuh halaman tidak perlu
+// diubah sama sekali.
 app.get("/api/transactions", async (c) => {
-  const { results } = await c.env.DB.prepare(
-    "SELECT * FROM transactions ORDER BY date DESC LIMIT 200"
-  ).all();
+  const type = c.req.query("type");
+  const where = type ? "WHERE type = ?" : "";
+  const params = type ? [type] : [];
+  const page = c.req.query("page");
+  if (page) {
+    const perPage = Math.min(100, Math.max(1, Number(c.req.query("perPage")) || 20));
+    const pageNum = Math.max(1, Number(page) || 1);
+    const offset = (pageNum - 1) * perPage;
+    const { results } = await c.env.DB.prepare(`SELECT * FROM transactions ${where} ORDER BY date DESC LIMIT ? OFFSET ?`)
+      .bind(...params, perPage, offset)
+      .all();
+    const totalRow = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM transactions ${where}`).bind(...params).first();
+    return c.json({ results, total: totalRow.n, page: pageNum, perPage });
+  }
+  const { results } = await c.env.DB.prepare(`SELECT * FROM transactions ${where} ORDER BY date DESC LIMIT 200`)
+    .bind(...params)
+    .all();
   return c.json(results);
 });
 
@@ -1152,16 +1186,36 @@ app.delete("/api/transactions/:id", requireAdmin, async (c) => {
 // HUTANG PIUTANG (pelanggan & supplier)
 // ---------------------------------------------------------------------------
 
+// Paginasi OPSIONAL lewat ?page=1&perPage=20 — sama polanya dengan
+// /api/transactions, TANPA ?page perilakunya tidak berubah sama sekali.
+// Paginasi cuma berlaku utk daftar lengkap (bukan ?contact_id=, yang
+// dipakai riwayat satu kontak dan memang selalu diambil semua).
 app.get("/api/debts", async (c) => {
   const contactId = c.req.query("contact_id");
-  const { results } = contactId
-    ? await c.env.DB.prepare("SELECT * FROM debts WHERE contact_id = ? ORDER BY date DESC")
-        .bind(contactId)
-        .all()
-    : await c.env.DB.prepare(
-        `SELECT d.*, c.name AS contact_name FROM debts d
-         JOIN contacts c ON c.id = d.contact_id ORDER BY d.date DESC LIMIT 200`
-      ).all();
+  if (contactId) {
+    const { results } = await c.env.DB.prepare("SELECT * FROM debts WHERE contact_id = ? ORDER BY date DESC")
+      .bind(contactId)
+      .all();
+    return c.json(results);
+  }
+  const page = c.req.query("page");
+  if (page) {
+    const perPage = Math.min(100, Math.max(1, Number(c.req.query("perPage")) || 20));
+    const pageNum = Math.max(1, Number(page) || 1);
+    const offset = (pageNum - 1) * perPage;
+    const { results } = await c.env.DB.prepare(
+      `SELECT d.*, c.name AS contact_name FROM debts d
+       JOIN contacts c ON c.id = d.contact_id ORDER BY d.date DESC LIMIT ? OFFSET ?`
+    )
+      .bind(perPage, offset)
+      .all();
+    const totalRow = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM debts").first();
+    return c.json({ results, total: totalRow.n, page: pageNum, perPage });
+  }
+  const { results } = await c.env.DB.prepare(
+    `SELECT d.*, c.name AS contact_name FROM debts d
+     JOIN contacts c ON c.id = d.contact_id ORDER BY d.date DESC LIMIT 200`
+  ).all();
   return c.json(results);
 });
 
@@ -1547,22 +1601,34 @@ app.post("/api/shifts/:id/close", async (c) => {
   return c.json({ ok: true, expected_balance: expected, difference, ...breakdown });
 });
 
+// Paginasi OPSIONAL lewat ?page=1&perPage=20 — sama polanya dengan dua
+// endpoint di atas, TANPA ?page perilakunya tidak berubah (dipakai
+// PpobTagihan.vue & tempat lain yang belum butuh halaman).
 app.get("/api/ppob-orders", async (c) => {
-  const { results } = await c.env.DB.prepare(
-    "SELECT * FROM ppob_orders ORDER BY created_at DESC LIMIT 200"
-  ).all();
-  // Tempelkan detail hasil parsing balasan tagihan pascabayar (TTAG, modal
-  // riil dari selisih saldo, dst) supaya frontend TIDAK perlu duplikasi regex
-  // sendiri — lihat parseTagihanListrikDetail di ppob.js utk alasan lengkap.
-  // null kalau balasan bukan format tagihan pascabayar / belum ada balasan.
-  const withDetail = results.map((row) => ({
-    ...row,
-    tagihan_detail: row.status === "sukses" ? parseTagihanListrikDetail(row.raw_reply) : null,
-    // Modal riil portalpulsa (field "Harga" di balasan) — dipakai dashboard
-    // utk mengisi kotak Modal otomatis saat konfirmasi.
-    portalpulsa_detail: row.status === "sukses" && row.provider === "portalpulsa" ? parsePortalpulsaDetail(row.raw_reply) : null,
-  }));
-  return c.json(withDetail);
+  const page = c.req.query("page");
+  const tempel = (results) =>
+    results.map((row) => ({
+      ...row,
+      // Tempelkan detail hasil parsing balasan tagihan pascabayar (TTAG, modal
+      // riil dari selisih saldo, dst) supaya frontend TIDAK perlu duplikasi
+      // regex sendiri — lihat parseTagihanListrikDetail di ppob.js.
+      tagihan_detail: row.status === "sukses" ? parseTagihanListrikDetail(row.raw_reply) : null,
+      // Modal riil portalpulsa (field "Harga" di balasan) — dipakai dashboard
+      // utk mengisi kotak Modal otomatis saat konfirmasi.
+      portalpulsa_detail: row.status === "sukses" && row.provider === "portalpulsa" ? parsePortalpulsaDetail(row.raw_reply) : null,
+    }));
+  if (page) {
+    const perPage = Math.min(100, Math.max(1, Number(c.req.query("perPage")) || 20));
+    const pageNum = Math.max(1, Number(page) || 1);
+    const offset = (pageNum - 1) * perPage;
+    const { results } = await c.env.DB.prepare("SELECT * FROM ppob_orders ORDER BY created_at DESC LIMIT ? OFFSET ?")
+      .bind(perPage, offset)
+      .all();
+    const totalRow = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM ppob_orders").first();
+    return c.json({ results: tempel(results), total: totalRow.n, page: pageNum, perPage });
+  }
+  const { results } = await c.env.DB.prepare("SELECT * FROM ppob_orders ORDER BY created_at DESC LIMIT 200").all();
+  return c.json(tempel(results));
 });
 
 // Koreksi manual satu order PPOB (mis. status ternyata salah tercatat, seperti

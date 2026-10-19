@@ -4,6 +4,10 @@ import { api } from "../api.js";
 import { isAdmin } from "../store.js";
 
 const debts = ref([]);
+const debtPage = ref(1);
+const debtTotal = ref(0);
+const DEBT_PER_PAGE = 20;
+const debtTotalPages = computed(() => Math.max(1, Math.ceil(debtTotal.value / DEBT_PER_PAGE)));
 const contacts = ref([]);
 const wallets = ref([]);
 const error = ref("");
@@ -50,10 +54,22 @@ function walletName(id) {
 }
 
 async function load() {
-  const [d, c, w] = await Promise.all([api.get("/api/debts"), api.get("/api/contacts"), api.get("/api/wallets")]);
-  debts.value = d;
+  const [c, w] = await Promise.all([api.get("/api/contacts"), api.get("/api/wallets")]);
   contacts.value = c;
   wallets.value = w.filter((x) => x.type !== "distributor_ppob");
+  await loadDebts();
+}
+
+async function loadDebts() {
+  const r = await api.get(`/api/debts?page=${debtPage.value}&perPage=${DEBT_PER_PAGE}`);
+  debts.value = r.results;
+  debtTotal.value = r.total;
+}
+
+function gantiHalamanDebt(p) {
+  if (p < 1 || p > debtTotalPages.value) return;
+  debtPage.value = p;
+  loadDebts();
 }
 
 function bukaForm(m) {
@@ -467,6 +483,11 @@ onMounted(load);
           </tr>
         </tbody>
       </table>
+      <div v-if="debtTotal > 0" style="display: flex; align-items: center; gap: 10px; justify-content: flex-end; margin-top: 10px">
+        <span class="muted" style="font-size: 12.5px">{{ debtTotal }} catatan — halaman {{ debtPage }} dari {{ debtTotalPages }}</span>
+        <button class="btn ghost" style="padding: 4px 10px" :disabled="debtPage <= 1" @click="gantiHalamanDebt(debtPage - 1)">← Sebelumnya</button>
+        <button class="btn ghost" style="padding: 4px 10px" :disabled="debtPage >= debtTotalPages" @click="gantiHalamanDebt(debtPage + 1)">Berikutnya →</button>
+      </div>
     </div>
   </div>
 </template>

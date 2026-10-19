@@ -7,6 +7,10 @@ import { buatStrukPNG, buatStrukTokenPLN, parseStrukTokenPLN, buatStrukPulsa, pa
 const route = useRoute();
 
 const orders = ref([]);
+const orderPage = ref(1);
+const orderTotal = ref(0);
+const ORDER_PER_PAGE = 20;
+const orderTotalPages = computed(() => Math.max(1, Math.ceil(orderTotal.value / ORDER_PER_PAGE)));
 const products = ref([]);
 const contacts = ref([]);
 const error = ref("");
@@ -163,19 +167,18 @@ const searchResults = computed(() => {
 });
 
 async function load() {
-  const [o, p, c, w, st] = await Promise.all([
-    api.get("/api/ppob-orders"),
+  const [p, c, w, st] = await Promise.all([
     api.get("/api/products"),
     api.get("/api/contacts?type=pelanggan"),
     api.get("/api/wallets"),
     api.get("/api/store-settings"),
   ]);
-  orders.value = o;
   products.value = p;
   contacts.value = c;
   receiveWallets.value = w.filter((x) => x.type !== "distributor_ppob");
   store.value = st;
   loadRelay();
+  await loadOrders();
   if (route.query.code) {
     // Datang dari tombol "Order" di halaman Katalog, yang sekarang dibatasi
     // ke OkeConnect saja — dicocokkan provider juga di sini (bukan cuma
@@ -187,6 +190,18 @@ async function load() {
       pick(match);
     }
   }
+}
+
+async function loadOrders() {
+  const r = await api.get(`/api/ppob-orders?page=${orderPage.value}&perPage=${ORDER_PER_PAGE}`);
+  orders.value = r.results;
+  orderTotal.value = r.total;
+}
+
+function gantiHalamanOrder(p) {
+  if (p < 1 || p > orderTotalPages.value) return;
+  orderPage.value = p;
+  loadOrders();
 }
 
 function pick(p) {
@@ -258,6 +273,11 @@ async function prosesSemua() {
     }
   }
   processing.value = false;
+  // Order yang baru disubmit selalu muncul di HALAMAN 1 (urutan terbaru
+  // dulu) — paksa balik ke halaman 1 dulu sebelum reload, supaya pencarian
+  // orderRow di bawah tidak gagal diam-diam kalau kasir kebetulan lagi
+  // lihat halaman lain dari riwayat order.
+  orderPage.value = 1;
   await load();
 
   // Kalau ada yang sukses & belum dikonfirmasi, buka kotak konfirmasi utk
@@ -767,6 +787,11 @@ onMounted(load);
           </tr>
         </tbody>
       </table>
+      <div v-if="orderTotal > 0" style="display: flex; align-items: center; gap: 10px; justify-content: flex-end; margin-top: 10px">
+        <span class="muted" style="font-size: 12.5px">{{ orderTotal }} order — halaman {{ orderPage }} dari {{ orderTotalPages }}</span>
+        <button class="btn ghost" style="padding: 4px 10px" :disabled="orderPage <= 1" @click="gantiHalamanOrder(orderPage - 1)">← Sebelumnya</button>
+        <button class="btn ghost" style="padding: 4px 10px" :disabled="orderPage >= orderTotalPages" @click="gantiHalamanOrder(orderPage + 1)">Berikutnya →</button>
+      </div>
     </div>
   </div>
 </template>

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { api } from "../api.js";
 
 function firstOfMonth() {
@@ -21,6 +21,10 @@ const expenseForm = ref({ type: "expense", category: "", amount: 0, wallet_id: "
 const wallets = ref([]);
 const expenseMsg = ref("");
 const transactions = ref([]);
+const txPage = ref(1);
+const txTotal = ref(0);
+const TX_PER_PAGE = 20;
+const txTotalPages = computed(() => Math.max(1, Math.ceil(txTotal.value / TX_PER_PAGE)));
 const editing = ref(null);
 
 // Pemasukan lain (jasa/servis non-produk, mis. transfer bank, print, dll) —
@@ -59,19 +63,32 @@ async function load() {
   loading.value = true;
   error.value = "";
   try {
-    const [p, c, t] = await Promise.all([
+    const [p, c] = await Promise.all([
       api.get(`/api/reports/profit?start=${start.value}&end=${end.value}`),
       api.get(`/api/reports/cashflow?start=${start.value}&end=${end.value}`),
-      api.get("/api/transactions"),
     ]);
     profit.value = p;
     cashflow.value = c;
-    transactions.value = t;
+    await loadTransactions();
   } catch (err) {
     error.value = err.message;
   } finally {
     loading.value = false;
   }
+}
+
+// Riwayat transaksi dipisah dari load() di atas supaya ganti halaman tidak
+// perlu hitung ulang laporan laba/arus kas (yang jauh lebih berat).
+async function loadTransactions() {
+  const r = await api.get(`/api/transactions?page=${txPage.value}&perPage=${TX_PER_PAGE}`);
+  transactions.value = r.results;
+  txTotal.value = r.total;
+}
+
+function gantiHalamanTx(p) {
+  if (p < 1 || p > txTotalPages.value) return;
+  txPage.value = p;
+  loadTransactions();
 }
 
 function startEdit(t) {
@@ -408,6 +425,11 @@ onMounted(async () => {
           </tr>
         </tbody>
       </table>
+      <div v-if="txTotal > 0" style="display: flex; align-items: center; gap: 10px; justify-content: flex-end; margin-top: 10px">
+        <span class="muted" style="font-size: 12.5px">{{ txTotal }} transaksi — halaman {{ txPage }} dari {{ txTotalPages }}</span>
+        <button class="btn ghost" style="padding: 4px 10px" :disabled="txPage <= 1" @click="gantiHalamanTx(txPage - 1)">← Sebelumnya</button>
+        <button class="btn ghost" style="padding: 4px 10px" :disabled="txPage >= txTotalPages" @click="gantiHalamanTx(txPage + 1)">Berikutnya →</button>
+      </div>
     </div>
   </div>
 </template>

@@ -1,9 +1,13 @@
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { api } from "../api.js";
 
 const wallets = ref([]);
 const mutations = ref([]);
+const mutPage = ref(1);
+const mutTotal = ref(0);
+const MUT_PER_PAGE = 20;
+const mutTotalPages = computed(() => Math.max(1, Math.ceil(mutTotal.value / MUT_PER_PAGE)));
 const form = ref({ wallet_id: "", to_wallet_id: "", amount: 0, note: "" });
 const error = ref("");
 const okMsg = ref("");
@@ -18,11 +22,26 @@ function walletName(id) {
 }
 
 async function load() {
-  const [w, t] = await Promise.all([api.get("/api/wallets"), api.get("/api/transactions")]);
+  const w = await api.get("/api/wallets");
   wallets.value = w;
-  mutations.value = t.filter((tr) => tr.type === "mutation");
   if (!form.value.wallet_id && w.length) form.value.wallet_id = w[0].id;
   if (!form.value.to_wallet_id && w.length > 1) form.value.to_wallet_id = w[1].id;
+  await loadMutations();
+}
+
+// Filter type=mutation langsung di server (bukan ambil semua transaksi lalu
+// disaring di browser) — supaya satu halaman beneran isi 20 baris mutasi,
+// bukan 20 baris transaksi campuran yang kebetulan isinya mutasi sedikit.
+async function loadMutations() {
+  const r = await api.get(`/api/transactions?type=mutation&page=${mutPage.value}&perPage=${MUT_PER_PAGE}`);
+  mutations.value = r.results;
+  mutTotal.value = r.total;
+}
+
+function gantiHalamanMut(p) {
+  if (p < 1 || p > mutTotalPages.value) return;
+  mutPage.value = p;
+  loadMutations();
 }
 
 async function submit() {
@@ -151,6 +170,11 @@ onMounted(load);
           </tr>
         </tbody>
       </table>
+      <div v-if="mutTotal > 0" style="display: flex; align-items: center; gap: 10px; justify-content: flex-end; margin-top: 10px">
+        <span class="muted" style="font-size: 12.5px">{{ mutTotal }} mutasi — halaman {{ mutPage }} dari {{ mutTotalPages }}</span>
+        <button class="btn ghost" style="padding: 4px 10px" :disabled="mutPage <= 1" @click="gantiHalamanMut(mutPage - 1)">← Sebelumnya</button>
+        <button class="btn ghost" style="padding: 4px 10px" :disabled="mutPage >= mutTotalPages" @click="gantiHalamanMut(mutPage + 1)">Berikutnya →</button>
+      </div>
     </div>
   </div>
 </template>
