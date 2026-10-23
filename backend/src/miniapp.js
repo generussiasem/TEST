@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { verifyTelegramInitData } from "./telegram-miniapp-auth.js";
-import { placePpobOrder, cekTagihan, finalizePpobOrder, kirimDepositPortalpulsa, formatBarisDeposit } from "./ppob.js";
+import { placePpobOrder, cekTagihan, finalizePpobOrder, kirimDepositPortalpulsa, formatBarisDeposit, checkDistributorBalance } from "./ppob.js";
 import { DebtError, bayarHutang, titipUang, catatHutangManual } from "./debt.js";
 
 // ---------------------------------------------------------------------------
@@ -192,6 +192,28 @@ miniapp.get("/catalog", async (c) => {
      ORDER BY category, product_group, sell_price ASC`
   ).all();
   return c.json(results);
+});
+
+// Saldo distributor + tombol Cek Saldo — boleh untuk SEMUA karyawan (hanya
+// membaca). Khusus portalpulsa, deposit yang cocok otomatis dikonfirmasi &
+// mutasi tercatat (lihat rekonsiliasiDepositDariSaldo di ppob.js).
+miniapp.get("/saldo-distributor", async (c) => {
+  const { results } = await c.env.DB.prepare("SELECT name, balance, provider FROM wallets WHERE type = 'distributor_ppob' ORDER BY id").all();
+  return c.json(results);
+});
+
+miniapp.post("/saldo-distributor/:provider/cek", async (c) => {
+  const provider = c.req.param("provider");
+  if (provider !== "okeconnect" && provider !== "portalpulsa") {
+    return c.json({ ok: false, error: "Provider tidak dikenal." }, 400);
+  }
+  try {
+    const result = await checkDistributorBalance(c.env, provider);
+    if (!result.ok) return c.json({ ok: false, error: result.error }, 400);
+    return c.json(result);
+  } catch (err) {
+    return c.json({ ok: false, error: err.message }, 500);
+  }
 });
 
 // Cek tagihan/nama pelanggan dulu (PDAM/listrik/BPJS) SEBELUM benar-benar bayar

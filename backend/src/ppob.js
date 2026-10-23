@@ -558,6 +558,9 @@ export async function cekTagihan(env, { productCode, target }) {
  * baru ketahuan sukses lewat CRON (tanpa kasir di depan layar) tetap otomatis
  * tercatat pakai harga default — itu ditangani terpisah di index.js.
  */
+// Batas saldo minimal dompet distributor (per provider) agar transaksi PPOB boleh jalan.
+export const MIN_SALDO_DISTRIBUTOR = 50000;
+
 export async function placePpobOrder(env, { productCode, target, paidMethod = "tunai", contactId = null, batchId = null, telegramChatId = "", newProductProvider = null }) {
   // Kalau pemanggil eksplisit bilang "ini portalpulsa" (3 jalur khusus
   // portalpulsa: tab web, tombol bot, form Mini App), pencarian produknya
@@ -625,23 +628,21 @@ export async function placePpobOrder(env, { productCode, target, paidMethod = "t
     .bind(cfg.provider)
     .first();
 
-  // Peringatan (BUKAN blokir — order tetap dikirim) kalau saldo dompet
-  // distributor sudah diketahui menipis. Dicek SEBELUM kirim ke provider,
-  // supaya kasir sadar dari awal, bukan kaget setelah transaksi jalan.
-  // Untuk produk yang modalnya baru diketahui SETELAH transaksi (portalpulsa,
-  // tagihan pascabayar) — lihat usesDynamicCost — perkiraan modal tidak ada,
-  // jadi cuma diperingatkan kalau saldo sudah 0/minus (bukan dibandingkan
-  // modal, karena modalnya sendiri belum diketahui).
-  let warning = null;
+  // BLOKIR transaksi kalau saldo dompet distributor provider ini kurang dari
+  // MIN_SALDO_DISTRIBUTOR (Rp 50.000), atau dompetnya belum ada. Dicek SEBELUM
+  // order disimpan & SEBELUM perintah dikirim ke provider. Angka yang dipakai
+  // adalah wallets.balance (BUKAN cek langsung ke provider) — diperbarui lewat
+  // tombol "Cek Saldo", deposit, dan tiap transaksi. Kalau saldo di sini sudah
+  // basi, tekan Cek Saldo dulu untuk menyamakan dengan saldo asli provider.
   if (!wallet) {
-    warning = `Belum ada dompet distributor utk provider "${cfg.provider}" — modal transaksi TIDAK akan terpotong dari mana pun.`;
-  } else if (usesDynamicCost(product)) {
-    if (wallet.balance <= 0) {
-      warning = `Saldo distributor "${wallet.name}" sudah habis/minus (Rp ${wallet.balance.toLocaleString("id-ID")}). Modal transaksi ini belum diketahui pastinya, tapi kemungkinan besar tidak akan tertutup.`;
-    }
-  } else if (wallet.balance < product.cost_price) {
-    warning = `Saldo distributor "${wallet.name}" (Rp ${wallet.balance.toLocaleString("id-ID")}) lebih kecil dari modal produk ini (Rp ${product.cost_price.toLocaleString("id-ID")}) — kemungkinan transaksi akan gagal karena saldo tidak cukup.`;
+    throw new Error(`Belum ada dompet distributor utk provider "${cfg.provider}" — transaksi tidak bisa diproses. Buat dulu dompet tipe Distributor PPOB di Pengaturan.`);
   }
+  if (wallet.balance < MIN_SALDO_DISTRIBUTOR) {
+    throw new Error(
+      `Transaksi ditolak: saldo "${wallet.name}" Rp ${wallet.balance.toLocaleString("id-ID")} kurang dari batas minimal Rp ${MIN_SALDO_DISTRIBUTOR.toLocaleString("id-ID")}. Isi saldo dulu, lalu klik "Cek Saldo" untuk memperbarui.`
+    );
+  }
+  const warning = null;
 
   const refId = "TX" + Date.now();
 
@@ -1218,7 +1219,78 @@ export async function checkDistributorBalance(env, provider = "okeconnect") {
     return { ok: false, error: "Tidak bisa membaca angka saldo dari balasan.", raw_reply: reply };
   }
 
-  await env.DB.prepare("UPDATE wallets SET balance = ? WHERE id = ?").bind(balance, wallet.id).run();
+  // portalpulsa: kalau saldo asli naik PERSIS sebesar nominal transfer sebuah
+  // deposit yang masih menunggu (balasan "SUKSES" susulannya belum sampai),
+  // deposit itu dianggap sukses & mutasi dompet langsung dicatat otomatis.
+  let depositInfo = null;
+  if (cfg.provider === "portalpulsa") {
+    depositInfo = await rekonsiliasiDepositDariSaldo(env, { wallet, saldoAsli: balance });
+  }
 
-  return { ok: true, wallet_id: wallet.id, balance_before: wallet.balance, balance_after: balance, raw_reply: reply };
+  // Kalau deposit terkonfirmasi, saldo sudah ditimpa ke angka asli di dalam
+  // selesaikanDepositSusulan — tidak perlu ditimpa dua kali.
+  if (!depositInfo || !depositInfo.dikonfirmasi) {
+    await env.DB.prepare("UPDATE wallets SET balance = ? WHERE id = ?").bind(balance, wallet.id).run();
+  }
+
+  return {
+    ok: true,
+    wallet_id: wallet.id,
+    wallet_name: wallet.name,
+    balance_before: wallet.balance,
+    balance_after: balance,
+    raw_reply: reply,
+    deposit: depositInfo,
+  };
+}
+
+/**
+ * Cocokkan kenaikan saldo asli portalpulsa dengan deposit yang belum
+ * terkonfirmasi. selisih = saldoAsli - wallets.balance (database). Dianggap
+ * deposit hanya kalau selisih SAMA PERSIS dengan nominal_transfer (nominal +
+ * kode unik) tepat satu deposit — selisih lain (penyimpangan biasa) tidak
+ * ditebak-tebak. Deposit yang sudah ditandai gagal/kedaluwarsa dalam 3 hari
+ * terakhir (tanpa mutasi) juga dicocokkan, karena bisa jadi transfernya
+ * sampai walau balasan providernya tidak pernah datang.
+ *
+ * @returns {Promise<{dikonfirmasi:boolean, pesan:string, depositId?:number}|null>}
+ */
+export async function rekonsiliasiDepositDariSaldo(env, { wallet, saldoAsli }) {
+  const selisih = saldoAsli - wallet.balance;
+  if (selisih <= 0) return null;
+
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM portalpulsa_deposits
+     WHERE nominal_transfer = ? AND transaction_id IS NULL
+       AND (status = 'pending' OR (status = 'gagal' AND created_at >= datetime('now', '-3 days')))
+     ORDER BY id DESC`
+  )
+    .bind(selisih)
+    .all();
+
+  if (results.length === 0) {
+    return { dikonfirmasi: false, pesan: `Saldo naik Rp ${selisih.toLocaleString("id-ID")}, belum cocok dengan deposit mana pun (saldo hanya disinkronkan).` };
+  }
+  if (results.length > 1) {
+    return { dikonfirmasi: false, pesan: `Saldo naik Rp ${selisih.toLocaleString("id-ID")} cocok dengan ${results.length} deposit sekaligus — tidak dicatat otomatis, catat manual lewat Mutasi.` };
+  }
+
+  const deposit = results[0];
+  if (deposit.status === "gagal") {
+    // Buka lagi supaya selesaikanDepositSusulan (hanya menerima 'pending') bisa mencatatnya.
+    await env.DB.prepare("UPDATE portalpulsa_deposits SET status = 'pending' WHERE id = ?").bind(deposit.id).run();
+  }
+  const r = await selesaikanDepositSusulan(env, {
+    nominal: deposit.nominal_transfer,
+    status: "sukses",
+    saldoAkhir: saldoAsli,
+    alasan: null,
+    rawText: `[Sistem] Dikonfirmasi lewat Cek Saldo: saldo portalpulsa naik Rp ${selisih.toLocaleString("id-ID")} (sama dengan nominal transfer).`,
+  });
+  if (!r) return { dikonfirmasi: false, pesan: "Deposit cocok tapi gagal dicatat." };
+  return {
+    dikonfirmasi: true,
+    depositId: r.depositId,
+    pesan: `Deposit Rp ${selisih.toLocaleString("id-ID")} terkonfirmasi SUKSES dan mutasi dompet sudah tercatat otomatis.`,
+  };
 }

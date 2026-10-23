@@ -362,8 +362,8 @@ app.delete("/api/wallets/:id", requireAdmin, async (c) => {
 // tiap transaksi 'sale', lihat /api/reports/profit yang cuma jumlahkan
 // type='sale' & 'expense', TIDAK 'mutation'). Nominal ini perkiraan/sementara
 // (baru instruksi transfer) — saldo distributor yang sebenarnya tetap
-// ditimpa otomatis tiap 6 jam oleh cron checkDistributorBalance, jadi kalau
-// meleset akan otomatis terkoreksi sendiri. Kalau kirim ke provider GAGAL,
+// ditimpa saat tombol "Cek Saldo" ditekan (checkDistributorBalance), jadi kalau
+// meleset akan terkoreksi di pengecekan berikutnya. Kalau kirim ke provider GAGAL,
 // tidak ada mutasi yang dibuat sama sekali (saldo dompet tidak berubah).
 // Kirim perintah Deposit ke portalpulsa langsung dari web ("D BANK NOMINAL
 // PIN") — PIN otomatis dari secret PORTALPULSA_PIN, admin cukup isi bank +
@@ -389,6 +389,25 @@ app.post("/api/admin/portalpulsa/deposit", requireAdmin, async (c) => {
     await assertSufficientBalance(c.env.DB, walletId, nominal);
     const result = await kirimDepositPortalpulsa(c.env, { bank, nominal, walletId, employeeId: employee ? employee.employeeId : null });
     return c.json({ ok: true, reply: result.replyText, nominalTransfer: result.nominalTransfer, status: "pending" });
+  } catch (err) {
+    return c.json({ ok: false, error: err.message }, 500);
+  }
+});
+
+// Tombol "Cek Saldo" — boleh dipakai SEMUA karyawan (hanya membaca saldo asli
+// provider lewat Jabber lalu menyamakan wallets.balance). Khusus portalpulsa,
+// kalau saldo naik persis sebesar nominal transfer deposit yang masih menunggu,
+// deposit otomatis dikonfirmasi & mutasi dompet dicatat (lihat
+// rekonsiliasiDepositDariSaldo di ppob.js).
+app.post("/api/saldo-distributor/:provider/cek", async (c) => {
+  const provider = c.req.param("provider");
+  if (provider !== "okeconnect" && provider !== "portalpulsa") {
+    return c.json({ ok: false, error: "Provider tidak dikenal." }, 400);
+  }
+  try {
+    const result = await checkDistributorBalance(c.env, provider);
+    if (!result.ok) return c.json(result, 400);
+    return c.json(result);
   } catch (err) {
     return c.json({ ok: false, error: err.message }, 500);
   }
@@ -2506,17 +2525,8 @@ export default {
         await checkPendingPortalpulsaDeposits(env).catch((err) =>
           console.error("[cron] checkPendingPortalpulsaDeposits gagal:", err.message)
         );
-        // 00, 06, 12, 18 UTC: sinkron saldo dompet distributor tiap provider
-        // aktif (OkeConnect: "Saldo.PIN", portalpulsa: "S PIN" — lihat
-        // checkDistributorBalance di ppob.js). Dibungkus catch per provider:
-        // kalau satu provider Jabber-nya gangguan, provider lain tetap dicek.
-        if (tepatJam && jam % 6 === 0) {
-          for (const provider of ["okeconnect", "portalpulsa"]) {
-            await checkDistributorBalance(env, provider).catch((err) =>
-              console.error(`[cron] checkDistributorBalance (${provider}) gagal:`, err.message)
-            );
-          }
-        }
+        // Cek saldo distributor TIDAK otomatis lagi — dilakukan manual lewat
+        // tombol "Cek Saldo" (POST /api/saldo-distributor/:provider/cek).
       })()
     );
 

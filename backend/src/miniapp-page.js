@@ -319,6 +319,14 @@ function renderPpobTab() {
   const body = document.getElementById("tabBody");
   body.innerHTML =
     '<div class="card">' +
+      '<div class="section-title">Saldo Distributor</div>' +
+      '<div id="saldoDist" class="muted">Memuat...</div>' +
+      '<div class="muted" style="margin:6px 0">Transaksi ditolak kalau saldo kurang dari Rp50.000.</div>' +
+      '<button class="btn secondary" id="cekSaldoOke">🔄 Cek Saldo OkeConnect</button>' +
+      '<button class="btn secondary" id="cekSaldoPP" style="margin-top:6px">🔄 Cek Saldo portalpulsa</button>' +
+      '<div id="saldoMsg"></div>' +
+    '</div>' +
+    '<div class="card">' +
       '<label>Cari produk (nama/kode)</label>' +
       '<input id="ppobSearch" placeholder="mis. TSEL5, token, PDAM..." />' +
       '<div id="ppobList" class="spinner">Ketik untuk mencari produk...</div>' +
@@ -341,6 +349,9 @@ function renderPpobTab() {
   let timer;
   searchInput.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => loadProducts(searchInput.value), 300); });
   document.getElementById("manualPortalpulsaBtn").addEventListener("click", () => showManualPortalpulsaForm());
+  document.getElementById("cekSaldoOke").addEventListener("click", () => cekSaldoDistributor("okeconnect"));
+  document.getElementById("cekSaldoPP").addEventListener("click", () => cekSaldoDistributor("portalpulsa"));
+  loadSaldoDistributor();
   const depositBtn = document.getElementById("depositPortalpulsaBtn");
   if (depositBtn) depositBtn.addEventListener("click", () => showDepositPortalpulsaForm());
   loadProducts("");
@@ -455,6 +466,33 @@ function showManualPortalpulsaForm() {
       msgEl.innerHTML = '<div class="error">' + esc(err.message) + '</div>';
     }
   });
+}
+
+async function loadSaldoDistributor() {
+  const el = document.getElementById("saldoDist");
+  if (!el) return;
+  try {
+    const rows = await api("/saldo-distributor");
+    el.innerHTML = rows.length
+      ? rows.map((w) => '<div class="row"><span>' + esc(w.name) + '</span><b' + (w.balance < 50000 ? ' style="color:#d33"' : '') + '>' + rupiah(w.balance) + '</b></div>').join("")
+      : "Belum ada dompet distributor.";
+  } catch (err) {
+    el.innerHTML = '<div class="error">' + esc(err.message) + '</div>';
+  }
+}
+
+async function cekSaldoDistributor(provider) {
+  const msgEl = document.getElementById("saldoMsg");
+  msgEl.innerHTML = '<div class="spinner">Mengecek saldo ke provider...</div>';
+  try {
+    const r = await api("/saldo-distributor/" + provider + "/cek", { method: "POST", body: "{}" });
+    haptic("ok");
+    msgEl.innerHTML = '<div class="success" style="white-space:pre-wrap">Saldo ' + esc(r.wallet_name || provider) + ' sekarang ' + rupiah(r.balance_after) + ' (sebelumnya ' + rupiah(r.balance_before) + ').' + (r.deposit ? '<br>' + esc(r.deposit.pesan) : '') + '</div>';
+    loadSaldoDistributor();
+  } catch (err) {
+    haptic("err");
+    msgEl.innerHTML = '<div class="error">' + esc(err.message) + '</div>';
+  }
 }
 
 // Form Deposit portalpulsa (khusus admin — tombolnya sudah disembunyikan di

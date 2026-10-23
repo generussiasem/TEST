@@ -1,5 +1,5 @@
 import { sendTelegramMessage, editTelegramMessage, answerCallbackQuery } from "./telegram.js";
-import { finalizePpobOrder, placePpobOrder, usesDynamicCost, parseTagihanListrikDetail, parsePortalpulsaDetail, kirimDepositPortalpulsa } from "./ppob.js";
+import { finalizePpobOrder, placePpobOrder, usesDynamicCost, parseTagihanListrikDetail, parsePortalpulsaDetail, kirimDepositPortalpulsa, checkDistributorBalance } from "./ppob.js";
 import { bayarHutang } from "./debt.js";
 
 // ---------------------------------------------------------------------------
@@ -79,6 +79,24 @@ export async function handleLinkCommand(env, chatId, text) {
     .bind(String(chatId), employee.id)
     .run();
   return `Berhasil terhubung sebagai *${employee.name}* (${employee.role}). Kirim /menu untuk mulai.`;
+}
+
+// Tampilan Saldo Distributor + tombol Cek Saldo per provider. Transaksi PPOB
+// ditolak kalau saldo < Rp 50.000 (lihat MIN_SALDO_DISTRIBUTOR di ppob.js).
+async function renderSaldoDistributor(env, info = "") {
+  const { results } = await env.DB.prepare("SELECT name, balance FROM wallets WHERE type = 'distributor_ppob' ORDER BY id").all();
+  const lines = results.map((w) => `${w.name}: ${rupiah(w.balance)}${w.balance < 50000 ? " ⚠️ di bawah batas Rp50.000" : ""}`);
+  const text = (lines.length ? lines.join("\n") : "Belum ada akun saldo distributor.") + (info ? `\n\n${info}` : "");
+  return {
+    text,
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "🔄 Cek Saldo OkeConnect", callback_data: "sc:okeconnect" }],
+        [{ text: "🔄 Cek Saldo portalpulsa", callback_data: "sc:portalpulsa" }],
+        [{ text: "🏠 Menu Utama", callback_data: "m:main" }],
+      ],
+    },
+  };
 }
 
 // Tombol "🧮 Buka Mini App Kasir" cuma muncul kalau secret MINIAPP_URL sudah
@@ -731,12 +749,20 @@ export async function handleAdminCallback(env, callbackQuery) {
       await clearSession(env, chatId);
       payload = { text: `Halo, *${employee.name}*! 👋\nMau kelola apa hari ini?`, reply_markup: mainMenuKeyboard(env, employee) };
     } else if (ns === "m" && action === "saldo") {
-      const { results } = await env.DB.prepare("SELECT name, balance FROM wallets WHERE type = 'distributor_ppob'").all();
-      const lines = results.map((w) => `${w.name}: ${rupiah(w.balance)}`);
-      payload = {
-        text: lines.length ? lines.join("\n") : "Belum ada akun saldo distributor.",
-        reply_markup: { inline_keyboard: [[{ text: "🏠 Menu Utama", callback_data: "m:main" }]] },
-      };
+      payload = await renderSaldoDistributor(env);
+    } else if (ns === "sc" && (action === "okeconnect" || action === "portalpulsa")) {
+      // Tombol Cek Saldo — semua karyawan boleh. Cek saldo asli ke provider
+      // lewat Jabber, lalu (portalpulsa) rekonsiliasi deposit yang cocok.
+      let info;
+      try {
+        const r = await checkDistributorBalance(env, action);
+        info = r.ok
+          ? `✅ Saldo ${r.wallet_name} sekarang ${rupiah(r.balance_after)} (sebelumnya ${rupiah(r.balance_before)}).` + (r.deposit ? `\n${r.deposit.pesan}` : "")
+          : `⚠️ ${r.error}`;
+      } catch (err) {
+        info = `⚠️ Gagal cek saldo: ${err.message}`;
+      }
+      payload = await renderSaldoDistributor(env, info);
     } else if (ns === "lap" && action === "menu") {
       payload = renderLaporanMenu();
     } else if (ns === "lap" && ["h", "k", "w"].includes(action)) {

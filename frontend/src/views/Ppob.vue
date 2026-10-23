@@ -14,6 +14,14 @@ const orderTotalPages = computed(() => Math.max(1, Math.ceil(orderTotal.value / 
 const products = ref([]);
 const contacts = ref([]);
 const error = ref("");
+// ---- Saldo distributor (OkeConnect & portalpulsa) + tombol Cek Saldo ----
+// Transaksi ditolak backend kalau saldo < Rp 50.000. Saldo di sini angka dari
+// database, diperbarui lewat tombol Cek Saldo (cek saldo asli ke provider).
+const MIN_SALDO = 50000;
+const distWallets = ref([]);
+const cekSaldoLoading = ref("");
+const saldoMsg = ref("");
+const saldoError = ref("");
 const search = ref("");
 const openedId = ref(null);
 
@@ -166,6 +174,29 @@ const searchResults = computed(() => {
     .slice(0, 8);
 });
 
+function saldoProvider(provider) {
+  return distWallets.value.find((w) => w.provider === provider);
+}
+
+async function cekSaldo(provider) {
+  saldoMsg.value = "";
+  saldoError.value = "";
+  cekSaldoLoading.value = provider;
+  try {
+    const res = await api.post(`/api/saldo-distributor/${provider}/cek`, {});
+    saldoMsg.value =
+      `Saldo ${res.wallet_name || provider} sekarang ${rupiah(res.balance_after)} (sebelumnya ${rupiah(res.balance_before)}).` +
+      (res.deposit ? `\n${res.deposit.pesan}` : "");
+    const w = await api.get("/api/wallets");
+    distWallets.value = w.filter((x) => x.type === "distributor_ppob");
+    receiveWallets.value = w.filter((x) => x.type !== "distributor_ppob");
+  } catch (err) {
+    saldoError.value = err.message;
+  } finally {
+    cekSaldoLoading.value = "";
+  }
+}
+
 async function load() {
   const [p, c, w, st] = await Promise.all([
     api.get("/api/products"),
@@ -176,6 +207,7 @@ async function load() {
   products.value = p;
   contacts.value = c;
   receiveWallets.value = w.filter((x) => x.type !== "distributor_ppob");
+  distWallets.value = w.filter((x) => x.type === "distributor_ppob");
   store.value = st;
   loadRelay();
   await loadOrders();
@@ -515,6 +547,27 @@ onMounted(load);
     </div>
 
     <div v-if="error" class="error-box">{{ error }}</div>
+
+    <div class="card" style="margin-bottom: 16px">
+      <h3 style="margin-bottom: 8px">Saldo Distributor</h3>
+      <p class="muted" style="font-size: 12.5px; margin-bottom: 10px">
+        Transaksi ditolak kalau saldo kurang dari {{ rupiah(MIN_SALDO) }}. Tekan <b>Cek Saldo</b> untuk memperbarui dari saldo asli di provider.
+      </p>
+      <div v-if="saldoError" class="error-box">{{ saldoError }}</div>
+      <div v-if="saldoMsg" class="ok-box" style="white-space: pre-wrap; margin-bottom: 10px">{{ saldoMsg }}</div>
+      <div style="display: flex; gap: 12px; flex-wrap: wrap">
+        <div v-for="prov in [{ key: 'okeconnect', label: 'OkeConnect' }, { key: 'portalpulsa', label: 'portalpulsa' }]" :key="prov.key" style="flex: 1; min-width: 220px">
+          <div class="muted" style="font-size: 12.5px">{{ prov.label }}</div>
+          <div style="font-size: 18px; font-weight: 600" :style="saldoProvider(prov.key) && saldoProvider(prov.key).balance < MIN_SALDO ? 'color: var(--red)' : ''">
+            {{ saldoProvider(prov.key) ? rupiah(saldoProvider(prov.key).balance) : "Dompet belum ada" }}
+          </div>
+          <div v-if="saldoProvider(prov.key) && saldoProvider(prov.key).balance < MIN_SALDO" class="muted" style="font-size: 12px; color: var(--red)">Di bawah batas — transaksi {{ prov.label }} ditolak</div>
+          <button class="btn" type="button" style="margin-top: 6px" :disabled="cekSaldoLoading !== ''" @click="cekSaldo(prov.key)">
+            {{ cekSaldoLoading === prov.key ? "Mengecek..." : "Cek Saldo " + prov.label }}
+          </button>
+        </div>
+      </div>
+    </div>
 
     <div class="grid cols-2" style="align-items: start; margin-bottom: 22px">
       <div class="card">
