@@ -4,6 +4,25 @@ import { api } from "../api.js";
 
 const settings = ref({ store_name: "", address: "", logo_url: "", cetak_struk_url: "" });
 const wallets = ref([]);
+// Dompet sumber default deposit OkeConnect (dipakai saat Cek Saldo mendeteksi saldo naik)
+const depositOkeWalletId = ref("");
+const depositOkeMsg = ref("");
+async function loadDepositOkeWallet() {
+  try {
+    const r = await api.get("/api/deposit-okeconnect-wallet");
+    depositOkeWalletId.value = r.walletId || "";
+  } catch (_) {}
+}
+async function simpanDepositOkeWallet() {
+  depositOkeMsg.value = "";
+  error.value = "";
+  try {
+    await api.put("/api/deposit-okeconnect-wallet", { walletId: depositOkeWalletId.value });
+    depositOkeMsg.value = "Dompet sumber deposit OkeConnect disimpan.";
+  } catch (err) {
+    error.value = err.message;
+  }
+}
 const walletForm = ref({ name: "", type: "umum", balance: 0, provider: "okeconnect" });
 const error = ref("");
 const okMsg = ref("");
@@ -134,6 +153,7 @@ async function hapusWallet(w) {
 onMounted(() => {
   load();
   loadDepositHistory();
+  loadDepositOkeWallet();
 });
 </script>
 
@@ -177,6 +197,28 @@ onMounted(() => {
         </p>
         <form @submit.prevent="simpanModalAwal">
           <div class="field"><label>Nilai Modal Awal (Rp)</label><input v-model.number="modalAwalForm" type="number" /></div>
+          <button class="btn" type="submit">Simpan</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-bottom: 12px">Deposit OkeConnect Otomatis</h3>
+        <p class="muted" style="font-size: 13px; margin-bottom: 12px">
+          Saat tombol <b>Cek Saldo OkeConnect</b> dipakai dan saldo asli naik <b>Rp 50.000 atau lebih</b>, kenaikan itu dicatat
+          otomatis sebagai Mutasi dari dompet sumber di bawah ke Saldo Distributor OkeConnect. Kalau ternyata itu koreksi
+          provider, tekan tombol <b>Bukan deposit</b> yang muncul di hasil Cek Saldo.
+        </p>
+        <div v-if="depositOkeMsg" class="ok-box">{{ depositOkeMsg }}</div>
+        <form @submit.prevent="simpanDepositOkeWallet">
+          <div class="field">
+            <label>Dompet sumber deposit OkeConnect</label>
+            <select v-model.number="depositOkeWalletId" required>
+              <option value="" disabled>Pilih dompet...</option>
+              <option v-for="w in wallets.filter((w) => w.type !== 'distributor_ppob')" :key="w.id" :value="w.id">
+                {{ w.name }} ({{ rupiah(w.balance) }})
+              </option>
+            </select>
+          </div>
           <button class="btn" type="submit">Simpan</button>
         </form>
       </div>

@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { sendJabberCommand, listenJabberMessages, setJabberReplyHook } from "./jabber.js";
 import { sendTelegramMessage } from "./telegram.js";
-import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, extractTokenCode, syncPpobPrices, getProviderConfig, finalizePpobOrder, checkDistributorBalance, parseTagihanListrikDetail, parsePortalpulsaDetail, assertCfgComplete, kirimDepositPortalpulsa, parseDepositSusulan, selesaikanDepositSusulan, tandaiDepositKadaluwarsa, formatBarisDeposit } from "./ppob.js";
+import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, extractTokenCode, syncPpobPrices, getProviderConfig, finalizePpobOrder, checkDistributorBalance, batalkanDepositOtomatis, getDompetDepositOkeconnect, setDompetDepositOkeconnect, parseTagihanListrikDetail, parsePortalpulsaDetail, assertCfgComplete, kirimDepositPortalpulsa, parseDepositSusulan, selesaikanDepositSusulan, tandaiDepositKadaluwarsa, formatBarisDeposit } from "./ppob.js";
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
 import { getEmployeeByChatId, handleLinkCommand, sendMainMenu, handleAdminCallback, handleAdminSessionMessage } from "./bot-admin.js";
 import { hitungAsetBersih, catatSnapshotModalHarian } from "./modal.js";
@@ -410,6 +410,33 @@ app.post("/api/saldo-distributor/:provider/cek", async (c) => {
     return c.json(result);
   } catch (err) {
     return c.json({ ok: false, error: err.message }, 500);
+  }
+});
+
+// Tombol "Bukan deposit" — membatalkan mutasi deposit OkeConnect yang tercatat
+// otomatis dari Cek Saldo (semua karyawan boleh, sama seperti Cek Saldo).
+app.post("/api/deposit-otomatis/:txId/batalkan", async (c) => {
+  try {
+    const r = await batalkanDepositOtomatis(c.env, c.req.param("txId"));
+    return c.json(r);
+  } catch (err) {
+    return c.json({ ok: false, error: err.message }, 400);
+  }
+});
+
+// Dompet sumber default deposit OkeConnect (default: dompet "BRI").
+app.get("/api/deposit-okeconnect-wallet", async (c) => {
+  const w = await getDompetDepositOkeconnect(c.env);
+  return c.json({ walletId: w ? w.id : null });
+});
+
+app.put("/api/deposit-okeconnect-wallet", requireAdmin, async (c) => {
+  const { walletId } = await c.req.json();
+  try {
+    await setDompetDepositOkeconnect(c.env, walletId);
+    return c.json({ ok: true });
+  } catch (err) {
+    return c.json({ ok: false, error: err.message }, 400);
   }
 });
 

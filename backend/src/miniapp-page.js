@@ -487,8 +487,21 @@ async function cekSaldoDistributor(provider) {
   try {
     const r = await api("/saldo-distributor/" + provider + "/cek", { method: "POST", body: "{}" });
     haptic("ok");
-    msgEl.innerHTML = '<div class="success" style="white-space:pre-wrap">Saldo ' + esc(r.wallet_name || provider) + ' sekarang ' + rupiah(r.balance_after) + ' (sebelumnya ' + rupiah(r.balance_before) + ').' + (r.deposit ? '<br>' + esc(r.deposit.pesan) : '') + '</div>';
+    msgEl.innerHTML = '<div class="success" style="white-space:pre-wrap">Saldo ' + esc(r.wallet_name || provider) + ' sekarang ' + rupiah(r.balance_after) + ' (sebelumnya ' + rupiah(r.balance_before) + ').' + (r.deposit ? '<br>' + esc(r.deposit.pesan) : '') + '</div>' +
+      (r.deposit && r.deposit.transactionId ? '<button class="btn secondary" id="batalDeposit" style="margin-top:6px">↩️ Bukan deposit</button>' : '');
     loadSaldoDistributor();
+    const bd = document.getElementById("batalDeposit");
+    if (bd) bd.addEventListener("click", async () => {
+      try {
+        await api("/deposit-otomatis/" + r.deposit.transactionId + "/batalkan", { method: "POST", body: "{}" });
+        haptic("ok");
+        msgEl.innerHTML = '<div class="success">Mutasi deposit dibatalkan. Saldo dompet sumber dikembalikan.</div>';
+        loadSaldoDistributor();
+      } catch (err2) {
+        haptic("err");
+        msgEl.innerHTML = '<div class="error">' + esc(err2.message) + '</div>';
+      }
+    });
   } catch (err) {
     haptic("err");
     msgEl.innerHTML = '<div class="error">' + esc(err.message) + '</div>';

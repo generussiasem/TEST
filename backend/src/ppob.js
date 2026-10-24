@@ -1225,6 +1225,10 @@ export async function checkDistributorBalance(env, provider = "okeconnect") {
   let depositInfo = null;
   if (cfg.provider === "portalpulsa") {
     depositInfo = await rekonsiliasiDepositDariSaldo(env, { wallet, saldoAsli: balance });
+  } else if (cfg.provider === "okeconnect") {
+    // OkeConnect tidak punya alur deposit di aplikasi ini, jadi satu-satunya
+    // tanda deposit adalah saldo asli naik >= MIN_DEPOSIT_OTOMATIS.
+    depositInfo = await rekonsiliasiDepositOkeconnect(env, { wallet, saldoAsli: balance });
   }
 
   // Kalau deposit terkonfirmasi, saldo sudah ditimpa ke angka asli di dalam
@@ -1293,4 +1297,100 @@ export async function rekonsiliasiDepositDariSaldo(env, { wallet, saldoAsli }) {
     depositId: r.depositId,
     pesan: `Deposit Rp ${selisih.toLocaleString("id-ID")} terkonfirmasi SUKSES dan mutasi dompet sudah tercatat otomatis.`,
   };
+}
+
+
+// ---------------------------------------------------------------------------
+// DEPOSIT OKECONNECT OTOMATIS (dari kenaikan saldo di tombol Cek Saldo)
+//
+// OkeConnect tidak punya perintah deposit lewat aplikasi ini, jadi aplikasi
+// tidak tahu kapan Anda deposit. Tandanya cuma: saldo asli naik. Aturannya:
+//   - selisih = saldo asli - wallets.balance (database)
+//   - selisih >= MIN_DEPOSIT_OTOMATIS (Rp 50.000) -> dianggap deposit, mutasi
+//     langsung dicatat dari dompet sumber default (BRI, bisa diganti di
+//     Pengaturan) ke dompet Saldo Distributor OkeConnect
+//   - selisih lebih kecil -> hanya sinkron saldo (biasanya selisih modal)
+// RISIKO: koreksi/refund dari provider yang besar akan terbaca sebagai
+// deposit. Karena itu hasilnya mengembalikan transactionId supaya UI bisa
+// menawarkan tombol "Bukan deposit" (batalkanDepositOtomatis).
+// ---------------------------------------------------------------------------
+export const MIN_DEPOSIT_OTOMATIS = 50000;
+const KATEGORI_DEPOSIT_OKECONNECT = "Deposit OkeConnect";
+const KUNCI_DOMPET_DEPOSIT_OKECONNECT = "deposit_wallet_okeconnect";
+
+/** Dompet sumber default deposit OkeConnect: yang dipilih di Pengaturan, kalau
+ * belum dipilih jatuh ke dompet (bukan distributor) yang namanya mengandung "BRI". */
+export async function getDompetDepositOkeconnect(env) {
+  const row = await env.DB.prepare("SELECT value FROM app_state WHERE key = ?").bind(KUNCI_DOMPET_DEPOSIT_OKECONNECT).first();
+  if (row && row.value) {
+    const w = await env.DB.prepare("SELECT * FROM wallets WHERE id = ? AND type != 'distributor_ppob'").bind(Number(row.value)).first();
+    if (w) return w;
+  }
+  return await env.DB.prepare("SELECT * FROM wallets WHERE type != 'distributor_ppob' AND UPPER(name) LIKE '%BRI%' ORDER BY id LIMIT 1").first();
+}
+
+export async function setDompetDepositOkeconnect(env, walletId) {
+  const w = await env.DB.prepare("SELECT id FROM wallets WHERE id = ? AND type != 'distributor_ppob'").bind(Number(walletId)).first();
+  if (!w) throw new Error("Dompet tidak ditemukan (dompet distributor tidak bisa jadi sumber deposit).");
+  await env.DB.prepare(
+    `INSERT INTO app_state (key, value, updated_at) VALUES (?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`
+  )
+    .bind(KUNCI_DOMPET_DEPOSIT_OKECONNECT, String(w.id))
+    .run();
+}
+
+export async function rekonsiliasiDepositOkeconnect(env, { wallet, saldoAsli }) {
+  const selisih = saldoAsli - wallet.balance;
+  const fmt = (n) => "Rp " + n.toLocaleString("id-ID");
+  if (selisih < MIN_DEPOSIT_OTOMATIS) return null;
+
+  const sumber = await getDompetDepositOkeconnect(env);
+  if (!sumber) {
+    return {
+      dikonfirmasi: false,
+      pesan: `Saldo naik ${fmt(selisih)} (kemungkinan deposit), tapi dompet sumber default belum ada — mutasi TIDAK dicatat. Pilih dompet sumber deposit OkeConnect di Pengaturan.`,
+    };
+  }
+
+  const note = `Deposit OkeConnect (dikonfirmasi lewat Cek Saldo: saldo naik ${fmt(selisih)})`;
+  const tx = await env.DB.prepare(
+    `INSERT INTO transactions (type, category, wallet_id, to_wallet_id, amount, cost_total, note)
+     VALUES ('mutation', ?, ?, ?, ?, 0, ?)`
+  )
+    .bind(KATEGORI_DEPOSIT_OKECONNECT, sumber.id, wallet.id, selisih, note)
+    .run();
+  const transactionId = tx.meta.last_row_id;
+
+  await env.DB.batch([
+    env.DB.prepare("UPDATE wallets SET balance = balance - ? WHERE id = ?").bind(selisih, sumber.id),
+    // Saldo distributor ditimpa angka asli dari provider (bukan += selisih).
+    env.DB.prepare("UPDATE wallets SET balance = ? WHERE id = ?").bind(saldoAsli, wallet.id),
+  ]);
+
+  return {
+    dikonfirmasi: true,
+    transactionId,
+    nominal: selisih,
+    sumberNama: sumber.name,
+    pesan: `Saldo naik ${fmt(selisih)}, dicatat sebagai deposit dari ${sumber.name}. Jika ini koreksi provider, tekan "Bukan deposit".`,
+  };
+}
+
+/** Batalkan mutasi deposit otomatis (tombol "Bukan deposit"): kembalikan saldo
+ * dompet sumber & hapus mutasinya. Saldo distributor TIDAK disentuh — angkanya
+ * sudah saldo asli dari provider. Hanya berlaku utk mutasi kategori deposit
+ * OkeConnect yang dibuat otomatis lewat Cek Saldo. */
+export async function batalkanDepositOtomatis(env, transactionId) {
+  const tx = await env.DB.prepare(
+    "SELECT * FROM transactions WHERE id = ? AND type = 'mutation' AND category = ? AND note LIKE '%dikonfirmasi lewat Cek Saldo%'"
+  )
+    .bind(Number(transactionId), KATEGORI_DEPOSIT_OKECONNECT)
+    .first();
+  if (!tx) throw new Error("Mutasi deposit tidak ditemukan (mungkin sudah dibatalkan).");
+  await env.DB.batch([
+    env.DB.prepare("UPDATE wallets SET balance = balance + ? WHERE id = ?").bind(tx.amount, tx.wallet_id),
+    env.DB.prepare("DELETE FROM transactions WHERE id = ?").bind(tx.id),
+  ]);
+  return { ok: true, amount: tx.amount, wallet_id: tx.wallet_id };
 }

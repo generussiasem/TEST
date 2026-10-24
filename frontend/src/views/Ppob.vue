@@ -22,6 +22,7 @@ const distWallets = ref([]);
 const cekSaldoLoading = ref("");
 const saldoMsg = ref("");
 const saldoError = ref("");
+const depositTxId = ref(null); // id mutasi deposit otomatis (untuk tombol "Bukan deposit")
 const search = ref("");
 const openedId = ref(null);
 
@@ -181,19 +182,37 @@ function saldoProvider(provider) {
 async function cekSaldo(provider) {
   saldoMsg.value = "";
   saldoError.value = "";
+  depositTxId.value = null;
   cekSaldoLoading.value = provider;
   try {
     const res = await api.post(`/api/saldo-distributor/${provider}/cek`, {});
     saldoMsg.value =
       `Saldo ${res.wallet_name || provider} sekarang ${rupiah(res.balance_after)} (sebelumnya ${rupiah(res.balance_before)}).` +
       (res.deposit ? `\n${res.deposit.pesan}` : "");
-    const w = await api.get("/api/wallets");
-    distWallets.value = w.filter((x) => x.type === "distributor_ppob");
-    receiveWallets.value = w.filter((x) => x.type !== "distributor_ppob");
+    depositTxId.value = res.deposit && res.deposit.transactionId ? res.deposit.transactionId : null;
+    await muatUlangDompet();
   } catch (err) {
     saldoError.value = err.message;
   } finally {
     cekSaldoLoading.value = "";
+  }
+}
+
+async function muatUlangDompet() {
+  const w = await api.get("/api/wallets");
+  distWallets.value = w.filter((x) => x.type === "distributor_ppob");
+  receiveWallets.value = w.filter((x) => x.type !== "distributor_ppob");
+}
+
+async function bukanDeposit() {
+  saldoError.value = "";
+  try {
+    await api.post(`/api/deposit-otomatis/${depositTxId.value}/batalkan`, {});
+    depositTxId.value = null;
+    saldoMsg.value = "Mutasi deposit dibatalkan. Saldo dompet sumber dikembalikan.";
+    await muatUlangDompet();
+  } catch (err) {
+    saldoError.value = err.message;
   }
 }
 
@@ -555,6 +574,7 @@ onMounted(load);
       </p>
       <div v-if="saldoError" class="error-box">{{ saldoError }}</div>
       <div v-if="saldoMsg" class="ok-box" style="white-space: pre-wrap; margin-bottom: 10px">{{ saldoMsg }}</div>
+      <button v-if="depositTxId" class="btn secondary" type="button" style="margin-bottom: 10px" @click="bukanDeposit">↩️ Bukan deposit</button>
       <div style="display: flex; gap: 12px; flex-wrap: wrap">
         <div v-for="prov in [{ key: 'okeconnect', label: 'OkeConnect' }, { key: 'portalpulsa', label: 'portalpulsa' }]" :key="prov.key" style="flex: 1; min-width: 220px">
           <div class="muted" style="font-size: 12.5px">{{ prov.label }}</div>

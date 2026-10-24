@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { verifyTelegramInitData } from "./telegram-miniapp-auth.js";
-import { placePpobOrder, cekTagihan, finalizePpobOrder, kirimDepositPortalpulsa, formatBarisDeposit, checkDistributorBalance } from "./ppob.js";
+import { placePpobOrder, cekTagihan, finalizePpobOrder, kirimDepositPortalpulsa, formatBarisDeposit, checkDistributorBalance, batalkanDepositOtomatis } from "./ppob.js";
 import { DebtError, bayarHutang, titipUang, catatHutangManual } from "./debt.js";
 
 // ---------------------------------------------------------------------------
@@ -213,6 +213,17 @@ miniapp.post("/saldo-distributor/:provider/cek", async (c) => {
     return c.json(result);
   } catch (err) {
     return c.json({ ok: false, error: err.message }, 500);
+  }
+});
+
+// Tombol "Bukan deposit" setelah Cek Saldo OkeConnect salah menganggap
+// koreksi provider sebagai deposit.
+miniapp.post("/deposit-otomatis/:txId/batalkan", async (c) => {
+  try {
+    const r = await batalkanDepositOtomatis(c.env, c.req.param("txId"));
+    return c.json(r);
+  } catch (err) {
+    return c.json({ ok: false, error: err.message }, 400);
   }
 });
 

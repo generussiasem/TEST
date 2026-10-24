@@ -1,5 +1,5 @@
 import { sendTelegramMessage, editTelegramMessage, answerCallbackQuery } from "./telegram.js";
-import { finalizePpobOrder, placePpobOrder, usesDynamicCost, parseTagihanListrikDetail, parsePortalpulsaDetail, kirimDepositPortalpulsa, checkDistributorBalance } from "./ppob.js";
+import { finalizePpobOrder, placePpobOrder, usesDynamicCost, parseTagihanListrikDetail, parsePortalpulsaDetail, kirimDepositPortalpulsa, checkDistributorBalance, batalkanDepositOtomatis } from "./ppob.js";
 import { bayarHutang } from "./debt.js";
 
 // ---------------------------------------------------------------------------
@@ -81,18 +81,32 @@ export async function handleLinkCommand(env, chatId, text) {
   return `Berhasil terhubung sebagai *${employee.name}* (${employee.role}). Kirim /menu untuk mulai.`;
 }
 
-// Tampilan Saldo Distributor + tombol Cek Saldo per provider. Transaksi PPOB
-// ditolak kalau saldo < Rp 50.000 (lihat MIN_SALDO_DISTRIBUTOR di ppob.js).
-async function renderSaldoDistributor(env, info = "") {
-  const { results } = await env.DB.prepare("SELECT name, balance FROM wallets WHERE type = 'distributor_ppob' ORDER BY id").all();
-  const lines = results.map((w) => `${w.name}: ${rupiah(w.balance)}${w.balance < 50000 ? " ⚠️ di bawah batas Rp50.000" : ""}`);
-  const text = (lines.length ? lines.join("\n") : "Belum ada akun saldo distributor.") + (info ? `\n\n${info}` : "");
+// Tampilan saldo dompet + tombol Cek Saldo asli untuk dompet distributor.
+// semua=false -> hanya dompet distributor (menu "Saldo Distributor");
+// semua=true  -> SEMUA dompet + total (menu "Saldo Semua Dompet").
+// Saldo dompet biasa (Kas/BRI/Jateng dst) = angka di aplikasi (hasil mutasi &
+// transaksi), BUKAN cek langsung ke bank. Transaksi PPOB ditolak kalau saldo
+// distributor < Rp 50.000 (MIN_SALDO_DISTRIBUTOR di ppob.js).
+async function renderSaldoDompet(env, { info = "", extraRows = [], semua = false } = {}) {
+  const { results } = await env.DB.prepare(
+    `SELECT name, balance, type FROM wallets ${semua ? "" : "WHERE type = 'distributor_ppob'"} ORDER BY id`
+  ).all();
+  const lines = results.map((w) => {
+    const ikon = w.type === "distributor_ppob" ? "🏦" : "👛";
+    const tanda = w.type === "distributor_ppob" && w.balance < 50000 ? " ⚠️ di bawah batas Rp50.000" : "";
+    return `${ikon} ${w.name}: ${rupiah(w.balance)}${tanda}`;
+  });
+  let text = lines.length ? lines.join("\n") : "Belum ada akun saldo.";
+  if (semua && results.length) text += `\n\nTotal: ${rupiah(results.reduce((a, w) => a + w.balance, 0))}`;
+  if (info) text += `\n\n${info}`;
+  const suffix = semua ? ":d" : "";
   return {
     text,
     reply_markup: {
       inline_keyboard: [
-        [{ text: "🔄 Cek Saldo OkeConnect", callback_data: "sc:okeconnect" }],
-        [{ text: "🔄 Cek Saldo portalpulsa", callback_data: "sc:portalpulsa" }],
+        ...extraRows,
+        [{ text: "🔄 Cek Saldo OkeConnect", callback_data: `sc:okeconnect${suffix}` }],
+        [{ text: "🔄 Cek Saldo portalpulsa", callback_data: `sc:portalpulsa${suffix}` }],
         [{ text: "🏠 Menu Utama", callback_data: "m:main" }],
       ],
     },
@@ -117,6 +131,7 @@ function mainMenuKeyboard(env, employee) {
   rows.push([{ text: "📦 Transaksi Portalpulsa", callback_data: "pp:start" }]);
   rows.push([{ text: "🧾 Konfirmasi Order PPOB", callback_data: "p:l:0" }]);
   rows.push([{ text: "💳 Saldo Distributor", callback_data: "m:saldo" }]);
+  rows.push([{ text: "💰 Saldo Semua Dompet", callback_data: "m:dompet" }]);
   rows.push([{ text: "📊 Laporan Transaksi", callback_data: "lap:menu" }]);
   rows.push([{ text: "🔁 Mutasi Antar Akun", callback_data: "mut:start" }]);
   // Deposit menyangkut saldo & rekening — dibatasi role admin, sama seperti
@@ -522,7 +537,7 @@ async function renderMutasiWalletPicker(env, { purpose, excludeId, callbackPrefi
   // juga tidak membatasi tipe dompet: dompet distributor PPOB boleh jadi
   // asal/tujuan, mis. buat koreksi manual saldo distributor — jadi bot & mini
   // app disamakan biar konsisten.
-  const { results: wallets } = await env.DB.prepare("SELECT id, name, type FROM wallets ORDER BY id").all();
+  const { results: wallets } = await env.DB.prepare("SELECT id, name, type, balance FROM wallets ORDER BY id").all();
   const filtered = excludeId ? wallets.filter((w) => w.id !== excludeId) : wallets;
   if (!filtered.length) {
     return {
@@ -530,12 +545,13 @@ async function renderMutasiWalletPicker(env, { purpose, excludeId, callbackPrefi
       reply_markup: { inline_keyboard: [[{ text: "🏠 Menu Utama", callback_data: "m:main" }]] },
     };
   }
+  const daftarSaldo = filtered.map((w) => `${w.type === "distributor_ppob" ? "🏦" : "👛"} ${w.name}: ${rupiah(w.balance)}`).join("\n");
   return {
-    text: purpose,
+    text: `${purpose}\n\n${daftarSaldo}`,
     reply_markup: {
       inline_keyboard: [
         ...filtered.map((w) => [
-          { text: `${w.type === "distributor_ppob" ? "🏦" : "👛"} ${w.name}`, callback_data: `${callbackPrefix}${w.id}` },
+          { text: `${w.type === "distributor_ppob" ? "🏦" : "👛"} ${w.name} — ${rupiah(w.balance)}`, callback_data: `${callbackPrefix}${w.id}` },
         ]),
         [{ text: "❌ Batal", callback_data: "m:main" }],
       ],
@@ -749,20 +765,34 @@ export async function handleAdminCallback(env, callbackQuery) {
       await clearSession(env, chatId);
       payload = { text: `Halo, *${employee.name}*! 👋\nMau kelola apa hari ini?`, reply_markup: mainMenuKeyboard(env, employee) };
     } else if (ns === "m" && action === "saldo") {
-      payload = await renderSaldoDistributor(env);
+      payload = await renderSaldoDompet(env);
+    } else if (ns === "m" && action === "dompet") {
+      payload = await renderSaldoDompet(env, { semua: true });
     } else if (ns === "sc" && (action === "okeconnect" || action === "portalpulsa")) {
       // Tombol Cek Saldo — semua karyawan boleh. Cek saldo asli ke provider
       // lewat Jabber, lalu (portalpulsa) rekonsiliasi deposit yang cocok.
       let info;
+      const extraRows = [];
       try {
         const r = await checkDistributorBalance(env, action);
         info = r.ok
           ? `✅ Saldo ${r.wallet_name} sekarang ${rupiah(r.balance_after)} (sebelumnya ${rupiah(r.balance_before)}).` + (r.deposit ? `\n${r.deposit.pesan}` : "")
           : `⚠️ ${r.error}`;
+        if (r.ok && r.deposit && r.deposit.transactionId) {
+          extraRows.push([{ text: "↩️ Bukan deposit", callback_data: `bd:${r.deposit.transactionId}:${arg === "d" ? "d" : ""}` }]);
+        }
       } catch (err) {
         info = `⚠️ Gagal cek saldo: ${err.message}`;
       }
-      payload = await renderSaldoDistributor(env, info);
+      payload = await renderSaldoDompet(env, { info, extraRows, semua: arg === "d" });
+    } else if (ns === "bd") {
+      // "Bukan deposit": batalkan mutasi deposit OkeConnect otomatis
+      const r = await batalkanDepositOtomatis(env, action);
+      const arg2 = arg;
+      payload = await renderSaldoDompet(env, {
+        info: `↩️ Mutasi deposit ${rupiah(r.amount)} dibatalkan, saldo dompet sumber dikembalikan.`,
+        semua: arg2 === "d",
+      });
     } else if (ns === "lap" && action === "menu") {
       payload = renderLaporanMenu();
     } else if (ns === "lap" && ["h", "k", "w"].includes(action)) {
