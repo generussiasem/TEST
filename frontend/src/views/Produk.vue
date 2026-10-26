@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, watch } from "vue";
 import { api } from "../api.js";
+import { fmtTgl } from "../waktu.js";
 import { isAdmin } from "../store.js";
 
 const tab = ref("fisik"); // "fisik" | "ppob"
@@ -462,7 +463,7 @@ onMounted(async () => {
                 <td>
                   <span class="badge" :class="p.active ? 'sukses' : 'gagal'">{{ p.active ? "Aktif" : "Nonaktif" }}</span>
                   <div v-if="!p.active && p.deactivated_at" class="muted" style="font-size: 11px">
-                    sejak {{ new Date(p.deactivated_at).toLocaleDateString("id-ID") }}
+                    sejak {{ fmtTgl(p.deactivated_at) }}
                   </div>
                 </td>
                 <td style="white-space: nowrap">

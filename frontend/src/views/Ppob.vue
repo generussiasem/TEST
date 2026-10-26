@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from "vue";
 import { useRoute } from "vue-router";
 import { api } from "../api.js";
+import { fmtWaktu } from "../waktu.js";
 import { buatStrukPNG, buatStrukTokenPLN, parseStrukTokenPLN, buatStrukPulsa, parseStrukPulsa, buatStrukTopupEwallet, parseStrukTopupEwallet, bagikanAtauUnduhGambar } from "../receiptImage.js";
 
 const route = useRoute();
@@ -791,7 +792,7 @@ onMounted(load);
                 <span class="badge" :class="o.status">{{ o.status }}</span>
                 <span v-if="o.status === 'sukses' && !o.finalized" class="badge gagal" style="margin-left: 4px">belum dicatat</span>
               </td>
-              <td class="muted" style="font-size: 12.5px">{{ new Date(o.created_at).toLocaleString("id-ID") }}</td>
+              <td class="muted" style="font-size: 12.5px">{{ fmtWaktu(o.created_at) }}</td>
             </tr>
             <tr v-if="openedId === o.id">
               <td colspan="5" style="background: var(--paper); padding: 14px 16px">
@@ -802,8 +803,8 @@ onMounted(load);
                   <div><span class="muted">Tujuan (No. HP / ID Pelanggan)</span><br /><span class="num">{{ o.target }}</span></div>
                   <div><span class="muted">Modal (cost_price)</span><br /><span class="num">{{ rupiah(o.cost_price) }}</span></div>
                   <div><span class="muted">Harga Jual (sell_price)</span><br /><span class="num">{{ rupiah(o.sell_price) }}</span></div>
-                  <div><span class="muted">Dibuat</span><br />{{ new Date(o.created_at).toLocaleString("id-ID") }}</div>
-                  <div><span class="muted">Diperbarui</span><br />{{ new Date(o.updated_at).toLocaleString("id-ID") }}</div>
+                  <div><span class="muted">Dibuat</span><br />{{ fmtWaktu(o.created_at) }}</div>
+                  <div><span class="muted">Diperbarui</span><br />{{ fmtWaktu(o.updated_at) }}</div>
                   <div><span class="muted">Metode Bayar</span><br />{{ o.paid_method === "utang" ? "Utang" : "Tunai/Bank" }}</div>
                   <div v-if="o.token_code"><span class="muted">Token</span><br /><span class="num">{{ o.token_code }}</span></div>
                   <div v-if="o.status === 'sukses'"><span class="muted">Sudah dicatat sebagai transaksi?</span><br />{{ o.finalized ? "Ya" : "Belum" }}</div>

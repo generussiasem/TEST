@@ -1,13 +1,13 @@
 <script setup>
 import { ref, computed, onMounted } from "vue";
 import { api } from "../api.js";
+import { awalBulanWib, hariIniWib, fmtWaktu } from "../waktu.js";
 
 function firstOfMonth() {
-  const d = new Date();
-  return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().slice(0, 10);
+  return awalBulanWib();
 }
 function today() {
-  return new Date().toISOString().slice(0, 10);
+  return hariIniWib();
 }
 
 const start = ref(firstOfMonth());
@@ -398,7 +398,7 @@ onMounted(async () => {
         <tbody>
           <tr v-for="t in transactions" :key="t.id">
             <template v-if="editing && editing.id === t.id">
-              <td class="muted" style="font-size: 12.5px">{{ new Date(t.date).toLocaleString("id-ID") }}</td>
+              <td class="muted" style="font-size: 12.5px">{{ fmtWaktu(t.date) }}</td>
               <td>{{ typeLabel[t.type] || t.type }}</td>
               <td><input v-model="editing.category" style="width: 120px" /></td>
               <td class="num">{{ rupiah(t.amount) }}</td>
@@ -409,7 +409,7 @@ onMounted(async () => {
               </td>
             </template>
             <template v-else>
-              <td class="muted" style="font-size: 12.5px">{{ new Date(t.date).toLocaleString("id-ID") }}</td>
+              <td class="muted" style="font-size: 12.5px">{{ fmtWaktu(t.date) }}</td>
               <td>{{ typeLabel[t.type] || t.type }}</td>
               <td>{{ t.category || "—" }}</td>
               <td class="num" :style="{ color: t.type === 'sale' || t.type === 'capital_in' || t.type === 'debt_in' ? 'var(--till-deep)' : 'var(--red)' }">{{ rupiah(t.amount) }}</td>

@@ -1437,7 +1437,7 @@ app.get("/api/reports/cashflow", async (c) => {
               ELSE 0 END), 0) AS keluar
      FROM wallets w
      LEFT JOIN transactions t
-       ON (t.wallet_id = w.id OR t.to_wallet_id = w.id OR t.cost_wallet_id = w.id) AND date(t.date) BETWEEN date(?) AND date(?)
+       ON (t.wallet_id = w.id OR t.to_wallet_id = w.id OR t.cost_wallet_id = w.id) AND date(t.date, '+7 hours') BETWEEN date(?) AND date(?)
      GROUP BY w.id
      HAVING masuk > 0 OR keluar > 0`
   )
@@ -1453,14 +1453,14 @@ app.get("/api/reports/profit", async (c) => {
 
   const sales = await c.env.DB.prepare(
     `SELECT COALESCE(SUM(amount),0) AS omzet, COALESCE(SUM(cost_total),0) AS modal
-     FROM transactions WHERE type = 'sale' AND date(date) BETWEEN date(?) AND date(?)`
+     FROM transactions WHERE type = 'sale' AND date(date, '+7 hours') BETWEEN date(?) AND date(?)`
   )
     .bind(start, end)
     .first();
 
   const expenses = await c.env.DB.prepare(
     `SELECT COALESCE(SUM(amount),0) AS total FROM transactions
-     WHERE type = 'expense' AND date(date) BETWEEN date(?) AND date(?)`
+     WHERE type = 'expense' AND date(date, '+7 hours') BETWEEN date(?) AND date(?)`
   )
     .bind(start, end)
     .first();

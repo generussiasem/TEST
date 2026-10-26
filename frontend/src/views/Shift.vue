@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted } from "vue";
 import { api } from "../api.js";
+import { fmtWaktu } from "../waktu.js";
 import { isAdmin } from "../store.js";
 
 const wallets = ref([]);
@@ -131,7 +132,7 @@ onMounted(load);
       <div class="card">
         <h3 style="margin-bottom: 4px">Shift Berjalan <span class="badge pending" style="margin-left: 6px">terbuka</span></h3>
         <p class="muted" style="font-size: 13px; margin-bottom: 12px">
-          {{ current.wallet_name }} — dibuka {{ new Date(current.opened_at).toLocaleString("id-ID") }}
+          {{ current.wallet_name }} — dibuka {{ fmtWaktu(current.opened_at) }}
         </p>
         <table>
           <tbody>
@@ -203,7 +204,7 @@ onMounted(load);
         </thead>
         <tbody>
           <tr v-for="s in history" :key="s.id">
-            <td class="muted" style="font-size: 12.5px">{{ new Date(s.opened_at).toLocaleString("id-ID") }}</td>
+            <td class="muted" style="font-size: 12.5px">{{ fmtWaktu(s.opened_at) }}</td>
             <td v-if="isAdmin()">{{ s.employee_name }}</td>
             <td>{{ s.wallet_name }}</td>
             <td class="num">{{ rupiah(s.opening_balance) }}</td>
@@ -227,8 +228,8 @@ onMounted(load);
         <div>
           <h3>Detail Shift — {{ detail.employee_name }}</h3>
           <p class="muted" style="font-size: 13px">
-            {{ detail.wallet_name }} · dibuka {{ new Date(detail.opened_at).toLocaleString("id-ID") }}
-            <template v-if="detail.closed_at"> · ditutup {{ new Date(detail.closed_at).toLocaleString("id-ID") }}</template>
+            {{ detail.wallet_name }} · dibuka {{ fmtWaktu(detail.opened_at) }}
+            <template v-if="detail.closed_at"> · ditutup {{ fmtWaktu(detail.closed_at) }}</template>
           </p>
         </div>
         <button class="btn ghost" @click="detail = null">Tutup</button>
@@ -256,7 +257,7 @@ onMounted(load);
         </thead>
         <tbody>
           <tr v-for="t in detail.transactions" :key="t.id">
-            <td class="muted" style="font-size: 12.5px">{{ new Date(t.date).toLocaleString("id-ID") }}</td>
+            <td class="muted" style="font-size: 12.5px">{{ fmtWaktu(t.date) }}</td>
             <td>{{ typeLabel[t.type] || t.type }}</td>
             <td>{{ t.category || "—" }}</td>
             <td class="num">{{ rupiah(t.amount) }}</td>

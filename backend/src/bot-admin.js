@@ -18,6 +18,15 @@ import { bayarHutang } from "./debt.js";
 const PAGE_SIZE = 6;
 const SESSION_TIMEOUT_MINUTES = 5; // sesi "menunggu input" (nominal bayar/harga) otomatis batal kalau tidak dibalas dalam waktu ini
 
+// Tanggal dari database = UTC tanpa zona ("YYYY-MM-DD HH:MM:SS"); tampilkan dalam WIB.
+function fmtTglWib(s) {
+  if (!s) return "-";
+  let t = String(s);
+  if (t.length === 19 && t.charAt(10) === " ") t = t.replace(" ", "T") + "Z";
+  const d = new Date(t);
+  return Number.isNaN(d.getTime()) ? "-" : d.toLocaleDateString("id-ID", { timeZone: "Asia/Jakarta" });
+}
+
 function rupiah(n) {
   return "Rp" + Number(n || 0).toLocaleString("id-ID");
 }
@@ -188,7 +197,7 @@ async function renderHutangDetail(env, contactId) {
     ? riwayat
         .map(
           (d) =>
-            `• ${new Date(d.date).toLocaleDateString("id-ID")} — ${typeLabel[d.type] || d.type} ${rupiah(d.amount)}${d.note ? ` (${d.note})` : ""}`
+            `• ${fmtTglWib(d.date)} — ${typeLabel[d.type] || d.type} ${rupiah(d.amount)}${d.note ? ` (${d.note})` : ""}`
         )
         .join("\n")
     : "_Belum ada riwayat._";

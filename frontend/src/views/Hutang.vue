@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted } from "vue";
 import { api } from "../api.js";
+import { fmtTgl } from "../waktu.js";
 import { isAdmin } from "../store.js";
 
 const debts = ref([]);
@@ -441,7 +442,7 @@ onMounted(load);
         <tbody>
           <tr v-for="d in debts" :key="d.id">
             <template v-if="editing && editing.id === d.id">
-              <td class="muted" style="font-size: 12.5px">{{ new Date(d.date).toLocaleDateString("id-ID") }}</td>
+              <td class="muted" style="font-size: 12.5px">{{ fmtTgl(d.date) }}</td>
               <td>{{ d.contact_name }}</td>
               <td>
                 <template v-if="isLocked(d)">{{ typeLabel[d.type] || d.type }}</template>
@@ -463,7 +464,7 @@ onMounted(load);
               </td>
             </template>
             <template v-else>
-              <td class="muted" style="font-size: 12.5px">{{ new Date(d.date).toLocaleDateString("id-ID") }}</td>
+              <td class="muted" style="font-size: 12.5px">{{ fmtTgl(d.date) }}</td>
               <td>{{ d.contact_name }}</td>
               <td>{{ typeLabel[d.type] || d.type }}</td>
               <td class="num" :style="{ color: warna(d) }">{{ tanda(d) }}{{ rupiah(d.amount) }}</td>

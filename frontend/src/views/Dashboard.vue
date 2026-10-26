@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted } from "vue";
 import { api } from "../api.js";
+import { hariIniWib, fmtWaktu } from "../waktu.js";
 import { auth } from "../store.js";
 
 const profit = ref(null);
@@ -15,8 +16,7 @@ function rupiah(n) {
 }
 
 function todayRange() {
-  const d = new Date();
-  const day = d.toISOString().slice(0, 10);
+  const day = hariIniWib();
   return { start: day, end: day };
 }
 
@@ -103,7 +103,7 @@ onMounted(load);
               <tr v-for="t in transactions" :key="t.id">
                 <td>
                   <div>{{ t.category || t.type }}</div>
-                  <div class="muted" style="font-size: 12px">{{ new Date(t.date).toLocaleString("id-ID") }}</div>
+                  <div class="muted" style="font-size: 12px">{{ fmtWaktu(t.date) }}</div>
                 </td>
                 <td class="num" style="text-align: right" :style="{ color: t.type === 'sale' ? 'var(--till-deep)' : 'var(--red)' }">
                   {{ t.type === "sale" ? "+" : "-" }}{{ rupiah(t.amount) }}

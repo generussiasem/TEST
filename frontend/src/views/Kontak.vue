@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted } from "vue";
 import { api } from "../api.js";
+import { fmtTgl } from "../waktu.js";
 
 const contacts = ref([]);
 const filter = ref("");
@@ -117,7 +118,7 @@ async function bagikanTagihan(c) {
     let text = `*Tagihan ${c.name}*\n\n`;
     if (riwayat.length) {
       for (const d of riwayat.slice(0, 10)) {
-        text += `${new Date(d.date).toLocaleDateString("id-ID")} — ${typeLabel[d.type] || d.type} ${rupiah(d.amount)}${d.note ? ` (${d.note})` : ""}\n`;
+        text += `${fmtTgl(d.date)} — ${typeLabel[d.type] || d.type} ${rupiah(d.amount)}${d.note ? ` (${d.note})` : ""}\n`;
       }
       text += "\n";
     }

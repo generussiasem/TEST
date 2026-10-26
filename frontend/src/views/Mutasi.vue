@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted } from "vue";
 import { api } from "../api.js";
+import { fmtWaktu } from "../waktu.js";
 
 const wallets = ref([]);
 const mutations = ref([]);
@@ -156,7 +157,7 @@ onMounted(load);
         </thead>
         <tbody>
           <tr v-for="t in mutations" :key="t.id">
-            <td class="muted" style="font-size: 12.5px">{{ new Date(t.date).toLocaleString("id-ID") }}</td>
+            <td class="muted" style="font-size: 12.5px">{{ fmtWaktu(t.date) }}</td>
             <td>{{ walletName(t.wallet_id) }}</td>
             <td>{{ walletName(t.to_wallet_id) }}</td>
             <td class="num">{{ rupiah(t.amount) }}</td>

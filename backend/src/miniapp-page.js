@@ -89,6 +89,16 @@ async function api(path, opts) {
   if (!res.ok || data.ok === false) throw new Error(data.error || ("Gagal (" + res.status + ")"));
   return data;
 }
+// Waktu database = UTC tanpa zona ("YYYY-MM-DD HH:MM:SS"); tampilkan dalam WIB.
+function parseWaktuDb(s) {
+  if (!s) return null;
+  var t = String(s);
+  if (t.length === 19 && t.charAt(10) === " ") t = t.replace(" ", "T") + "Z";
+  var d = new Date(t);
+  return isNaN(d.getTime()) ? null : d;
+}
+function fmtWaktu(s) { var d = parseWaktuDb(s); return d ? d.toLocaleString("id-ID", { timeZone: "Asia/Jakarta" }) : "-"; }
+function fmtTgl(s) { var d = parseWaktuDb(s); return d ? d.toLocaleDateString("id-ID", { timeZone: "Asia/Jakarta" }) : "-"; }
 function rupiah(n) { return "Rp" + Number(n || 0).toLocaleString("id-ID"); }
 function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m])); }
 function alertMsg(msg) { if (tg && tg.showAlert) tg.showAlert(msg); else alert(msg); }
@@ -201,7 +211,7 @@ async function showContactDetail(contactId) {
           '<div class="list-item"><div class="row"><span>' +
           ({ cicilan: "Bayar", utang: "Utang", piutang: "Piutang", titip: "Titip", pakai_titip: "Pakai Titipan", tarik_titip: "Tarik Titipan" }[d.type] || d.type) +
           '</span><b>' + rupiah(d.amount) + '</b></div>' +
-          '<div class="muted">' + new Date(d.date).toLocaleDateString("id-ID") + (d.note ? " — " + esc(d.note) : "") + '</div></div>'
+          '<div class="muted">' + fmtTgl(d.date) + (d.note ? " — " + esc(d.note) : "") + '</div></div>'
         ).join("")
       : '<p class="muted">Belum ada riwayat.</p>';
 
@@ -676,7 +686,7 @@ async function loadMutasiHistory() {
       : rows.map((m) =>
           '<div class="list-item">' +
             '<div class="row"><b>' + esc(m.from_wallet_name || "?") + ' → ' + esc(m.to_wallet_name || "?") + '</b><span class="badge">' + rupiah(m.amount) + '</span></div>' +
-            '<div class="muted">' + esc(m.employee_name || "?") + ' · ' + new Date(m.date).toLocaleString("id-ID") + '</div>' +
+            '<div class="muted">' + esc(m.employee_name || "?") + ' · ' + fmtWaktu(m.date) + '</div>' +
             (m.note ? '<div class="muted" style="margin-top:4px">' + esc(m.note) + '</div>' : "") +
           '</div>'
         ).join("");
