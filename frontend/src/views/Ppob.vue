@@ -85,6 +85,15 @@ const uangMasuk = computed(() => (confirmForm.value.paidMethod === "titipan" ? t
 
 const confirming = ref(false);
 
+// Untung/rugi transaksi ini = harga jual yang diketik - modal (nominal & % dari modal).
+const labaKonfirmasi = computed(() => {
+  const modal = Number(confirmForm.value.costTotal) || 0;
+  const jual = Number(confirmForm.value.sellPrice) || 0;
+  if (!modal) return null;
+  const selisih = jual - modal;
+  return { selisih, persen: (selisih / modal) * 100, rugi: selisih < 0 };
+});
+
 // ---- Struk terakhir yang dikonfirmasi ----
 const lastReceipt = ref(null);
 const store = ref({ store_name: "Toko", address: "" });
@@ -680,8 +689,17 @@ onMounted(load);
           <input v-model.number="confirmForm.costTotal" type="number" :readonly="!confirmTarget.isPostpaid" :style="!confirmTarget.isPostpaid ? 'background:var(--paper); color:var(--ink-soft)' : ''" />
         </div>
         <div class="field">
-          <label>Harga Jual (bisa disesuaikan)</label>
+          <label>Harga Jual (nominal, bisa disesuaikan — hanya untuk transaksi ini)</label>
           <input v-model.number="confirmForm.sellPrice" type="number" />
+        </div>
+        <div v-if="labaKonfirmasi" style="font-size: 13px; margin: -6px 0 10px" :style="labaKonfirmasi.rugi ? 'color:#b3392c; font-weight:600' : 'color:var(--ink-soft)'">
+          {{ labaKonfirmasi.rugi ? "RUGI " : "Untung " }}{{ rupiah(Math.abs(labaKonfirmasi.selisih)) }}
+          ({{ labaKonfirmasi.persen.toFixed(1) }}% dari modal)
+        </div>
+        <div v-if="!confirmTarget.isPostpaid && confirmTarget.product.sell_price > 0 && Number(confirmForm.sellPrice) !== Number(confirmTarget.product.sell_price)" style="margin: -4px 0 10px">
+          <button type="button" class="btn ghost" style="padding: 3px 10px; font-size: 12.5px" @click="confirmForm.sellPrice = confirmTarget.product.sell_price">
+            Kembalikan ke harga standar ({{ rupiah(confirmTarget.product.sell_price) }})
+          </button>
         </div>
         <div v-if="confirmTarget.isToken" class="field">
           <label>Kode Token (dicoba dibaca otomatis — koreksi kalau salah)</label>

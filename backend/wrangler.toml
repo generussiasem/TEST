@@ -19,7 +19,7 @@ keep_vars = true
 #   tiap 5 menit        -> cek ulang status order PPOB yang masih pending
 #   03:00 UTC (10 WIB)  -> bersih-bersih data lama (>1 tahun)
 #   23:00 UTC (06 WIB)  -> sinkron harga PPOB OkeConnect, sekali sehari
-#   00/06/12/18 UTC     -> sinkron saldo dompet distributor (Saldo.PIN via Jabber)
+#   (cek saldo distributor TIDAK otomatis — manual lewat tombol Cek Saldo)
 #   17:00 UTC (00 WIB)  -> snapshot harian Pertumbuhan Modal (modal.js)
 [triggers]
 crons = ["*/5 * * * *"]

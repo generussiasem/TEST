@@ -182,9 +182,11 @@ function startPpobEdit(p) {
 async function savePpobEdit() {
   ppobError.value = "";
   try {
-    await api.put(`/api/products/${ppobEditing.value.id}`, ppobEditing.value);
+    const res = await api.put(`/api/products/${ppobEditing.value.id}`, ppobEditing.value);
     ppobEditing.value = null;
-    ppobOkMsg.value = "Produk diperbarui.";
+    ppobOkMsg.value = res?.hargaDisesuaikan
+      ? `Produk diperbarui. Modal berubah, harga jual otomatis disesuaikan ke harga standar ${rupiah(res.sell_price)}.`
+      : "Produk diperbarui.";
     await loadPpob();
   } catch (err) {
     ppobError.value = err.message;
@@ -213,12 +215,13 @@ async function hapusPpob(p) {
   }
 }
 
-async function syncPrices() {
+async function syncPrices(forceArg) {
+  const force = forceArg === true;
   ppobError.value = "";
   ppobOkMsg.value = "";
   syncing.value = true;
   try {
-    const res = await api.post("/api/products/sync", {});
+    const res = await api.post(force ? "/api/products/sync?force=1" : "/api/products/sync", {});
     ppobOkMsg.value =
       `Sinkron selesai — ${res.synced} produk ditulis/diperbarui dari total ${res.total} di sumber` +
       (res.unchanged ? ` (${res.unchanged} sama persis, dilewati biar hemat kuota database)` : "") +
@@ -228,11 +231,27 @@ async function syncPrices() {
         : "") +
       (res.deactivated ? `, ${res.deactivated} dinonaktifkan otomatis (sudah tidak ada di sumber)` : "") +
       (res.skipped ? `, ${res.skipped} dilewati karena data tidak lengkap` : "") +
+      (res.hargaDisesuaikan
+        ? `. ${res.hargaDisesuaikan} produk harga jualnya disesuaikan ke harga standar (${res.modalNaik} modal naik, ${res.modalTurun} modal turun)`
+        : "") +
+      (res.hargaStandarAktif === false && (res.modalNaik || res.modalTurun)
+        ? ". Persentase laba standar belum diatur di Pengaturan, jadi harga jual tidak berubah"
+        : "") +
+      (res.failed ? `. PERHATIAN: ${res.failed} produk GAGAL ditulis (${res.lastError})` : "") +
+      (res.naikJadiRugi ? `. PERHATIAN: ${res.naikJadiRugi} produk modalnya naik sampai di atas harga jual, cek harga jualnya` : "") +
       ".";
     ppobPage.value = 1;
     await loadPpob();
   } catch (err) {
-    ppobError.value = err.message;
+    if (!force && /\[butuh-konfirmasi\]/.test(err.message)) {
+      const pesan = err.message.replace("[butuh-konfirmasi] ", "");
+      if (window.confirm(pesan + "\n\nLanjutkan sinkron paksa?")) {
+        return await syncPrices(true);
+      }
+      ppobError.value = pesan;
+    } else {
+      ppobError.value = err.message;
+    }
   } finally {
     syncing.value = false;
   }
@@ -442,7 +461,12 @@ onMounted(async () => {
                   <span class="badge" :class="p.provider === 'portalpulsa' ? 'gagal' : 'sukses'">{{ p.provider === "portalpulsa" ? "portalpulsa" : "OkeConnect" }}</span>
                 </td>
                 <td><input v-model.number="ppobEditing.cost_price" type="number" style="width: 90px" /></td>
-                <td><input v-model.number="ppobEditing.sell_price" type="number" style="width: 90px" /></td>
+                <td>
+                  <input v-model.number="ppobEditing.sell_price" type="number" style="width: 90px" />
+                  <label v-if="isAdmin()" style="display: block; font-size: 11px; margin-top: 4px">
+                    <input type="checkbox" :checked="!!ppobEditing.price_locked" @change="ppobEditing.price_locked = $event.target.checked ? 1 : 0" /> Kunci harga
+                  </label>
+                </td>
                 <td><span class="badge" :class="p.active ? 'sukses' : 'gagal'">{{ p.active ? "Aktif" : "Nonaktif" }}</span></td>
                 <td style="white-space: nowrap">
                   <button class="btn" style="padding: 4px 10px" @click="savePpobEdit">Simpan</button>
@@ -459,7 +483,13 @@ onMounted(async () => {
                   <span class="badge" :class="p.provider === 'portalpulsa' ? 'gagal' : 'sukses'">{{ p.provider === "portalpulsa" ? "portalpulsa" : "OkeConnect" }}</span>
                 </td>
                 <td class="num">{{ rupiah(p.cost_price) }}</td>
-                <td class="num">{{ rupiah(p.sell_price) }}</td>
+                <td class="num">
+                  {{ rupiah(p.sell_price) }}
+                  <div v-if="p.cost_price > 0 && p.sell_price < p.cost_price" style="font-size: 11.5px; color: #b3392c; font-weight: 600">
+                    Rugi {{ rupiah(p.cost_price - p.sell_price) }}
+                  </div>
+                  <div v-if="p.price_locked" class="muted" style="font-size: 11px">🔒 harga dikunci</div>
+                </td>
                 <td>
                   <span class="badge" :class="p.active ? 'sukses' : 'gagal'">{{ p.active ? "Aktif" : "Nonaktif" }}</span>
                   <div v-if="!p.active && p.deactivated_at" class="muted" style="font-size: 11px">

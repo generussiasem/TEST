@@ -1,0 +1,11 @@
+-- Penanda produk yang dinonaktifkan MANUAL oleh admin (tombol "Nonaktifkan").
+-- Sebelumnya sinkron harga otomatis (jam 06:00 WIB) mengaktifkan lagi produk itu
+-- selama masih ada di daftar OkeConnect. Sekarang sinkron melewati penandanya.
+--
+-- JALANKAN SEKALI, SEBELUM deploy kode baru (kode baru membaca kolom ini):
+--   npx wrangler d1 execute kasir-ppob-db --remote --file=migrations/2026-11-07-add-products-manually-disabled.sql
+--
+-- Produk yang SUDAH nonaktif sekarang tidak otomatis ditandai manual, karena
+-- tidak bisa dibedakan dari yang nonaktif akibat hilang di sumber. Nonaktifkan
+-- ulang lewat tombol di halaman Produk kalau ada yang memang mau disembunyikan.
+ALTER TABLE products ADD COLUMN manually_disabled INTEGER NOT NULL DEFAULT 0;

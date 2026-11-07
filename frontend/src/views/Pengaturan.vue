@@ -1,8 +1,37 @@
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { api } from "../api.js";
+import { isAdmin } from "../store.js";
 
 const settings = ref({ store_name: "", address: "", logo_url: "", cetak_struk_url: "" });
+// Harga jual standar = HPP + persentase laba (dibulatkan ke atas). Hanya admin.
+const hargaForm = ref({ percent: "", rounding: 1000 });
+const hargaMsg = ref("");
+async function loadHarga() {
+  try {
+    const r = await api.get("/api/pengaturan-harga");
+    hargaForm.value = { percent: r.percent ?? "", rounding: r.rounding || 1000 };
+  } catch (_) {}
+}
+async function simpanHarga() {
+  hargaMsg.value = "";
+  error.value = "";
+  try {
+    const persen = hargaForm.value.percent === "" || hargaForm.value.percent == null ? null : Number(hargaForm.value.percent);
+    const r = await api.put("/api/pengaturan-harga", { percent: persen, rounding: Number(hargaForm.value.rounding) });
+    hargaMsg.value = r.percent == null ? "Harga standar dimatikan (persentase kosong)." : `Tersimpan: laba ${r.percent}% dari HPP, dibulatkan ke atas ke ${r.rounding.toLocaleString("id-ID")}.`;
+  } catch (err) {
+    error.value = err.message;
+  }
+}
+// Contoh perhitungan langsung di form (rumus sama dengan server: hitungHargaStandar).
+const contohHarga = computed(() => {
+  const p = hargaForm.value.percent;
+  if (p === "" || p == null || !(Number(p) >= 0)) return null;
+  const r = Math.max(1, Number(hargaForm.value.rounding) || 1000);
+  const hitung = (cost) => Math.ceil(Math.round(((cost * (100 + Number(p))) / 100) * 1e6) / 1e6 / r) * r;
+  return [5200, 20150, 100500].map((m) => ({ modal: m, jual: hitung(m) }));
+});
 const wallets = ref([]);
 // Dompet sumber default deposit OkeConnect (dipakai saat Cek Saldo mendeteksi saldo naik)
 const depositOkeWalletId = ref("");
@@ -154,6 +183,7 @@ onMounted(() => {
   load();
   loadDepositHistory();
   loadDepositOkeWallet();
+  if (isAdmin()) loadHarga();
 });
 </script>
 
@@ -197,6 +227,38 @@ onMounted(() => {
         </p>
         <form @submit.prevent="simpanModalAwal">
           <div class="field"><label>Nilai Modal Awal (Rp)</label><input v-model.number="modalAwalForm" type="number" /></div>
+          <button class="btn" type="submit">Simpan</button>
+        </form>
+      </div>
+
+      <div v-if="isAdmin()" class="card">
+        <h3 style="margin-bottom: 12px">Harga Jual Standar (Persentase Laba)</h3>
+        <p class="muted" style="font-size: 13px; margin-bottom: 12px">
+          Setiap kali modal (HPP) produk PPOB OkeConnect berubah — lewat sinkron harga atau edit modal di halaman Produk — harga jual
+          <b>langsung ditimpa</b> dengan <b>HPP × (1 + persen)</b>, dibulatkan ke atas. Persen dihitung dari HPP, bukan dari harga jual.
+          Produk bertanda <b>Kunci harga</b> tidak ikut ditimpa. Kosongkan persentase untuk mematikan fitur ini. Harga yang diubah kasir
+          di kotak konfirmasi transaksi hanya berlaku untuk transaksi itu.
+        </p>
+        <div v-if="hargaMsg" class="ok-box">{{ hargaMsg }}</div>
+        <form @submit.prevent="simpanHarga">
+          <div class="field">
+            <label>Persentase laba dari HPP (%)</label>
+            <input v-model.number="hargaForm.percent" type="number" min="0" max="1000" step="0.1" placeholder="mis. 5 (kosong = fitur mati)" />
+          </div>
+          <div class="field">
+            <label>Pembulatan ke atas (Rp)</label>
+            <select v-model.number="hargaForm.rounding">
+              <option :value="1">Rp 1 (tanpa pembulatan)</option>
+              <option :value="100">Rp 100</option>
+              <option :value="500">Rp 500</option>
+              <option :value="1000">Rp 1.000</option>
+              <option :value="5000">Rp 5.000</option>
+            </select>
+          </div>
+          <div v-if="contohHarga" class="muted" style="font-size: 13px; margin-bottom: 10px">
+            Contoh:
+            <span v-for="(c, i) in contohHarga" :key="c.modal">{{ i ? " · " : "" }}modal {{ rupiah(c.modal) }} → jual <b>{{ rupiah(c.jual) }}</b></span>
+          </div>
           <button class="btn" type="submit">Simpan</button>
         </form>
       </div>

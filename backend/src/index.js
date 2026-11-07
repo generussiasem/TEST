@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { sendJabberCommand, listenJabberMessages, setJabberReplyHook } from "./jabber.js";
 import { sendTelegramMessage } from "./telegram.js";
-import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, extractTokenCode, syncPpobPrices, getProviderConfig, finalizePpobOrder, checkDistributorBalance, batalkanDepositOtomatis, getDompetDepositOkeconnect, setDompetDepositOkeconnect, parseTagihanListrikDetail, parsePortalpulsaDetail, assertCfgComplete, kirimDepositPortalpulsa, parseDepositSusulan, selesaikanDepositSusulan, tandaiDepositKadaluwarsa, formatBarisDeposit } from "./ppob.js";
+import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, extractTokenCode, syncPpobPrices, getPengaturanHarga, setPengaturanHarga, tentukanHargaEditManual, getProviderConfig, finalizePpobOrder, checkDistributorBalance, batalkanDepositOtomatis, getDompetDepositOkeconnect, setDompetDepositOkeconnect, parseTagihanListrikDetail, parsePortalpulsaDetail, assertCfgComplete, kirimDepositPortalpulsa, parseDepositSusulan, selesaikanDepositSusulan, tandaiDepositKadaluwarsa, formatBarisDeposit } from "./ppob.js";
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
 import { getEmployeeByChatId, handleLinkCommand, sendMainMenu, handleAdminCallback, handleAdminSessionMessage } from "./bot-admin.js";
 import { hitungAsetBersih, catatSnapshotModalHarian } from "./modal.js";
@@ -440,6 +440,21 @@ app.put("/api/deposit-okeconnect-wallet", requireAdmin, async (c) => {
   }
 });
 
+// Persentase laba standar & pembulatan harga jual (HPP × (1 + persen)). Kosongkan
+// persen untuk mematikan fitur. Hanya admin.
+app.get("/api/pengaturan-harga", requireAdmin, async (c) => {
+  return c.json(await getPengaturanHarga(c.env));
+});
+
+app.put("/api/pengaturan-harga", requireAdmin, async (c) => {
+  const { percent, rounding } = await c.req.json();
+  try {
+    return c.json({ ok: true, ...(await setPengaturanHarga(c.env, { percent, rounding })) });
+  } catch (err) {
+    return c.json({ ok: false, error: err.message }, 400);
+  }
+});
+
 // Riwayat deposit portalpulsa — dilihat di halaman Pengaturan supaya kasir
 // tidak kehilangan instruksi transfer kalau sudah tertutup/lupa dicatat.
 app.get("/api/admin/portalpulsa/deposits", requireAdmin, async (c) => {
@@ -535,15 +550,24 @@ app.post("/api/products", async (c) => {
 
 app.put("/api/products/:id", async (c) => {
   const id = c.req.param("id");
-  const { name, category, cost_price, sell_price, stock, barcode, provider } = await c.req.json();
+  const { name, category, cost_price, sell_price, stock, barcode, provider, price_locked } = await c.req.json();
   try {
+    // "Kunci harga" hanya boleh diubah admin. Kalau modal produk PPOB berubah dan
+    // harga jual di form tidak diubah, harga jual ditimpa harga standar.
+    const existing = await c.env.DB.prepare("SELECT code, cost_price, sell_price, price_locked FROM products WHERE id = ?").bind(id).first();
+    const isAdminUser = c.get("employee")?.role === "admin";
+    const lockedNow = isAdminUser && price_locked != null ? (price_locked ? 1 : 0) : existing?.price_locked ? 1 : 0;
+    const harga = tentukanHargaEditManual(
+      { existing, costBaru: cost_price, sellBaru: sell_price, lockedNow },
+      await getPengaturanHarga(c.env)
+    );
     await c.env.DB.prepare(
-      `UPDATE products SET name = ?, category = ?, cost_price = ?, sell_price = ?, stock = ?, barcode = ?, provider = COALESCE(?, provider)
+      `UPDATE products SET name = ?, category = ?, cost_price = ?, sell_price = ?, stock = ?, barcode = ?, provider = COALESCE(?, provider), price_locked = ?
        WHERE id = ?`
     )
-      .bind(name, category || null, cost_price, sell_price, stock, barcode || null, provider || null, id)
+      .bind(name, category || null, cost_price, harga.sell, stock, barcode || null, provider || null, lockedNow, id)
       .run();
-    return c.json({ ok: true });
+    return c.json({ ok: true, hargaDisesuaikan: harga.diterapkan, sell_price: harga.sell });
   } catch (err) {
     if (/UNIQUE constraint failed.*products\.code/.test(err.message || "")) {
       return c.json({ ok: false, error: `Kode produk ini sudah dipakai produk lain untuk provider ${provider || "yang sama"}.` }, 400);
@@ -568,9 +592,9 @@ app.put("/api/products/:id/active", async (c) => {
   const id = c.req.param("id");
   const { active } = await c.req.json();
   await c.env.DB.prepare(
-    "UPDATE products SET active = ?, deactivated_at = ? WHERE id = ?"
+    "UPDATE products SET active = ?, deactivated_at = ?, manually_disabled = ? WHERE id = ?"
   )
-    .bind(active ? 1 : 0, active ? null : new Date().toISOString(), id)
+    .bind(active ? 1 : 0, active ? null : new Date().toISOString(), active ? 0 : 1, id)
     .run();
   return c.json({ ok: true });
 });
@@ -708,8 +732,9 @@ app.get("/api/contact-ids", async (c) => {
 // lalu sesuaikan pemetaan field di bawah.
 app.post("/api/products/sync", requireAdmin, async (c) => {
   try {
-    const result = await syncPpobPrices(c.env);
-    return c.json(result, result.ok ? 200 : (result.error?.includes("PRICE_LIST_URL") ? 400 : 502));
+    const force = c.req.query("force") === "1";
+    const result = await syncPpobPrices(c.env, { force });
+    return c.json(result, result.ok ? 200 : (result.error?.includes("PRICE_LIST_URL belum diisi") ? 400 : 502));
   } catch (err) {
     console.error("Sync PPOB gagal (uncaught):", err.message, err.stack);
     return c.json({ ok: false, error: "Sinkron gagal: " + err.message }, 500);
@@ -2525,6 +2550,47 @@ async function cleanupOldData(env) {
   return result;
 }
 
+// Kirim pesan ke semua admin aktif (atau JABBER_FEED_CHAT_ID kalau diisi).
+async function notifAdminTelegram(env, pesan) {
+  if (!env.TELEGRAM_BOT_TOKEN) return;
+  let chatIds;
+  if (env.JABBER_FEED_CHAT_ID) {
+    chatIds = String(env.JABBER_FEED_CHAT_ID).split(",").map((s) => s.trim()).filter(Boolean);
+  } else {
+    const { results } = await env.DB.prepare(
+      "SELECT telegram_id FROM employees WHERE role = 'admin' AND active = 1 AND telegram_id IS NOT NULL"
+    ).all();
+    chatIds = results.map((r) => r.telegram_id);
+  }
+  await Promise.all(chatIds.map((id) => sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, id, pesan).catch(() => {})));
+}
+
+// Sinkron harga PPOB versi cron: hasilnya SELALU dicatat ke log, dan kalau ada
+// masalah (gagal total, sebagian batch gagal, atau modal naik melewati harga
+// jual) admin dikabari lewat Telegram — sebelumnya hasilnya dibuang begitu saja.
+async function jalankanSinkronHarga(env) {
+  try {
+    const r = await syncPpobPrices(env);
+    console.log("[cron] sinkron harga PPOB:", JSON.stringify(r));
+    const masalah = [];
+    const info = [];
+    if (!r.ok) {
+      masalah.push(`Gagal: ${r.error}`);
+    } else {
+      if (r.failed) masalah.push(`${r.failed} produk gagal ditulis ke database (${r.lastError})`);
+      if (r.naikJadiRugi) masalah.push(`${r.naikJadiRugi} produk modalnya naik sampai di atas harga jual (harga terkunci atau persentase laba belum diatur) — cek halaman Produk`);
+      if (r.hargaDisesuaikan) info.push(`${r.hargaDisesuaikan} produk harga jualnya disesuaikan ke harga standar (${r.modalNaik} modal naik, ${r.modalTurun} modal turun)`);
+      else if ((r.modalNaik || r.modalTurun) && !r.hargaStandarAktif) info.push(`${r.modalNaik + r.modalTurun} produk modalnya berubah, tapi persentase laba standar belum diatur sehingga harga jual tidak berubah`);
+    }
+    if (masalah.length || info.length) {
+      await notifAdminTelegram(env, (masalah.length ? "⚠️" : "ℹ️") + " Sinkron harga PPOB (06:00 WIB)\n" + [...masalah, ...info].map((m) => "• " + m).join("\n"));
+    }
+  } catch (err) {
+    console.error("[cron] sinkron harga PPOB error:", err.message);
+    await notifAdminTelegram(env, `⚠️ Sinkron harga PPOB error: ${err.message}`).catch(() => {});
+  }
+}
+
 export default {
   fetch(request, env, ctx) {
     pasangFeedJabber(env);
@@ -2563,7 +2629,7 @@ export default {
     }
     // 23:00 UTC = 06:00 WIB: sinkron harga PPOB
     if (tepatJam && jam === 23) {
-      ctx.waitUntil(syncPpobPrices(env));
+      ctx.waitUntil(jalankanSinkronHarga(env));
     }
     // 17:00 UTC = 00:00 WIB: snapshot aset bersih (Pertumbuhan Modal)
     if (tepatJam && jam === 17) {

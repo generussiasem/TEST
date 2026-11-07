@@ -3,6 +3,89 @@ import { getOpenShiftId } from "./debt.js";
 import { rencanaPakaiTitipan, stmtsPakaiTitipan } from "./debt.js";
 
 // ---------------------------------------------------------------------------
+// HARGA JUAL STANDAR = HPP × (1 + persen laba), dibulatkan KE ATAS ke kelipatan
+// pembulatan (default Rp1.000). Persen dihitung dari HPP (markup), bukan dari
+// harga jual. Persen & pembulatan diatur admin di Pengaturan (tabel app_state).
+// Kalau persen BELUM diatur (null), fitur ini mati: sinkron berperilaku seperti
+// dulu (produk baru untung Rp0, harga jual produk lama tidak disentuh).
+// Dipakai saat: sinkron harga OkeConnect (modal berubah / produk baru) dan edit
+// modal manual di halaman Produk. Harga yang diubah kasir di kotak konfirmasi
+// transaksi TIDAK memakai/mengubah ini — itu hanya berlaku untuk transaksi itu.
+const KUNCI_MARGIN_PERSEN = "margin_percent";
+const KUNCI_MARGIN_PEMBULATAN = "margin_rounding";
+export const PEMBULATAN_HARGA_DEFAULT = 1000;
+
+export function hitungHargaStandar(cost, percent, rounding = PEMBULATAN_HARGA_DEFAULT) {
+  const c = Number(cost);
+  const p = Number(percent);
+  const r = Math.max(1, Math.floor(Number(rounding)) || PEMBULATAN_HARGA_DEFAULT);
+  if (!(c > 0) || !Number.isFinite(p) || p < 0) return Math.max(0, c || 0);
+  // dibulatkan 6 desimal dulu supaya sisa floating point (mis. 11000.000000000002)
+  // tidak membuat ceil() melompat ke kelipatan berikutnya.
+  const mentah = Math.round(((c * (100 + p)) / 100) * 1e6) / 1e6;
+  return Math.ceil(mentah / r) * r;
+}
+
+export async function getPengaturanHarga(env) {
+  const hasil = { percent: null, rounding: PEMBULATAN_HARGA_DEFAULT };
+  try {
+    const { results } = await env.DB.prepare("SELECT key, value FROM app_state WHERE key IN (?, ?)")
+      .bind(KUNCI_MARGIN_PERSEN, KUNCI_MARGIN_PEMBULATAN)
+      .all();
+    for (const r of results) {
+      if (r.key === KUNCI_MARGIN_PERSEN && r.value !== null && r.value !== "") {
+        const n = Number(r.value);
+        if (Number.isFinite(n) && n >= 0) hasil.percent = n;
+      }
+      if (r.key === KUNCI_MARGIN_PEMBULATAN) {
+        const n = Math.floor(Number(r.value));
+        if (n >= 1) hasil.rounding = n;
+      }
+    }
+  } catch (err) {
+    console.error("Gagal baca pengaturan harga standar:", err.message);
+  }
+  return hasil;
+}
+
+export async function setPengaturanHarga(env, { percent, rounding }) {
+  let persenBaru = null;
+  if (percent !== null && percent !== undefined && percent !== "") {
+    persenBaru = Number(percent);
+    if (!Number.isFinite(persenBaru) || persenBaru < 0 || persenBaru > 1000) {
+      throw new Error("Persentase laba harus angka antara 0 dan 1000.");
+    }
+  }
+  const pembulatan = rounding === undefined || rounding === null || rounding === "" ? PEMBULATAN_HARGA_DEFAULT : Number(rounding);
+  if (!Number.isInteger(pembulatan) || pembulatan < 1 || pembulatan > 100000) {
+    throw new Error("Pembulatan harus bilangan bulat antara 1 dan 100000.");
+  }
+  const upsert = `INSERT INTO app_state (key, value, updated_at) VALUES (?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`;
+  const stmts = [
+    persenBaru === null
+      ? env.DB.prepare("DELETE FROM app_state WHERE key = ?").bind(KUNCI_MARGIN_PERSEN)
+      : env.DB.prepare(upsert).bind(KUNCI_MARGIN_PERSEN, String(persenBaru)),
+    env.DB.prepare(upsert).bind(KUNCI_MARGIN_PEMBULATAN, String(pembulatan)),
+  ];
+  await env.DB.batch(stmts);
+  return { percent: persenBaru, rounding: pembulatan };
+}
+
+/** Edit modal MANUAL di halaman Produk: kalau modal berubah, harga jual ikut
+ * ditimpa harga standar — kecuali produk dikunci, bukan produk PPOB (tanpa
+ * code), persen belum diatur, atau admin sendiri mengubah harga jual di form
+ * yang sama (itu dianggap sengaja dan dihormati). */
+export function tentukanHargaEditManual({ existing, costBaru, sellBaru, lockedNow }, pengaturan) {
+  const sell = Number(sellBaru);
+  if (!existing || !existing.code || lockedNow || pengaturan.percent == null) return { sell, diterapkan: false };
+  const cost = Number(costBaru);
+  if (!(cost > 0) || cost === Number(existing.cost_price)) return { sell, diterapkan: false };
+  if (sell !== Number(existing.sell_price)) return { sell, diterapkan: false };
+  return { sell: hitungHargaStandar(cost, pengaturan.percent, pengaturan.rounding), diterapkan: true };
+}
+
+// ---------------------------------------------------------------------------
 // Konfigurasi provider PPOB (jalur Jabber). Dua provider didukung: OkeConnect
 // (lengkap, punya price list) dan portalpulsa (tanpa price list — modal baru
 // diketahui dari balasan tiap transaksi, lihat usesDynamicCost di bawah).
@@ -894,9 +977,14 @@ export async function finalizePpobOrder(env, { refId, sellPrice, costTotal, toke
     employeeId,
   });
 
-  // Harga jual yang barusan dikonfirmasi jadi default baru produk ini utk
-  // transaksi berikutnya.
-  await env.DB.prepare("UPDATE products SET sell_price = ? WHERE id = ?").bind(sellPrice, product.id).run();
+  // Harga jual di kotak konfirmasi HANYA berlaku untuk transaksi ini (masuk
+  // laporan & struk) — harga standar produk tidak diubah. Pengecualian: produk
+  // yang tidak punya harga standar dari daftar harga (portalpulsa & pascabayar,
+  // lihat usesDynamicCost) tetap menyimpan harga terakhir sebagai isian awal
+  // transaksi berikutnya, seperti sebelumnya.
+  if (usesDynamicCost(product)) {
+    await env.DB.prepare("UPDATE products SET sell_price = ? WHERE id = ?").bind(sellPrice, product.id).run();
+  }
 
   await env.DB.prepare(
     "UPDATE ppob_orders SET finalized = 1, sell_price = ?, cost_price = ?, token_code = ?, paid_method = ?, contact_id = ? WHERE ref_id = ?"
@@ -928,11 +1016,20 @@ export async function finalizePpobOrder(env, { refId, sellPrice, costTotal, toke
  * (transaction_items), yang mana cuma dinonaktifkan saja (sama seperti
  * tombol "Nonaktifkan" manual) supaya laporan lama tidak jadi bolong/rusak.
  *
- * sell_price TIDAK lagi otomatis ditambah markup tetap — defaultnya SAMA
- * dengan cost_price (untung Rp0) supaya harga jual harus ditentukan sendiri
- * (manual per produk lewat halaman Produk), bukan margin pukul-rata yang
- * bisa salah untuk produk mahal/murah. */
-export async function syncPpobPrices(env) {
+ * Produk yang dinonaktifkan MANUAL (products.manually_disabled = 1, lewat
+ * tombol "Nonaktifkan") tidak diaktifkan lagi oleh sinkron; harganya tetap
+ * diperbarui. Hasil sinkron juga melaporkan failed/errors (batch yang gagal
+ * ditulis) dan naikJadiRugi (modal naik melewati harga jual).
+ *
+ * HARGA JUAL: kalau admin sudah mengatur persentase laba standar (Pengaturan),
+ * produk baru dan produk yang modalnya berubah (naik/turun) langsung diberi
+ * harga standar = HPP × (1 + persen), dibulatkan ke atas (lihat
+ * hitungHargaStandar). Produk dengan "Kunci harga" tidak ditimpa. Kalau persen
+ * belum diatur: produk baru untung Rp0 dan harga lama tidak disentuh. */
+export async function syncPpobPrices(env, opts = {}) {
+  // opts.force = true -> lewati pengaman "daftar harga menyusut drastis" (lihat
+  // guard di bawah). Dipakai kalau admin memang yakin provider menghapus banyak
+  // produk sekaligus.
   if (!env.PRICE_LIST_URL) {
     return { ok: false, error: "Secret PRICE_LIST_URL belum diisi di Worker Settings → Variables and Secrets" };
   }
@@ -978,9 +1075,12 @@ export async function syncPpobPrices(env) {
   // benar-benar dihapus (lihat blockedCodes di bawah).
   const existingMap = new Map();
   const { results: existingRows } = await env.DB.prepare(
-    "SELECT id, code, name, category, product_group, cost_price, active FROM products WHERE provider = 'okeconnect'"
+    "SELECT id, code, name, category, product_group, cost_price, sell_price, active, manually_disabled, price_locked FROM products WHERE provider = 'okeconnect' AND code IS NOT NULL"
   ).all();
   for (const row of existingRows) existingMap.set(row.code, row);
+
+  // Persentase laba standar (null = belum diatur → harga jual lama tidak disentuh).
+  const hargaStd = await getPengaturanHarga(env);
 
   const runStartedAt = new Date().toISOString();
   const stmt = env.DB.prepare(
@@ -991,8 +1091,9 @@ export async function syncPpobPrices(env) {
        category = excluded.category,
        product_group = excluded.product_group,
        cost_price = excluded.cost_price,
-       active = 1,
-       deactivated_at = NULL,
+       sell_price = CASE WHEN products.price_locked = 1 OR excluded.sell_price < 0 THEN products.sell_price ELSE excluded.sell_price END,
+       active = CASE WHEN products.manually_disabled = 1 THEN products.active ELSE 1 END,
+       deactivated_at = CASE WHEN products.manually_disabled = 1 THEN products.deactivated_at ELSE NULL END,
        last_synced_at = excluded.last_synced_at`
   );
 
@@ -1002,6 +1103,11 @@ export async function syncPpobPrices(env) {
   let skipped = 0;
   let blocked = 0;
   let unchanged = 0;
+  let naikJadiRugi = 0; // modal NAIK dan harga jual akhirnya tetap di bawah modal (produk terkunci / persen belum diatur)
+  let modalNaik = 0;
+  let modalTurun = 0;
+  let hargaDisesuaikan = 0; // harga jual ditimpa harga standar karena modal berubah
+  let produkBaru = 0;
 
   for (const item of list) {
     const code = item.kode || item.code || item.product_code;
@@ -1009,12 +1115,6 @@ export async function syncPpobPrices(env) {
     const category = item.kategori || item.category || null;
     const productGroup = item.produk || null;
     const cost = Number(item.harga || item.price || 0);
-    // Tanpa markup default: harga jual awal = harga modal (untung Rp0) saat
-    // produk baru pertama kali muncul. Untuk produk yang SUDAH ada (upsert),
-    // sell_price sengaja TIDAK ditimpa di sini (lihat ON CONFLICT di atas)
-    // supaya harga jual yang sudah diatur manual oleh admin tidak tertindih
-    // tiap kali sinkron — hanya cost_price yang ikut update mengikuti sumber.
-    const sell = cost;
     if (!code || !name) {
       skipped++;
       continue;
@@ -1032,9 +1132,34 @@ export async function syncPpobPrices(env) {
     seenActiveCodes.add(code);
 
     const existing = existingMap.get(code);
+
+    // Harga jual:
+    //  - produk BARU: harga standar (HPP + persen) kalau persen sudah diatur,
+    //    kalau belum = modal (untung Rp0) seperti dulu.
+    //  - produk LAMA yang modalnya BERUBAH (naik/turun): ditimpa harga standar,
+    //    kecuali "Kunci harga" aktif atau persen belum diatur.
+    //  - selain itu: sell = -1 → SQL tidak menyentuh sell_price (lihat ON CONFLICT).
+    const costBerubah = !!existing && Number(existing.cost_price) !== cost;
+    const pakaiStandar = hargaStd.percent != null && cost > 0;
+    let sell;
+    if (!existing) {
+      sell = pakaiStandar ? hitungHargaStandar(cost, hargaStd.percent, hargaStd.rounding) : cost;
+      produkBaru++;
+    } else if (costBerubah && pakaiStandar && !existing.price_locked) {
+      sell = hitungHargaStandar(cost, hargaStd.percent, hargaStd.rounding);
+      if (sell !== Number(existing.sell_price)) hargaDisesuaikan++;
+    } else {
+      sell = -1;
+    }
+    if (existing && costBerubah) {
+      if (cost > Number(existing.cost_price)) modalNaik++;
+      else modalTurun++;
+      const hargaAkhir = sell >= 0 ? sell : Number(existing.sell_price);
+      if (cost > Number(existing.cost_price) && hargaAkhir < cost) naikJadiRugi++;
+    }
     const changed =
       !existing ||
-      existing.active !== 1 ||
+      (existing.active !== 1 && !existing.manually_disabled) ||
       existing.name !== name ||
       existing.category !== category ||
       existing.product_group !== productGroup ||
@@ -1048,21 +1173,50 @@ export async function syncPpobPrices(env) {
     batchItems.push(stmt.bind(code, name, category, productGroup, cost, sell, runStartedAt));
   }
 
-  // D1 membatasi TOTAL bound parameter per panggilan batch() ke 100 (bukan
-  // per statement). Statement INSERT ini punya 7 parameter per baris, jadi
-  // BATCH_SIZE harus <= 14 (14*7=98) agar tidak kena "too many SQL variables".
-  const BATCH_SIZE = 14;
+  // PENGAMAN: kalau sumber membalas kosong / jauh lebih sedikit dari produk
+  // aktif yang sudah ada (mis. balasan error berstatus 200 seperti {} atau
+  // {"status":"error"}), JANGAN lanjut — kalau lanjut, semua produk yang
+  // "tidak muncul" akan dinonaktifkan massal, lalu ditulis ulang massal saat
+  // sinkron berikutnya (boros kuota tulis D1). Produk yang kena kata kunci
+  // blokir tidak dihitung karena memang sengaja tidak ikut.
+  const existingActiveCount = existingRows.filter((r) => r.active === 1 && !blockedCodes.has(r.code)).length;
+  if (!opts.force) {
+    if (list.length === 0 || seenActiveCodes.size === 0) {
+      return {
+        ok: false,
+        needsForce: list.length > 0,
+        error: "Daftar harga dari sumber kosong — sinkron dibatalkan supaya produk yang ada tidak dinonaktifkan semua. Cek PRICE_LIST_URL / balasan server OkeConnect.",
+      };
+    }
+    if (existingActiveCount >= 20 && seenActiveCodes.size < existingActiveCount * 0.5) {
+      return {
+        ok: false,
+        needsForce: true,
+        error: `[butuh-konfirmasi] Daftar harga dari sumber cuma ${seenActiveCodes.size} produk aktif, padahal di database ada ${existingActiveCount}. Sinkron dibatalkan karena bisa menonaktifkan banyak produk sekaligus. Kalau memang benar provider menghapus produk sebanyak itu, ulangi dengan sinkron paksa.`,
+      };
+    }
+  }
+
+  // D1 membatasi 100 bound parameter PER STATEMENT (batas ini berlaku untuk
+  // tiap statement di dalam batch(), bukan total satu batch — lihat dokumentasi
+  // D1 Limits). Statement INSERT ini 7 parameter per baris, jadi 50 baris per
+  // batch aman. Batch lebih besar = lebih sedikit panggilan D1 per sinkron
+  // (penting untuk batas query per invocation Worker).
+  const BATCH_SIZE = 50;
   let count = 0;
-  let lastError = null;
+  let failed = 0;
+  const errors = [];
   for (let i = 0; i < batchItems.length; i += BATCH_SIZE) {
     const chunk = batchItems.slice(i, i + BATCH_SIZE);
     try {
       await env.DB.batch(chunk);
       count += chunk.length;
     } catch (err) {
-      lastError = `batch mulai index ${i}: ${err.message}`;
+      failed += chunk.length;
+      errors.push(`batch mulai index ${i}: ${err.message}`);
     }
   }
+  const lastError = errors.length ? errors[errors.length - 1] : null;
 
   // Produk yang kena kata kunci blokir DAN sudah pernah tercatat di database
   // sebelumnya → HAPUS PERMANEN (bukan cuma dinonaktifkan), asalkan belum
@@ -1146,6 +1300,15 @@ export async function syncPpobPrices(env) {
     blockedDeleted,
     blockedKeptInactive,
     deactivated,
+    failed,
+    errors: errors.slice(0, 5),
+    naikJadiRugi,
+    modalNaik,
+    modalTurun,
+    hargaDisesuaikan,
+    produkBaru,
+    hargaStandarAktif: hargaStd.percent != null,
+    persenLaba: hargaStd.percent,
     lastError,
   };
 }

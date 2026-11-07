@@ -270,3 +270,13 @@ ke/dari alat itu — isinya diisi manual oleh kasir.
 
 **Sebelum dipakai:** jalankan migrasi
 `migrations/2026-09-add-cetak-struk-url.sql` di D1.
+
+## Harga jual standar (HPP + persentase laba)
+
+Admin mengatur **persentase laba dari HPP** (markup, bukan dari harga jual) dan **pembulatan ke atas** (default Rp1.000) di halaman **Pengaturan → Harga Jual Standar**. Harga standar = `HPP × (1 + persen)` dibulatkan ke atas.
+
+- Dipakai untuk produk **baru** hasil sinkron, dan saat **modal berubah** (naik/turun) lewat sinkron harga atau edit modal di halaman Produk: harga jual **langsung ditimpa** harga standar.
+- Produk dengan **Kunci harga** (kolom `products.price_locked`) tidak ditimpa.
+- Persentase **kosong = fitur mati**: produk baru untung Rp0 dan harga lama tidak disentuh (perilaku lama).
+- Harga yang diubah kasir di **kotak konfirmasi transaksi** hanya berlaku untuk transaksi itu (laporan & struk); harga standar produk tidak berubah. Pengecualian: produk portalpulsa & pascabayar (tanpa daftar harga) tetap menyimpan harga terakhir sebagai isian awal.
+- Migrasi wajib dijalankan sebelum deploy: `migrations/2026-11-07-add-products-manually-disabled.sql` dan `migrations/2026-11-07-harga-standar-price-locked.sql`.
