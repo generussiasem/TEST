@@ -5,15 +5,28 @@ import { rencanaPakaiTitipan, stmtsPakaiTitipan } from "./debt.js";
 // ---------------------------------------------------------------------------
 // HARGA JUAL STANDAR = HPP × (1 + persen laba), dibulatkan KE ATAS ke kelipatan
 // pembulatan (default Rp1.000). Persen dihitung dari HPP (markup), bukan dari
-// harga jual. Persen & pembulatan diatur admin di Pengaturan (tabel app_state).
-// Kalau persen BELUM diatur (null), fitur ini mati: sinkron berperilaku seperti
-// dulu (produk baru untung Rp0, harga jual produk lama tidak disentuh).
-// Dipakai saat: sinkron harga OkeConnect (modal berubah / produk baru) dan edit
-// modal manual di halaman Produk. Harga yang diubah kasir di kotak konfirmasi
-// transaksi TIDAK memakai/mengubah ini — itu hanya berlaku untuk transaksi itu.
+// harga jual. Persen, pembulatan, dan daftar kategori yang dikecualikan diatur
+// admin di Pengaturan (tabel app_state).
+//
+// Semua produk PPOB OkeConnect IKUT persentase (tanpa "kunci harga"), kecuali:
+//  - kategori pascabayar/tagihan (default TAGIHAN & AIR PDAM, bisa diubah admin),
+//  - produk portalpulsa (modal baru diketahui dari balasan transaksi),
+//  - produk tanpa kode (barang warung).
+// Produk yang ikut: harga jualnya SELALU harga standar — dikoreksi tiap sinkron,
+// saat modal berubah, saat edit di halaman Produk, dan saat persentase disimpan
+// (dengan pratinjau & konfirmasi). Kalau persen BELUM diatur (null), fitur mati:
+// produk baru untung Rp0 dan harga jual lama tidak disentuh.
+// Harga yang diketik kasir di kotak konfirmasi transaksi TIDAK mengubah ini —
+// itu hanya berlaku untuk transaksi itu.
 const KUNCI_MARGIN_PERSEN = "margin_percent";
 const KUNCI_MARGIN_PEMBULATAN = "margin_rounding";
+const KUNCI_MARGIN_KECUALI = "margin_excluded_categories";
 export const PEMBULATAN_HARGA_DEFAULT = 1000;
+export const KATEGORI_DIKECUALIKAN_DEFAULT = ["TAGIHAN", "AIR PDAM"]; // = kategori pascabayar (POSTPAID_CATEGORIES)
+
+function normKategori(k) {
+  return String(k ?? "").trim().toUpperCase();
+}
 
 export function hitungHargaStandar(cost, percent, rounding = PEMBULATAN_HARGA_DEFAULT) {
   const c = Number(cost);
@@ -26,11 +39,43 @@ export function hitungHargaStandar(cost, percent, rounding = PEMBULATAN_HARGA_DE
   return Math.ceil(mentah / r) * r;
 }
 
+/** Apakah produk ini ikut persentase? (lihat penjelasan di atas) */
+export function ikutPersentase(product, pengaturan) {
+  if (!product || !product.code) return false; // barang warung (tanpa kode)
+  if (product.provider && product.provider !== "okeconnect") return false; // portalpulsa
+  return !pengaturan.excludedCategories.includes(normKategori(product.category));
+}
+
+/** Validasi + normalisasi input pengaturan (dipakai simpan DAN pratinjau). */
+export function normalisasiPengaturanHarga({ percent, rounding, excludedCategories } = {}) {
+  let persen = null;
+  if (percent !== null && percent !== undefined && percent !== "") {
+    persen = Number(percent);
+    if (!Number.isFinite(persen) || persen < 0 || persen > 1000) {
+      throw new Error("Persentase laba harus angka antara 0 dan 1000.");
+    }
+    if (Math.abs(persen * 1000 - Math.round(persen * 1000)) > 1e-6) {
+      throw new Error("Persentase laba maksimal 3 angka di belakang koma.");
+    }
+    persen = Math.round(persen * 1000) / 1000;
+  }
+  const pembulatan = rounding === undefined || rounding === null || rounding === "" ? PEMBULATAN_HARGA_DEFAULT : Number(rounding);
+  if (!Number.isInteger(pembulatan) || pembulatan < 1 || pembulatan > 100000) {
+    throw new Error("Pembulatan harus bilangan bulat antara 1 dan 100000.");
+  }
+  let kategori = KATEGORI_DIKECUALIKAN_DEFAULT;
+  if (excludedCategories !== undefined && excludedCategories !== null) {
+    const arr = Array.isArray(excludedCategories) ? excludedCategories : String(excludedCategories).split(/[,\n]/);
+    kategori = [...new Set(arr.map(normKategori).filter(Boolean))];
+  }
+  return { percent: persen, rounding: pembulatan, excludedCategories: kategori };
+}
+
 export async function getPengaturanHarga(env) {
-  const hasil = { percent: null, rounding: PEMBULATAN_HARGA_DEFAULT };
+  const hasil = { percent: null, rounding: PEMBULATAN_HARGA_DEFAULT, excludedCategories: [...KATEGORI_DIKECUALIKAN_DEFAULT] };
   try {
-    const { results } = await env.DB.prepare("SELECT key, value FROM app_state WHERE key IN (?, ?)")
-      .bind(KUNCI_MARGIN_PERSEN, KUNCI_MARGIN_PEMBULATAN)
+    const { results } = await env.DB.prepare("SELECT key, value FROM app_state WHERE key IN (?, ?, ?)")
+      .bind(KUNCI_MARGIN_PERSEN, KUNCI_MARGIN_PEMBULATAN, KUNCI_MARGIN_KECUALI)
       .all();
     for (const r of results) {
       if (r.key === KUNCI_MARGIN_PERSEN && r.value !== null && r.value !== "") {
@@ -41,6 +86,12 @@ export async function getPengaturanHarga(env) {
         const n = Math.floor(Number(r.value));
         if (n >= 1) hasil.rounding = n;
       }
+      if (r.key === KUNCI_MARGIN_KECUALI) {
+        try {
+          const arr = JSON.parse(r.value);
+          if (Array.isArray(arr)) hasil.excludedCategories = [...new Set(arr.map(normKategori).filter(Boolean))];
+        } catch (_) {}
+      }
     }
   } catch (err) {
     console.error("Gagal baca pengaturan harga standar:", err.message);
@@ -48,41 +99,80 @@ export async function getPengaturanHarga(env) {
   return hasil;
 }
 
-export async function setPengaturanHarga(env, { percent, rounding }) {
-  let persenBaru = null;
-  if (percent !== null && percent !== undefined && percent !== "") {
-    persenBaru = Number(percent);
-    if (!Number.isFinite(persenBaru) || persenBaru < 0 || persenBaru > 1000) {
-      throw new Error("Persentase laba harus angka antara 0 dan 1000.");
-    }
-  }
-  const pembulatan = rounding === undefined || rounding === null || rounding === "" ? PEMBULATAN_HARGA_DEFAULT : Number(rounding);
-  if (!Number.isInteger(pembulatan) || pembulatan < 1 || pembulatan > 100000) {
-    throw new Error("Pembulatan harus bilangan bulat antara 1 dan 100000.");
-  }
+export async function setPengaturanHarga(env, input) {
+  const p = normalisasiPengaturanHarga(input);
   const upsert = `INSERT INTO app_state (key, value, updated_at) VALUES (?, ?, datetime('now'))
      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`;
-  const stmts = [
-    persenBaru === null
+  await env.DB.batch([
+    p.percent === null
       ? env.DB.prepare("DELETE FROM app_state WHERE key = ?").bind(KUNCI_MARGIN_PERSEN)
-      : env.DB.prepare(upsert).bind(KUNCI_MARGIN_PERSEN, String(persenBaru)),
-    env.DB.prepare(upsert).bind(KUNCI_MARGIN_PEMBULATAN, String(pembulatan)),
-  ];
-  await env.DB.batch(stmts);
-  return { percent: persenBaru, rounding: pembulatan };
+      : env.DB.prepare(upsert).bind(KUNCI_MARGIN_PERSEN, String(p.percent)),
+    env.DB.prepare(upsert).bind(KUNCI_MARGIN_PEMBULATAN, String(p.rounding)),
+    env.DB.prepare(upsert).bind(KUNCI_MARGIN_KECUALI, JSON.stringify(p.excludedCategories)),
+  ]);
+  return p;
 }
 
-/** Edit modal MANUAL di halaman Produk: kalau modal berubah, harga jual ikut
- * ditimpa harga standar — kecuali produk dikunci, bukan produk PPOB (tanpa
- * code), persen belum diatur, atau admin sendiri mengubah harga jual di form
- * yang sama (itu dianggap sengaja dan dihormati). */
-export function tentukanHargaEditManual({ existing, costBaru, sellBaru, lockedNow }, pengaturan) {
+/** Pratinjau (tanpa menulis apa pun): berapa produk OkeConnect aktif yang harganya
+ * akan berubah kalau pengaturan ini diterapkan. `pengaturan` sudah dinormalisasi. */
+export async function pratinjauHargaStandar(env, pengaturan) {
+  const kosong = { total: 0, jumlah: 0, naik: 0, turun: 0, contoh: [] };
+  if (pengaturan.percent == null) return kosong;
+  const { results } = await env.DB.prepare(
+    "SELECT code, name, category, cost_price, sell_price FROM products WHERE provider = 'okeconnect' AND code IS NOT NULL AND active = 1 AND cost_price > 0"
+  ).all();
+  const hasil = { ...kosong };
+  const beda = [];
+  for (const p of results) {
+    if (!ikutPersentase({ ...p, provider: "okeconnect" }, pengaturan)) continue;
+    hasil.total++;
+    const baru = hitungHargaStandar(p.cost_price, pengaturan.percent, pengaturan.rounding);
+    const lama = Number(p.sell_price);
+    if (baru === lama) continue;
+    hasil.jumlah++;
+    if (baru > lama) hasil.naik++;
+    else hasil.turun++;
+    beda.push({ code: p.code, name: p.name, cost: Number(p.cost_price), lama, baru, selisih: baru - lama });
+  }
+  beda.sort((a, b) => Math.abs(b.selisih) - Math.abs(a.selisih));
+  hasil.contoh = beda.slice(0, 8);
+  return hasil;
+}
+
+/** Terapkan harga standar ke SEMUA produk OkeConnect aktif yang ikut persentase,
+ * dalam satu UPDATE (hemat panggilan D1). Hitungannya integer murni:
+ * ceil(cost × (100000+persen×1000) / (100000×pembulatan)) × pembulatan — sama
+ * dengan hitungHargaStandar() untuk modal bilangan bulat. */
+export async function terapkanHargaStandarSemua(env, pengaturan) {
+  if (pengaturan.percent == null) return { diubah: 0 };
+  const pm = Math.round(pengaturan.percent * 1000);
+  const r = pengaturan.rounding;
+  if (!Number.isInteger(pm) || !Number.isInteger(r) || r < 1) throw new Error("Pengaturan harga tidak valid.");
+  const B = 100000 * r;
+  const rumus = `((CAST(cost_price AS INTEGER) * (100000 + ${pm}) + ${B} - 1) / ${B}) * ${r}`;
+  const kategori = pengaturan.excludedCategories;
+  const filterKategori = kategori.length ? `AND UPPER(TRIM(COALESCE(category, ''))) NOT IN (${kategori.map(() => "?").join(",")})` : "";
+  const res = await env.DB.prepare(
+    `UPDATE products SET sell_price = ${rumus}
+     WHERE provider = 'okeconnect' AND code IS NOT NULL AND active = 1 AND cost_price > 0
+       ${filterKategori}
+       AND sell_price != ${rumus}`
+  )
+    .bind(...kategori)
+    .run();
+  return { diubah: res.meta?.changes ?? 0 };
+}
+
+/** Edit/tambah produk MANUAL di halaman Produk: produk yang ikut persentase
+ * SELALU diberi harga standar dari modalnya (isian harga jual diabaikan). Produk
+ * lain (pascabayar, portalpulsa, warung) memakai harga jual yang diisi admin. */
+export function tentukanHargaEditManual({ existing, costBaru, sellBaru }, pengaturan) {
   const sell = Number(sellBaru);
-  if (!existing || !existing.code || lockedNow || pengaturan.percent == null) return { sell, diterapkan: false };
+  if (pengaturan.percent == null || !existing) return { sell, diterapkan: false };
   const cost = Number(costBaru);
-  if (!(cost > 0) || cost === Number(existing.cost_price)) return { sell, diterapkan: false };
-  if (sell !== Number(existing.sell_price)) return { sell, diterapkan: false };
-  return { sell: hitungHargaStandar(cost, pengaturan.percent, pengaturan.rounding), diterapkan: true };
+  if (!(cost > 0) || !ikutPersentase(existing, pengaturan)) return { sell, diterapkan: false };
+  const std = hitungHargaStandar(cost, pengaturan.percent, pengaturan.rounding);
+  return { sell: std, diterapkan: std !== sell };
 }
 
 // ---------------------------------------------------------------------------
@@ -979,10 +1069,10 @@ export async function finalizePpobOrder(env, { refId, sellPrice, costTotal, toke
 
   // Harga jual di kotak konfirmasi HANYA berlaku untuk transaksi ini (masuk
   // laporan & struk) — harga standar produk tidak diubah. Pengecualian: produk
-  // yang tidak punya harga standar dari daftar harga (portalpulsa & pascabayar,
-  // lihat usesDynamicCost) tetap menyimpan harga terakhir sebagai isian awal
-  // transaksi berikutnya, seperti sebelumnya.
-  if (usesDynamicCost(product)) {
+  // yang tidak ikut persentase (portalpulsa, pascabayar, dan kategori yang
+  // dikecualikan admin — lihat ikutPersentase) tetap menyimpan harga terakhir
+  // sebagai isian awal transaksi berikutnya, seperti sebelumnya.
+  if (usesDynamicCost(product) || !ikutPersentase(product, await getPengaturanHarga(env))) {
     await env.DB.prepare("UPDATE products SET sell_price = ? WHERE id = ?").bind(sellPrice, product.id).run();
   }
 
@@ -1022,10 +1112,11 @@ export async function finalizePpobOrder(env, { refId, sellPrice, costTotal, toke
  * ditulis) dan naikJadiRugi (modal naik melewati harga jual).
  *
  * HARGA JUAL: kalau admin sudah mengatur persentase laba standar (Pengaturan),
- * produk baru dan produk yang modalnya berubah (naik/turun) langsung diberi
- * harga standar = HPP × (1 + persen), dibulatkan ke atas (lihat
- * hitungHargaStandar). Produk dengan "Kunci harga" tidak ditimpa. Kalau persen
- * belum diatur: produk baru untung Rp0 dan harga lama tidak disentuh. */
+ * SEMUA produk yang ikut persentase (bukan pascabayar/portalpulsa/warung — lihat
+ * ikutPersentase) selalu diberi harga standar = HPP × (1 + persen), dibulatkan ke
+ * atas (hitungHargaStandar): produk baru, modal berubah, maupun harga yang
+ * menyimpang. Kalau persen belum diatur: produk baru untung Rp0 dan harga lama
+ * tidak disentuh. */
 export async function syncPpobPrices(env, opts = {}) {
   // opts.force = true -> lewati pengaman "daftar harga menyusut drastis" (lihat
   // guard di bawah). Dipakai kalau admin memang yakin provider menghapus banyak
@@ -1075,7 +1166,7 @@ export async function syncPpobPrices(env, opts = {}) {
   // benar-benar dihapus (lihat blockedCodes di bawah).
   const existingMap = new Map();
   const { results: existingRows } = await env.DB.prepare(
-    "SELECT id, code, name, category, product_group, cost_price, sell_price, active, manually_disabled, price_locked FROM products WHERE provider = 'okeconnect' AND code IS NOT NULL"
+    "SELECT id, code, name, category, product_group, cost_price, sell_price, active, manually_disabled FROM products WHERE provider = 'okeconnect' AND code IS NOT NULL"
   ).all();
   for (const row of existingRows) existingMap.set(row.code, row);
 
@@ -1091,7 +1182,7 @@ export async function syncPpobPrices(env, opts = {}) {
        category = excluded.category,
        product_group = excluded.product_group,
        cost_price = excluded.cost_price,
-       sell_price = CASE WHEN products.price_locked = 1 OR excluded.sell_price < 0 THEN products.sell_price ELSE excluded.sell_price END,
+       sell_price = CASE WHEN excluded.sell_price < 0 THEN products.sell_price ELSE excluded.sell_price END,
        active = CASE WHEN products.manually_disabled = 1 THEN products.active ELSE 1 END,
        deactivated_at = CASE WHEN products.manually_disabled = 1 THEN products.deactivated_at ELSE NULL END,
        last_synced_at = excluded.last_synced_at`
@@ -1103,10 +1194,10 @@ export async function syncPpobPrices(env, opts = {}) {
   let skipped = 0;
   let blocked = 0;
   let unchanged = 0;
-  let naikJadiRugi = 0; // modal NAIK dan harga jual akhirnya tetap di bawah modal (produk terkunci / persen belum diatur)
+  let naikJadiRugi = 0; // modal NAIK dan harga jual akhirnya tetap di bawah modal (hanya mungkin kalau persen belum diatur)
   let modalNaik = 0;
   let modalTurun = 0;
-  let hargaDisesuaikan = 0; // harga jual ditimpa harga standar karena modal berubah
+  let hargaDisesuaikan = 0; // harga jual dikoreksi ke harga standar (modal berubah ATAU harga sebelumnya menyimpang)
   let produkBaru = 0;
 
   for (const item of list) {
@@ -1133,32 +1224,36 @@ export async function syncPpobPrices(env, opts = {}) {
 
     const existing = existingMap.get(code);
 
-    // Harga jual:
-    //  - produk BARU: harga standar (HPP + persen) kalau persen sudah diatur,
-    //    kalau belum = modal (untung Rp0) seperti dulu.
-    //  - produk LAMA yang modalnya BERUBAH (naik/turun): ditimpa harga standar,
-    //    kecuali "Kunci harga" aktif atau persen belum diatur.
-    //  - selain itu: sell = -1 → SQL tidak menyentuh sell_price (lihat ON CONFLICT).
+    // Harga jual (lihat hitungHargaStandar & ikutPersentase):
+    //  - produk yang ikut persentase: SELALU harga standar (HPP × (1 + persen)),
+    //    jadi harga yang menyimpang ikut dikoreksi tiap sinkron, bukan cuma saat
+    //    modal berubah. Hanya yang berbeda yang ditulis (hemat kuota D1).
+    //  - tagihan/pascabayar & produk lain yang tidak ikut: sell_price tidak
+    //    disentuh (sell = -1 → lihat ON CONFLICT); produk baru = modal.
+    //  - persen belum diatur: perilaku lama (produk baru = modal, lama tak disentuh).
+    const ikut = ikutPersentase({ code, provider: "okeconnect", category }, hargaStd);
+    const kena = hargaStd.percent != null && cost > 0 && ikut;
     const costBerubah = !!existing && Number(existing.cost_price) !== cost;
-    const pakaiStandar = hargaStd.percent != null && cost > 0;
-    let sell;
+    let sell = -1;
     if (!existing) {
-      sell = pakaiStandar ? hitungHargaStandar(cost, hargaStd.percent, hargaStd.rounding) : cost;
+      sell = kena ? hitungHargaStandar(cost, hargaStd.percent, hargaStd.rounding) : cost;
       produkBaru++;
-    } else if (costBerubah && pakaiStandar && !existing.price_locked) {
-      sell = hitungHargaStandar(cost, hargaStd.percent, hargaStd.rounding);
-      if (sell !== Number(existing.sell_price)) hargaDisesuaikan++;
-    } else {
-      sell = -1;
+    } else if (kena) {
+      const std = hitungHargaStandar(cost, hargaStd.percent, hargaStd.rounding);
+      if (std !== Number(existing.sell_price)) {
+        sell = std;
+        hargaDisesuaikan++;
+      }
     }
     if (existing && costBerubah) {
       if (cost > Number(existing.cost_price)) modalNaik++;
       else modalTurun++;
       const hargaAkhir = sell >= 0 ? sell : Number(existing.sell_price);
-      if (cost > Number(existing.cost_price) && hargaAkhir < cost) naikJadiRugi++;
+      if (ikut && cost > Number(existing.cost_price) && hargaAkhir < cost) naikJadiRugi++;
     }
     const changed =
       !existing ||
+      sell >= 0 ||
       (existing.active !== 1 && !existing.manually_disabled) ||
       existing.name !== name ||
       existing.category !== category ||
@@ -1205,6 +1300,7 @@ export async function syncPpobPrices(env, opts = {}) {
   const BATCH_SIZE = 50;
   let count = 0;
   let failed = 0;
+  let belumDiproses = 0;
   const errors = [];
   for (let i = 0; i < batchItems.length; i += BATCH_SIZE) {
     const chunk = batchItems.slice(i, i + BATCH_SIZE);
@@ -1214,6 +1310,13 @@ export async function syncPpobPrices(env, opts = {}) {
     } catch (err) {
       failed += chunk.length;
       errors.push(`batch mulai index ${i}: ${err.message}`);
+      // Kena batas jumlah panggilan per invocation Worker: batch sisanya pasti
+      // gagal juga, jadi berhenti. Baris yang belum ditulis tetap berbeda dari
+      // database, jadi sinkron berikutnya melanjutkan otomatis.
+      if (/too many (api requests|subrequests)/i.test(err.message)) {
+        belumDiproses = Math.max(0, batchItems.length - (i + chunk.length));
+        break;
+      }
     }
   }
   const lastError = errors.length ? errors[errors.length - 1] : null;
@@ -1301,6 +1404,7 @@ export async function syncPpobPrices(env, opts = {}) {
     blockedKeptInactive,
     deactivated,
     failed,
+    belumDiproses,
     errors: errors.slice(0, 5),
     naikJadiRugi,
     modalNaik,

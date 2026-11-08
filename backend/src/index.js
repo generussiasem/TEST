@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { sendJabberCommand, listenJabberMessages, setJabberReplyHook } from "./jabber.js";
 import { sendTelegramMessage } from "./telegram.js";
-import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, extractTokenCode, syncPpobPrices, getPengaturanHarga, setPengaturanHarga, tentukanHargaEditManual, getProviderConfig, finalizePpobOrder, checkDistributorBalance, batalkanDepositOtomatis, getDompetDepositOkeconnect, setDompetDepositOkeconnect, parseTagihanListrikDetail, parsePortalpulsaDetail, assertCfgComplete, kirimDepositPortalpulsa, parseDepositSusulan, selesaikanDepositSusulan, tandaiDepositKadaluwarsa, formatBarisDeposit } from "./ppob.js";
+import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, extractTokenCode, syncPpobPrices, getPengaturanHarga, setPengaturanHarga, normalisasiPengaturanHarga, pratinjauHargaStandar, terapkanHargaStandarSemua, tentukanHargaEditManual, getProviderConfig, finalizePpobOrder, checkDistributorBalance, batalkanDepositOtomatis, getDompetDepositOkeconnect, setDompetDepositOkeconnect, parseTagihanListrikDetail, parsePortalpulsaDetail, assertCfgComplete, kirimDepositPortalpulsa, parseDepositSusulan, selesaikanDepositSusulan, tandaiDepositKadaluwarsa, formatBarisDeposit } from "./ppob.js";
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
 import { getEmployeeByChatId, handleLinkCommand, sendMainMenu, handleAdminCallback, handleAdminSessionMessage } from "./bot-admin.js";
 import { hitungAsetBersih, catatSnapshotModalHarian } from "./modal.js";
@@ -440,16 +440,37 @@ app.put("/api/deposit-okeconnect-wallet", requireAdmin, async (c) => {
   }
 });
 
-// Persentase laba standar & pembulatan harga jual (HPP × (1 + persen)). Kosongkan
-// persen untuk mematikan fitur. Hanya admin.
+// Persentase laba standar, pembulatan, dan kategori yang dikecualikan (pascabayar).
+// Kosongkan persen untuk mematikan fitur. Hanya admin.
 app.get("/api/pengaturan-harga", requireAdmin, async (c) => {
   return c.json(await getPengaturanHarga(c.env));
 });
 
-app.put("/api/pengaturan-harga", requireAdmin, async (c) => {
-  const { percent, rounding } = await c.req.json();
+// Info non-sensitif untuk semua pengguna (halaman Produk mengunci kolom harga jual
+// produk yang mengikuti harga standar) — TANPA angka persentase.
+app.get("/api/harga-standar-info", async (c) => {
+  const p = await getPengaturanHarga(c.env);
+  return c.json({ aktif: p.percent != null, excludedCategories: p.excludedCategories });
+});
+
+// Pratinjau: berapa produk yang harganya berubah kalau pengaturan ini diterapkan.
+app.post("/api/pengaturan-harga/pratinjau", requireAdmin, async (c) => {
   try {
-    return c.json({ ok: true, ...(await setPengaturanHarga(c.env, { percent, rounding })) });
+    const p = normalisasiPengaturanHarga(await c.req.json());
+    return c.json({ ok: true, ...(await pratinjauHargaStandar(c.env, p)) });
+  } catch (err) {
+    return c.json({ ok: false, error: err.message }, 400);
+  }
+});
+
+// Simpan pengaturan; kalau terapkan = true, harga standar langsung diterapkan ke
+// semua produk yang ikut persentase (sinkron harian juga akan menjaganya).
+app.put("/api/pengaturan-harga", requireAdmin, async (c) => {
+  try {
+    const body = await c.req.json();
+    const p = await setPengaturanHarga(c.env, body);
+    const diubah = body.terapkan ? (await terapkanHargaStandarSemua(c.env, p)).diubah : 0;
+    return c.json({ ok: true, ...p, diubah });
   } catch (err) {
     return c.json({ ok: false, error: err.message }, 400);
   }
@@ -530,11 +551,16 @@ app.get("/api/products/barcode/:code", async (c) => {
 app.post("/api/products", async (c) => {
   const { code, barcode, name, category, cost_price = 0, sell_price = 0, stock = 0, provider = "okeconnect" } = await c.req.json();
   try {
+    // Produk PPOB yang ikut persentase: harga jual = harga standar dari modalnya.
+    const harga = tentukanHargaEditManual(
+      { existing: { code: code || null, provider: provider || "okeconnect", category }, costBaru: cost_price, sellBaru: sell_price },
+      await getPengaturanHarga(c.env)
+    );
     await c.env.DB.prepare(
       `INSERT INTO products (code, barcode, name, category, cost_price, sell_price, stock, provider)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
-      .bind(code || null, barcode || null, name, category || null, cost_price, sell_price, stock, provider || "okeconnect")
+      .bind(code || null, barcode || null, name, category || null, cost_price, harga.sell, stock, provider || "okeconnect")
       .run();
     return c.json({ ok: true });
   } catch (err) {
@@ -550,22 +576,23 @@ app.post("/api/products", async (c) => {
 
 app.put("/api/products/:id", async (c) => {
   const id = c.req.param("id");
-  const { name, category, cost_price, sell_price, stock, barcode, provider, price_locked } = await c.req.json();
+  const { name, category, cost_price, sell_price, stock, barcode, provider } = await c.req.json();
   try {
-    // "Kunci harga" hanya boleh diubah admin. Kalau modal produk PPOB berubah dan
-    // harga jual di form tidak diubah, harga jual ditimpa harga standar.
-    const existing = await c.env.DB.prepare("SELECT code, cost_price, sell_price, price_locked FROM products WHERE id = ?").bind(id).first();
-    const isAdminUser = c.get("employee")?.role === "admin";
-    const lockedNow = isAdminUser && price_locked != null ? (price_locked ? 1 : 0) : existing?.price_locked ? 1 : 0;
+    // Produk PPOB yang ikut persentase: harga jual SELALU harga standar dari modalnya.
+    const existing = await c.env.DB.prepare("SELECT code, provider, category FROM products WHERE id = ?").bind(id).first();
     const harga = tentukanHargaEditManual(
-      { existing, costBaru: cost_price, sellBaru: sell_price, lockedNow },
+      {
+        existing: existing && { ...existing, provider: provider || existing.provider, category: category ?? existing.category },
+        costBaru: cost_price,
+        sellBaru: sell_price,
+      },
       await getPengaturanHarga(c.env)
     );
     await c.env.DB.prepare(
-      `UPDATE products SET name = ?, category = ?, cost_price = ?, sell_price = ?, stock = ?, barcode = ?, provider = COALESCE(?, provider), price_locked = ?
+      `UPDATE products SET name = ?, category = ?, cost_price = ?, sell_price = ?, stock = ?, barcode = ?, provider = COALESCE(?, provider)
        WHERE id = ?`
     )
-      .bind(name, category || null, cost_price, harga.sell, stock, barcode || null, provider || null, lockedNow, id)
+      .bind(name, category || null, cost_price, harga.sell, stock, barcode || null, provider || null, id)
       .run();
     return c.json({ ok: true, hargaDisesuaikan: harga.diterapkan, sell_price: harga.sell });
   } catch (err) {
@@ -2578,8 +2605,9 @@ async function jalankanSinkronHarga(env) {
       masalah.push(`Gagal: ${r.error}`);
     } else {
       if (r.failed) masalah.push(`${r.failed} produk gagal ditulis ke database (${r.lastError})`);
-      if (r.naikJadiRugi) masalah.push(`${r.naikJadiRugi} produk modalnya naik sampai di atas harga jual (harga terkunci atau persentase laba belum diatur) — cek halaman Produk`);
-      if (r.hargaDisesuaikan) info.push(`${r.hargaDisesuaikan} produk harga jualnya disesuaikan ke harga standar (${r.modalNaik} modal naik, ${r.modalTurun} modal turun)`);
+      if (r.belumDiproses) masalah.push(`${r.belumDiproses} produk belum sempat ditulis (kena batas Worker) — akan dilanjutkan sinkron berikutnya, atau tekan Sinkron Harga PPOB`);
+      if (r.naikJadiRugi) masalah.push(`${r.naikJadiRugi} produk modalnya naik sampai di atas harga jual (persentase laba belum diatur) — cek halaman Produk`);
+      if (r.hargaDisesuaikan) info.push(`${r.hargaDisesuaikan} produk harga jualnya dikoreksi ke harga standar (${r.modalNaik} modal naik, ${r.modalTurun} modal turun)`);
       else if ((r.modalNaik || r.modalTurun) && !r.hargaStandarAktif) info.push(`${r.modalNaik + r.modalTurun} produk modalnya berubah, tapi persentase laba standar belum diatur sehingga harga jual tidak berubah`);
     }
     if (masalah.length || info.length) {

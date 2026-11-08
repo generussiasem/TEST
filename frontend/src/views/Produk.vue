@@ -99,6 +99,20 @@ const ppobAddForm = ref(blankPpob());
 // Kata kunci yang diblokir dari sinkronisasi PPOB — produk yang kode/nama/
 // kategorinya cocok tidak ikut disinkron sama sekali (lihat syncPpobPrices).
 const blockedKeywords = ref([]);
+
+// Harga standar (HPP + persentase laba, diatur admin di Pengaturan): produk OkeConnect
+// yang ikut persentase harga jualnya otomatis, jadi kolom harga jual dikunci (read-only).
+// Pascabayar/portalpulsa tidak ikut. Rumus yang sama dengan ikutPersentase() di server.
+const hargaInfo = ref({ aktif: false, excludedCategories: [] });
+async function loadHargaInfo() {
+  try {
+    hargaInfo.value = await api.get("/api/harga-standar-info");
+  } catch (_) {}
+}
+function ikutPersentase(p) {
+  if (!hargaInfo.value.aktif || !p.code || (p.provider && p.provider !== "okeconnect")) return false;
+  return !hargaInfo.value.excludedCategories.includes(String(p.category || "").trim().toUpperCase());
+}
 const showBlocked = ref(false);
 const newKeyword = ref("");
 
@@ -232,11 +246,12 @@ async function syncPrices(forceArg) {
       (res.deactivated ? `, ${res.deactivated} dinonaktifkan otomatis (sudah tidak ada di sumber)` : "") +
       (res.skipped ? `, ${res.skipped} dilewati karena data tidak lengkap` : "") +
       (res.hargaDisesuaikan
-        ? `. ${res.hargaDisesuaikan} produk harga jualnya disesuaikan ke harga standar (${res.modalNaik} modal naik, ${res.modalTurun} modal turun)`
+        ? `. ${res.hargaDisesuaikan} produk harga jualnya dikoreksi ke harga standar (${res.modalNaik} modal naik, ${res.modalTurun} modal turun)`
         : "") +
       (res.hargaStandarAktif === false && (res.modalNaik || res.modalTurun)
         ? ". Persentase laba standar belum diatur di Pengaturan, jadi harga jual tidak berubah"
         : "") +
+      (res.belumDiproses ? `. ${res.belumDiproses} produk belum sempat ditulis (batas Worker) — tekan Sinkron lagi untuk melanjutkan` : "") +
       (res.failed ? `. PERHATIAN: ${res.failed} produk GAGAL ditulis (${res.lastError})` : "") +
       (res.naikJadiRugi ? `. PERHATIAN: ${res.naikJadiRugi} produk modalnya naik sampai di atas harga jual, cek harga jualnya` : "") +
       ".";
@@ -264,6 +279,7 @@ function switchTab(t) {
 }
 
 onMounted(async () => {
+  loadHargaInfo();
   await loadFisik();
 });
 </script>
@@ -462,10 +478,14 @@ onMounted(async () => {
                 </td>
                 <td><input v-model.number="ppobEditing.cost_price" type="number" style="width: 90px" /></td>
                 <td>
-                  <input v-model.number="ppobEditing.sell_price" type="number" style="width: 90px" />
-                  <label v-if="isAdmin()" style="display: block; font-size: 11px; margin-top: 4px">
-                    <input type="checkbox" :checked="!!ppobEditing.price_locked" @change="ppobEditing.price_locked = $event.target.checked ? 1 : 0" /> Kunci harga
-                  </label>
+                  <input
+                    v-model.number="ppobEditing.sell_price"
+                    type="number"
+                    style="width: 90px"
+                    :readonly="ikutPersentase(p)"
+                    :style="ikutPersentase(p) ? 'background:var(--paper); color:var(--ink-soft)' : ''"
+                  />
+                  <div v-if="ikutPersentase(p)" class="muted" style="font-size: 11px">mengikuti harga standar</div>
                 </td>
                 <td><span class="badge" :class="p.active ? 'sukses' : 'gagal'">{{ p.active ? "Aktif" : "Nonaktif" }}</span></td>
                 <td style="white-space: nowrap">
@@ -488,7 +508,6 @@ onMounted(async () => {
                   <div v-if="p.cost_price > 0 && p.sell_price < p.cost_price" style="font-size: 11.5px; color: #b3392c; font-weight: 600">
                     Rugi {{ rupiah(p.cost_price - p.sell_price) }}
                   </div>
-                  <div v-if="p.price_locked" class="muted" style="font-size: 11px">🔒 harga dikunci</div>
                 </td>
                 <td>
                   <span class="badge" :class="p.active ? 'sukses' : 'gagal'">{{ p.active ? "Aktif" : "Nonaktif" }}</span>

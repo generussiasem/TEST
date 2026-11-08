@@ -273,10 +273,11 @@ ke/dari alat itu — isinya diisi manual oleh kasir.
 
 ## Harga jual standar (HPP + persentase laba)
 
-Admin mengatur **persentase laba dari HPP** (markup, bukan dari harga jual) dan **pembulatan ke atas** (default Rp1.000) di halaman **Pengaturan → Harga Jual Standar**. Harga standar = `HPP × (1 + persen)` dibulatkan ke atas.
+Admin mengatur di **Pengaturan → Harga Jual Standar**: **persentase laba dari HPP** (markup, bukan dari harga jual), **pembulatan ke atas** (default Rp1.000), dan **kategori yang tidak ikut persentase** (default `TAGIHAN`, `AIR PDAM` = pascabayar). Harga standar = `HPP × (1 + persen)` dibulatkan ke atas.
 
-- Dipakai untuk produk **baru** hasil sinkron, dan saat **modal berubah** (naik/turun) lewat sinkron harga atau edit modal di halaman Produk: harga jual **langsung ditimpa** harga standar.
-- Produk dengan **Kunci harga** (kolom `products.price_locked`) tidak ditimpa.
-- Persentase **kosong = fitur mati**: produk baru untung Rp0 dan harga lama tidak disentuh (perilaku lama).
-- Harga yang diubah kasir di **kotak konfirmasi transaksi** hanya berlaku untuk transaksi itu (laporan & struk); harga standar produk tidak berubah. Pengecualian: produk portalpulsa & pascabayar (tanpa daftar harga) tetap menyimpan harga terakhir sebagai isian awal.
-- Migrasi wajib dijalankan sebelum deploy: `migrations/2026-11-07-add-products-manually-disabled.sql` dan `migrations/2026-11-07-harga-standar-price-locked.sql`.
+- Semua produk PPOB OkeConnect **ikut persentase** (tidak ada "kunci harga"), kecuali kategori pengecualian di atas, produk **portalpulsa**, dan barang warung (tanpa kode).
+- Harga jual produk yang ikut **selalu harga standar**: dikoreksi di tiap sinkron (hanya baris yang beda yang ditulis), saat modal berubah, saat produk diedit/ditambah di halaman Produk, dan saat persentase disimpan — dengan **pratinjau** jumlah produk yang berubah dan konfirmasi dulu.
+- Persentase **kosong = fitur mati**: produk baru untung Rp0 dan harga lama tidak disentuh.
+- Harga yang diketik kasir di **kotak konfirmasi transaksi** hanya berlaku untuk transaksi itu (laporan & struk); harga produk tidak berubah. Produk yang tidak ikut persentase tetap menyimpan harga terakhir sebagai isian awal.
+- Penerapan pertama bisa menulis ribuan baris; kalau kena batas Worker, sisanya dilanjutkan sinkron berikutnya.
+- Migrasi wajib sebelum deploy: `migrations/2026-11-07-add-products-manually-disabled.sql`. (Kolom `products.price_locked` dari versi sebelumnya, kalau sudah terlanjur dibuat, tidak dipakai lagi dan boleh dibiarkan.)

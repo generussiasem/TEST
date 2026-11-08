@@ -5,23 +5,65 @@ import { isAdmin } from "../store.js";
 
 const settings = ref({ store_name: "", address: "", logo_url: "", cetak_struk_url: "" });
 // Harga jual standar = HPP + persentase laba (dibulatkan ke atas). Hanya admin.
-const hargaForm = ref({ percent: "", rounding: 1000 });
+// Alur simpan: pratinjau (berapa produk berubah) -> konfirmasi -> simpan & terapkan.
+const hargaForm = ref({ percent: "", rounding: 1000, kecuali: "" });
 const hargaMsg = ref("");
+const hargaPratinjau = ref(null); // { total, jumlah, naik, turun, contoh, body } menunggu konfirmasi
+const hargaBusy = ref(false);
+function bodyHarga() {
+  const p = hargaForm.value.percent;
+  return {
+    percent: p === "" || p == null ? null : Number(p),
+    rounding: Number(hargaForm.value.rounding),
+    excludedCategories: hargaForm.value.kecuali,
+  };
+}
 async function loadHarga() {
   try {
     const r = await api.get("/api/pengaturan-harga");
-    hargaForm.value = { percent: r.percent ?? "", rounding: r.rounding || 1000 };
+    hargaForm.value = { percent: r.percent ?? "", rounding: r.rounding || 1000, kecuali: (r.excludedCategories || []).join(", ") };
   } catch (_) {}
 }
 async function simpanHarga() {
   hargaMsg.value = "";
+  hargaPratinjau.value = null;
   error.value = "";
+  hargaBusy.value = true;
   try {
-    const persen = hargaForm.value.percent === "" || hargaForm.value.percent == null ? null : Number(hargaForm.value.percent);
-    const r = await api.put("/api/pengaturan-harga", { percent: persen, rounding: Number(hargaForm.value.rounding) });
-    hargaMsg.value = r.percent == null ? "Harga standar dimatikan (persentase kosong)." : `Tersimpan: laba ${r.percent}% dari HPP, dibulatkan ke atas ke ${r.rounding.toLocaleString("id-ID")}.`;
+    const body = bodyHarga();
+    if (body.percent == null) {
+      await api.put("/api/pengaturan-harga", body);
+      hargaMsg.value = "Harga standar dimatikan (persentase kosong). Harga jual tidak diubah otomatis.";
+      return;
+    }
+    const p = await api.post("/api/pengaturan-harga/pratinjau", body);
+    if (!p.jumlah) {
+      await api.put("/api/pengaturan-harga", body);
+      hargaMsg.value = `Tersimpan. Semua ${p.total} produk yang ikut persentase sudah sesuai harga standar.`;
+      return;
+    }
+    hargaPratinjau.value = { ...p, body };
   } catch (err) {
     error.value = err.message;
+  } finally {
+    hargaBusy.value = false;
+  }
+}
+async function konfirmasiHarga(terapkan) {
+  const b = hargaPratinjau.value?.body;
+  if (!b) return;
+  hargaBusy.value = true;
+  error.value = "";
+  try {
+    const r = await api.put("/api/pengaturan-harga", { ...b, terapkan });
+    hargaMsg.value = terapkan
+      ? `Tersimpan dan diterapkan: ${r.diubah} produk harga jualnya diperbarui.`
+      : "Tersimpan. Harga akan dikoreksi pada sinkron berikutnya.";
+    hargaPratinjau.value = null;
+  } catch (err) {
+    error.value = err.message;
+  } finally {
+    hargaBusy.value = false;
   }
 }
 // Contoh perhitungan langsung di form (rumus sama dengan server: hitungHargaStandar).
@@ -234,10 +276,10 @@ onMounted(() => {
       <div v-if="isAdmin()" class="card">
         <h3 style="margin-bottom: 12px">Harga Jual Standar (Persentase Laba)</h3>
         <p class="muted" style="font-size: 13px; margin-bottom: 12px">
-          Setiap kali modal (HPP) produk PPOB OkeConnect berubah — lewat sinkron harga atau edit modal di halaman Produk — harga jual
-          <b>langsung ditimpa</b> dengan <b>HPP × (1 + persen)</b>, dibulatkan ke atas. Persen dihitung dari HPP, bukan dari harga jual.
-          Produk bertanda <b>Kunci harga</b> tidak ikut ditimpa. Kosongkan persentase untuk mematikan fitur ini. Harga yang diubah kasir
-          di kotak konfirmasi transaksi hanya berlaku untuk transaksi itu.
+          Harga jual produk PPOB OkeConnect = <b>HPP × (1 + persen)</b>, dibulatkan ke atas. Persen dihitung dari HPP, bukan dari harga jual.
+          Berlaku untuk <b>semua produk prabayar</b> dan dijaga otomatis tiap sinkron — termasuk saat modal berubah. Produk yang kategorinya
+          ada di daftar pengecualian (pascabayar/tagihan), produk portalpulsa, dan barang warung tidak ikut. Kosongkan persentase untuk
+          mematikan fitur. Harga yang diubah kasir di kotak konfirmasi transaksi hanya berlaku untuk transaksi itu.
         </p>
         <div v-if="hargaMsg" class="ok-box">{{ hargaMsg }}</div>
         <form @submit.prevent="simpanHarga">
@@ -255,12 +297,38 @@ onMounted(() => {
               <option :value="5000">Rp 5.000</option>
             </select>
           </div>
+          <div class="field">
+            <label>Kategori yang TIDAK ikut persentase (pisahkan dengan koma)</label>
+            <input v-model="hargaForm.kecuali" placeholder="TAGIHAN, AIR PDAM" />
+          </div>
           <div v-if="contohHarga" class="muted" style="font-size: 13px; margin-bottom: 10px">
             Contoh:
             <span v-for="(c, i) in contohHarga" :key="c.modal">{{ i ? " · " : "" }}modal {{ rupiah(c.modal) }} → jual <b>{{ rupiah(c.jual) }}</b></span>
           </div>
-          <button class="btn" type="submit">Simpan</button>
+          <button class="btn" type="submit" :disabled="hargaBusy">{{ hargaBusy ? "Memeriksa…" : "Simpan" }}</button>
         </form>
+
+        <div v-if="hargaPratinjau" class="error-box" style="margin-top: 14px; background: var(--paper); color: var(--ink); border: 1px solid var(--line, #ccc)">
+          <b>{{ hargaPratinjau.jumlah }} dari {{ hargaPratinjau.total }} produk</b> akan berubah harga jualnya
+          ({{ hargaPratinjau.naik }} naik, {{ hargaPratinjau.turun }} turun). Harga manual yang menyimpang akan ditimpa harga standar.
+          <table style="width: 100%; font-size: 12.5px; margin: 8px 0">
+            <thead>
+              <tr><th style="text-align: left">Produk</th><th>Modal</th><th>Sekarang</th><th>Jadi</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="c in hargaPratinjau.contoh" :key="c.code">
+                <td>{{ c.name }}</td>
+                <td class="num">{{ rupiah(c.cost) }}</td>
+                <td class="num">{{ rupiah(c.lama) }}</td>
+                <td class="num"><b>{{ rupiah(c.baru) }}</b></td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="muted" style="font-size: 12px; margin-bottom: 8px">Menampilkan {{ hargaPratinjau.contoh.length }} perubahan terbesar.</div>
+          <button class="btn" type="button" :disabled="hargaBusy" @click="konfirmasiHarga(true)">Simpan &amp; terapkan sekarang</button>
+          <button class="btn ghost" type="button" :disabled="hargaBusy" style="margin-left: 8px" @click="konfirmasiHarga(false)">Simpan saja (terapkan saat sinkron)</button>
+          <button class="btn ghost" type="button" :disabled="hargaBusy" style="margin-left: 8px" @click="hargaPratinjau = null">Batal</button>
+        </div>
       </div>
 
       <div class="card">

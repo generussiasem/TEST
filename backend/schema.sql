@@ -62,7 +62,6 @@ CREATE TABLE IF NOT EXISTS products (
   last_synced_at TEXT,                    -- diperbarui HANYA saat sinkron menulis baris ini (baru/berubah/diaktifkan lagi), BUKAN tiap kali kode terlihat di sumber
   provider TEXT NOT NULL DEFAULT 'okeconnect', -- 'okeconnect' atau 'portalpulsa' — jalur Jabber yang dipakai saat order
   manually_disabled INTEGER NOT NULL DEFAULT 0, -- 1 = dinonaktifkan manual oleh admin; sinkron harga TIDAK akan mengaktifkannya lagi
-  price_locked INTEGER NOT NULL DEFAULT 0,      -- 1 = harga jual dikunci; TIDAK ditimpa harga standar saat modal berubah
   created_at TEXT DEFAULT (datetime('now')),
   UNIQUE(code, provider)
 );
