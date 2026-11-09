@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { sendJabberCommand, listenJabberMessages, setJabberReplyHook } from "./jabber.js";
 import { sendTelegramMessage } from "./telegram.js";
-import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, extractTokenCode, syncPpobPrices, getPengaturanHarga, setPengaturanHarga, normalisasiPengaturanHarga, pratinjauHargaStandar, terapkanHargaStandarSemua, tentukanHargaEditManual, getProviderConfig, finalizePpobOrder, checkDistributorBalance, batalkanDepositOtomatis, getDompetDepositOkeconnect, setDompetDepositOkeconnect, parseTagihanListrikDetail, parsePortalpulsaDetail, assertCfgComplete, kirimDepositPortalpulsa, parseDepositSusulan, selesaikanDepositSusulan, tandaiDepositKadaluwarsa, formatBarisDeposit } from "./ppob.js";
+import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, extractTokenCode, syncPpobPrices, getPengaturanHarga, setPengaturanHarga, normalisasiPengaturanHarga, pratinjauHargaStandar, terapkanHargaStandarSemua, tentukanHargaEditManual, getProviderConfig, finalizePpobOrder, checkDistributorBalance, cekSaldoOtomatisDepositPending, batalkanDepositOtomatis, getDompetDepositOkeconnect, setDompetDepositOkeconnect, parseTagihanListrikDetail, parsePortalpulsaDetail, assertCfgComplete, kirimDepositPortalpulsa, parseDepositSusulan, selesaikanDepositSusulan, tandaiDepositKadaluwarsa, formatBarisDeposit } from "./ppob.js";
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
 import { getEmployeeByChatId, handleLinkCommand, sendMainMenu, handleAdminCallback, handleAdminSessionMessage } from "./bot-admin.js";
 import { hitungAsetBersih, catatSnapshotModalHarian } from "./modal.js";
@@ -2506,6 +2506,17 @@ async function checkPendingPortalpulsaDeposits(env) {
         console.error("[cron] selesaikanDepositSusulan gagal:", err.message);
       }
     }
+  }
+  // Balasan SUKSES deposit bisa telat 1–2 jam (atau tidak pernah tertangkap), jadi
+  // selama ada deposit pending, cek saldo asli otomatis (senyap, dibatasi sekali
+  // per ~10 menit): kalau saldo naik persis sebesar nominal transfer, deposit
+  // terkonfirmasi & mutasi dompet tercatat tanpa menunggu tombol Cek Saldo.
+  try {
+    const a = await cekSaldoOtomatisDepositPending(env);
+    if (a.dijalankan) console.log("[cron] cek saldo otomatis deposit pending:", JSON.stringify({ ok: a.ok, dikonfirmasi: a.dikonfirmasi }));
+    if (a.dikonfirmasi) await notifAdminTelegram(env, `✅ Deposit portalpulsa terkonfirmasi otomatis.\n${a.pesan || ""}`.trim());
+  } catch (err) {
+    console.error("[cron] cek saldo otomatis deposit pending gagal:", err.message);
   }
   // Jaga-jaga kalau provider tidak selalu kirim notifikasi "hangus" — deposit
   // yang sudah lewat 13 jam tanpa balasan apa pun ditandai gagal otomatis.

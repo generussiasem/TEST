@@ -1437,14 +1437,35 @@ export async function syncPpobPrices(env, opts = {}) {
 // sama). Kalau ternyata beda, fungsi ini akan gagal parse (return null) dan
 // checkDistributorBalance TIDAK menimpa saldo — aman, tapi perlu disesuaikan
 // begitu ada contoh balasan cek saldo portalpulsa yang asli.
+//
+// Balasan ASLI portalpulsa untuk "S PIN" (dites langsung 2026-11):
+//   "Sisa saldo Anda saat ini:  Rp 83.177 # Ayo transaksi terus biar dapet bonus mingguan"
+// Ada teks "Anda saat ini:" di antara kata "saldo" dan angkanya, jadi pola lama
+// ("Saldo" langsung diikuti angka) gagal. Pola sekarang: kata "saldo", lalu teks
+// tanpa angka (maks 40 karakter, boleh memuat "Anda saat ini:", "Rp", dsb.), lalu
+// angka pertama. Angka format Indonesia: titik = pemisah ribuan, koma = desimal.
 export function parseBalanceReply(reply) {
-  const match = reply.match(/Saldo:?\s*(?:Rp\.?\s*)?([\d.]+)/i);
+  if (typeof reply !== "string") return null;
+  // Pesan penolakan seperti "Saldo Anda tidak mencukupi untuk transaksi 5.000" memuat
+  // angka yang BUKAN saldo — jangan dibaca (lebih aman gagal daripada menimpa saldo salah).
+  if (/tidak\s+(?:cukup|mencukupi)|\bkurang\b/i.test(reply)) return null;
+  const match = reply.match(/saldo[^\d\-]{0,40}?(-?\d[\d.,]*)/i);
   if (!match) return null;
-  const n = Number(match[1].replace(/\./g, ""));
+  // buang titik ribuan, koma jadi desimal; titik/koma di ujung (akhir kalimat) dibuang
+  const mentah = match[1].replace(/[.,]+$/, "").replace(/\./g, "").replace(",", ".");
+  const n = Number(mentah);
   return Number.isFinite(n) ? n : null;
 }
 
-export async function checkDistributorBalance(env, provider = "okeconnect") {
+// Balasan cek saldo yang sudah final: kata "saldo" diikuti angka (sama dengan
+// parseBalanceReply). Dipakai agar sesi Jabber berhenti begitu angka saldo masuk.
+const POLA_BALASAN_SALDO = /saldo[^\d\-]{0,40}?-?\d/i;
+
+// Saringan feed untuk cek saldo otomatis: ack perintah "'S <pin>' Telah kami
+// terima..." dan balasan "Sisa saldo Anda saat ini: ..." tidak perlu masuk Telegram.
+const SARING_FEED_CEK_SALDO = (teks) => /^\s*'?S\s/i.test(teks) || /^\s*Sisa saldo\b/i.test(teks);
+
+export async function checkDistributorBalance(env, provider = "okeconnect", opts = {}) {
   const cfg = getProviderConfig(env, provider);
   assertCfgComplete(cfg);
 
@@ -1479,11 +1500,16 @@ export async function checkDistributorBalance(env, provider = "okeconnect") {
     firstReplyIsFinal,
     refSeparator: cfg.separator,
     acceptAnyFromTarget: cfg.provider === "portalpulsa",
+    finalReplyPattern: POLA_BALASAN_SALDO,
+    skipFeedIf: opts.senyap ? SARING_FEED_CEK_SALDO : null,
   });
 
   const balance = parseBalanceReply(reply);
   if (balance === null) {
-    return { ok: false, error: "Tidak bisa membaca angka saldo dari balasan.", raw_reply: reply };
+    // Sertakan cuplikan balasan di pesan error supaya langsung kelihatan di layar
+    // apa yang diterima (sebelumnya cuma ada di field raw_reply yang tidak ditampilkan UI).
+    const cuplikan = String(reply ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
+    return { ok: false, error: `Tidak bisa membaca angka saldo dari balasan. Balasan yang diterima: "${cuplikan || "(kosong)"}"`, raw_reply: reply };
   }
 
   // portalpulsa: kalau saldo asli naik PERSIS sebesar nominal transfer sebuah
@@ -1513,6 +1539,68 @@ export async function checkDistributorBalance(env, provider = "okeconnect") {
     raw_reply: reply,
     deposit: depositInfo,
   };
+}
+
+/**
+ * Cek saldo portalpulsa OTOMATIS selama ada deposit `pending` — supaya deposit
+ * yang balasan SUKSES-nya telat (1–2 jam) tetap terkonfirmasi tanpa menunggu
+ * tombol Cek Saldo ditekan. Dipanggil dari cron (tiap 5 menit), tapi sendiri
+ * dibatasi:
+ *  - hanya jalan kalau ada deposit pending berumur >= umurMinimalMenit (memberi
+ *    waktu transfer) dan < 13 jam (batas kedaluwarsa);
+ *  - paling sering sekali per jedaMenit (dicatat di app_state);
+ *  - senyap ke Telegram (lihat SARING_FEED_CEK_SALDO).
+ * Balasan yang ternyata "Deposit … SUKSES/DIBATALKAN" (pesan susulan yang
+ * kebetulan tertangkap sesi ini) tetap diproses lewat selesaikanDepositSusulan.
+ * `deps.cek` hanya untuk pengujian.
+ * @returns {Promise<{dijalankan:boolean, alasan?:string, pesan?:string, dikonfirmasi?:boolean}>}
+ */
+export async function cekSaldoOtomatisDepositPending(env, { jedaMenit = 10, umurMinimalMenit = 5, deps = {} } = {}) {
+  const cek = deps.cek || checkDistributorBalance;
+  const adaPending = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM portalpulsa_deposits
+     WHERE status = 'pending' AND created_at <= datetime('now', ?) AND created_at > datetime('now', '-13 hours')`
+  )
+    .bind(`-${Number(umurMinimalMenit)} minutes`)
+    .first();
+  if (!adaPending || !adaPending.n) return { dijalankan: false, alasan: "tidak ada deposit pending yang perlu dicek" };
+
+  const baruSaja = await env.DB.prepare("SELECT 1 AS x FROM app_state WHERE key = ? AND value > datetime('now', ?)")
+    .bind(KUNCI_AUTO_CEK_SALDO, `-${Number(jedaMenit)} minutes`)
+    .first();
+  if (baruSaja) return { dijalankan: false, alasan: "belum waktunya (baru dicek)" };
+  // Catat waktu SEBELUM mengirim, supaya kalau gagal/lambat cron berikutnya tidak menghujani Jabber.
+  await env.DB.prepare(
+    `INSERT INTO app_state (key, value, updated_at) VALUES (?, datetime('now'), datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = datetime('now'), updated_at = datetime('now')`
+  )
+    .bind(KUNCI_AUTO_CEK_SALDO)
+    .run();
+
+  const hasil = await cek(env, "portalpulsa", { senyap: true });
+  const keluaran = { dijalankan: true, ok: !!hasil.ok, dikonfirmasi: false };
+
+  if (hasil.ok && hasil.deposit?.dikonfirmasi) {
+    keluaran.dikonfirmasi = true;
+    keluaran.pesan = hasil.deposit.pesan;
+  }
+  // Pesan susulan yang tertangkap sebagai "balasan": proses juga (aman diulang —
+  // selesaikanDepositSusulan hanya menerima deposit yang masih pending).
+  const susulan = parseDepositSusulan(String(hasil.raw_reply || ""));
+  if (susulan) {
+    const r = await selesaikanDepositSusulan(env, {
+      nominal: susulan.nominal,
+      status: susulan.status,
+      saldoAkhir: susulan.saldoAkhir,
+      alasan: susulan.alasan,
+      rawText: hasil.raw_reply,
+    });
+    if (r && r.status === "sukses") {
+      keluaran.dikonfirmasi = true;
+      keluaran.pesan = `Deposit #${r.depositId} SUKSES — mutasi dompet tercatat otomatis.`;
+    }
+  }
+  return keluaran;
 }
 
 /**
@@ -1584,6 +1672,7 @@ export async function rekonsiliasiDepositDariSaldo(env, { wallet, saldoAsli }) {
 export const MIN_DEPOSIT_OTOMATIS = 50000;
 const KATEGORI_DEPOSIT_OKECONNECT = "Deposit OkeConnect";
 const KUNCI_DOMPET_DEPOSIT_OKECONNECT = "deposit_wallet_okeconnect";
+const KUNCI_AUTO_CEK_SALDO = "portalpulsa_auto_cek_saldo_at"; // throttle cek saldo otomatis deposit pending
 
 /** Dompet sumber default deposit OkeConnect: yang dipilih di Pengaturan, kalau
  * belum dipilih jatuh ke dompet (bukan distributor) yang namanya mengandung "BRI". */

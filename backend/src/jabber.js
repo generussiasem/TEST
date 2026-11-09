@@ -44,7 +44,7 @@ function decodeXmlEntities(t) {
 // (seenAll = Set milik satu sesi login, supaya buffer yg terus membesar tidak
 // meneruskan pesan yg sama berulang). Tidak menulis log (beda dgn
 // extractAllReplies) supaya console tidak dobel-noisy.
-async function feedNewReplies(buffer, targetBareJid, seenAll) {
+async function feedNewReplies(buffer, targetBareJid, seenAll, skipFeedIf = null) {
   if (!replyHook) return;
   const regex = /<message\b([^>]*)>([\s\S]*?)<\/message>/g;
   let m;
@@ -61,6 +61,9 @@ async function feedNewReplies(buffer, targetBareJid, seenAll) {
     const key = (isError ? "E:" : "M:") + text;
     if (seenAll.has(key)) continue;
     seenAll.add(key);
+    // skipFeedIf: sesi senyap (cek saldo otomatis) tidak meneruskan balasan yang
+    // cocok saringan ini ke Telegram; balasan LAIN yang kebetulan lewat tetap diteruskan.
+    if (skipFeedIf && skipFeedIf(text)) continue;
     try {
       await replyHook({ from: fromBare, text, isError });
     } catch (err) {
@@ -210,7 +213,7 @@ async function readUntil(reader, predicate, timeoutMs = 15000) {
 // (lihat FINAL_REPLY_KEYWORDS) — kalau tidak diberi jalur ini, fungsi akan
 // menunggu penuh sampai timeout tiap kali dipanggil walau balasan yang benar
 // sudah masuk dari detik pertama, karena tidak pernah cocok kata kunci apapun.
-async function waitForFinalReply(reader, targetBareJid, expectedRefToken, expectedPrefix, timeoutMs = 25000, firstReplyIsFinal = false, acceptAnyFromTarget = false) {
+async function waitForFinalReply(reader, targetBareJid, expectedRefToken, expectedPrefix, timeoutMs = 25000, firstReplyIsFinal = false, acceptAnyFromTarget = false, finalReplyPattern = null, skipFeedIf = null) {
   let buffer = "";
   const decoder = new TextDecoder();
   const deadline = Date.now() + timeoutMs;
@@ -227,7 +230,7 @@ async function waitForFinalReply(reader, targetBareJid, expectedRefToken, expect
     if (done) break;
     if (value === undefined) continue;
     buffer += decoder.decode(value, { stream: true });
-    await feedNewReplies(buffer, targetBareJid, feedSeen);
+    await feedNewReplies(buffer, targetBareJid, feedSeen, skipFeedIf);
     const replies = extractAllReplies(buffer, targetBareJid, expectedRefToken, expectedPrefix, acceptAnyFromTarget);
     for (const r of replies) {
       if (!seenTexts.has(r.text)) {
@@ -237,7 +240,7 @@ async function waitForFinalReply(reader, targetBareJid, expectedRefToken, expect
     }
     if (replies.length) {
       latest = replies[replies.length - 1];
-      if (latest.isError || firstReplyIsFinal || FINAL_REPLY_KEYWORDS.test(latest.text)) {
+      if (latest.isError || firstReplyIsFinal || FINAL_REPLY_KEYWORDS.test(latest.text) || (finalReplyPattern && finalReplyPattern.test(latest.text))) {
         return { ...latest, history: historySeen }; // ini sudah hasil final (atau bounce/error), berhenti sekarang
       }
       // else: baru ack "akan diproses" — lanjut dengar, mungkin ada balasan susulan
@@ -434,6 +437,14 @@ export async function listenJabberMessages({ jid, password, to, timeoutMs = 2000
  * @param {boolean} [opts.collectHistory] - kalau true, kembalikan
  *   { text, history } alih-alih string biasa — `history` berisi SEMUA balasan
  *   yang masuk selama sesi ini (termasuk ack tahap-1 sebelum balasan final),
+ * @param {Function} [opts.skipFeedIf] - fungsi (teks) => boolean; balasan yang membuatnya true
+ *   TIDAK diteruskan ke Telegram (hook feed). Dipakai cek saldo otomatis supaya admin tidak
+ *   kebanjiran pesan tiap beberapa menit (dan PIN di ack "'S <pin>' Telah kami terima" tidak
+ *   terkirim berulang).
+ * @param {RegExp} [opts.finalReplyPattern] - balasan yang cocok pola ini dianggap FINAL
+ *   (berhenti menunggu) walau tidak mengandung kata kunci final umum. Dipakai cek
+ *   saldo portalpulsa: balasan "Sisa saldo Anda saat ini: Rp ..." tidak memuat kata
+ *   sukses/gagal, jadi tanpa ini sesi menunggu penuh 25 detik padahal balasan sudah masuk.
  *   digabung urut. Dipakai untuk deposit portalpulsa, supaya ack "Telah kami
  *   terima..." ikut tersimpan, bukan cuma balasan instruksi transfer di
  *   tahap 2 (lihat kirimDepositPortalpulsa di ppob.js).
@@ -448,6 +459,8 @@ export async function sendJabberCommand({
   refSeparator = ".",
   acceptAnyFromTarget = false,
   collectHistory = false,
+  finalReplyPattern = null,
+  skipFeedIf = null,
 }) {
   const session = await loginJabberSession(jid, password);
   const { reader, send, cleanup } = session;
@@ -475,7 +488,7 @@ export async function sendJabberCommand({
     // OkeConnect selalu mengulang persis "KODE.NOMOR" di awal balasannya.
     const bodySegments = body.split(refSeparator);
     const expectedPrefix = bodySegments.length >= 2 ? `${bodySegments[0]}${refSeparator}${bodySegments[1]}` : null;
-    const parsed = await waitForFinalReply(reader, targetBareJid, expectedRefToken, expectedPrefix, 25000, firstReplyIsFinal, acceptAnyFromTarget);
+    const parsed = await waitForFinalReply(reader, targetBareJid, expectedRefToken, expectedPrefix, 25000, firstReplyIsFinal, acceptAnyFromTarget, finalReplyPattern, skipFeedIf);
     if (parsed.isError) {
       throw new Error(parsed.text);
     }
