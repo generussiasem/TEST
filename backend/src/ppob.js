@@ -3,6 +3,92 @@ import { getOpenShiftId } from "./debt.js";
 import { rencanaPakaiTitipan, stmtsPakaiTitipan } from "./debt.js";
 
 // ---------------------------------------------------------------------------
+// TOKEN PLN PORTALPULSA — formatnya BEDA dari produk lain:
+//   kode<spasi>idpelanggan<spasi>NoHP<spasi>PIN     mis. "PLN100 04341314134 085313000066 ****"
+// (produk portalpulsa lain: "kode<spasi>tujuan<spasi>PIN"). Produk dikenali dari
+// AWALAN kode (default "PLN"; diatur admin di Pengaturan karena bisa berubah).
+// No. HP: diketik di kolom tujuan ("IDPEL NOHP") atau, kalau hanya ID pelanggan
+// yang diketik, memakai No. HP bawaan dari Pengaturan (nomor toko).
+const KUNCI_PLN_AWALAN = "portalpulsa_pln_prefixes";
+const KUNCI_PLN_HP_BAWAAN = "portalpulsa_pln_default_hp";
+export const AWALAN_TOKEN_PLN_DEFAULT = ["PLN"];
+
+export function normalisasiPengaturanTokenPln({ prefixes, defaultHp } = {}) {
+  let awalan = AWALAN_TOKEN_PLN_DEFAULT;
+  if (prefixes !== undefined && prefixes !== null) {
+    const arr = Array.isArray(prefixes) ? prefixes : String(prefixes).split(/[,\s]+/);
+    awalan = [...new Set(arr.map((x) => String(x).trim().toUpperCase()).filter(Boolean))];
+    for (const a of awalan) {
+      if (!/^[A-Z0-9_.-]{1,20}$/.test(a)) throw new Error(`Awalan kode "${a}" tidak valid (huruf/angka, maksimal 20 karakter).`);
+    }
+  }
+  let hp = "";
+  if (defaultHp !== undefined && defaultHp !== null && String(defaultHp).trim() !== "") {
+    hp = String(defaultHp).replace(/[\s-]/g, "").replace(/^\+/, "");
+    if (!/^\d{8,15}$/.test(hp)) throw new Error("No. HP bawaan harus berupa angka 8–15 digit.");
+  }
+  return { prefixes: awalan, defaultHp: hp };
+}
+
+export async function getPengaturanTokenPln(env) {
+  const hasil = { prefixes: [...AWALAN_TOKEN_PLN_DEFAULT], defaultHp: "" };
+  try {
+    const { results } = await env.DB.prepare("SELECT key, value FROM app_state WHERE key IN (?, ?)")
+      .bind(KUNCI_PLN_AWALAN, KUNCI_PLN_HP_BAWAAN)
+      .all();
+    for (const r of results) {
+      if (r.key === KUNCI_PLN_AWALAN) {
+        try {
+          const arr = JSON.parse(r.value);
+          if (Array.isArray(arr)) hasil.prefixes = arr.map((x) => String(x).trim().toUpperCase()).filter(Boolean);
+        } catch (_) {}
+      }
+      if (r.key === KUNCI_PLN_HP_BAWAAN && /^\d{8,15}$/.test(String(r.value || ""))) hasil.defaultHp = String(r.value);
+    }
+  } catch (err) {
+    console.error("Gagal baca pengaturan token PLN portalpulsa:", err.message);
+  }
+  return hasil;
+}
+
+export async function setPengaturanTokenPln(env, input) {
+  const p = normalisasiPengaturanTokenPln(input);
+  const upsert = `INSERT INTO app_state (key, value, updated_at) VALUES (?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`;
+  await env.DB.batch([
+    env.DB.prepare(upsert).bind(KUNCI_PLN_AWALAN, JSON.stringify(p.prefixes)),
+    p.defaultHp
+      ? env.DB.prepare(upsert).bind(KUNCI_PLN_HP_BAWAAN, p.defaultHp)
+      : env.DB.prepare("DELETE FROM app_state WHERE key = ?").bind(KUNCI_PLN_HP_BAWAAN),
+  ]);
+  return p;
+}
+
+/** Apakah kode produk portalpulsa ini token PLN (berawalan salah satu awalan di pengaturan)? */
+export function isTokenPlnPortalpulsa(productCode, pengaturan) {
+  const kode = String(productCode || "").trim().toUpperCase();
+  return !!kode && pengaturan.prefixes.some((a) => kode.startsWith(a));
+}
+
+/** Pisahkan tujuan menjadi { idpel, hp }. Tujuan: "IDPEL" (HP dari bawaan) atau
+ * "IDPEL NOHP". Melempar error yang jelas SEBELUM ada yang dikirim ke provider. */
+export function tentukanTargetTokenPln(target, pengaturan) {
+  const bagian = String(target ?? "").trim().split(/\s+/).filter(Boolean);
+  if (bagian.length === 0 || bagian.length > 2) {
+    throw new Error('Token PLN portalpulsa: isi tujuan dengan ID pelanggan saja, atau "IDPEL NOHP" (dipisah spasi).');
+  }
+  const idpel = bagian[0];
+  if (!/^\d{5,20}$/.test(idpel)) throw new Error("Token PLN portalpulsa: ID pelanggan harus berupa angka (5–20 digit).");
+  const hpMentah = bagian[1] ?? pengaturan.defaultHp;
+  if (!hpMentah) {
+    throw new Error('Token PLN portalpulsa butuh No. HP: ketik "IDPEL NOHP" di kolom tujuan, atau isi No. HP bawaan di Pengaturan.');
+  }
+  const hp = String(hpMentah).replace(/^\+/, "");
+  if (!/^\d{8,15}$/.test(hp)) throw new Error("Token PLN portalpulsa: No. HP harus berupa angka 8–15 digit.");
+  return { idpel, hp };
+}
+
+// ---------------------------------------------------------------------------
 // HARGA JUAL STANDAR = HPP × (1 + persen laba), dibulatkan KE ATAS ke kelipatan
 // pembulatan (default Rp1.000). Persen dihitung dari HPP (markup), bukan dari
 // harga jual. Persen, pembulatan, dan daftar kategori yang dikecualikan diatur
@@ -200,10 +286,13 @@ export function getProviderConfig(env, provider) {
       buildPrabayarBody(productCode, target, pin, _refId) {
         return `${productCode} ${target} ${pin}`;
       },
-      // BELUM didukung: format Token PLN portalpulsa butuh field idpelanggan
-      // terpisah ("kode idpelanggan NoHP PIN") yang tidak ada tempatnya di
-      // alur order saat ini (cuma productCode + target). Sengaja throw
-      // eksplisit daripada diam-diam mengirim perintah yang salah format.
+      // Token PLN: "kode idpelanggan NoHP PIN" (lihat tentukanTargetTokenPln).
+      buildTokenPlnBody(productCode, idpel, hp, pin) {
+        return `${productCode} ${idpel} ${hp} ${pin}`;
+      },
+      // Pascabayar portalpulsa BELUM didukung (formatnya belum diketahui). Sengaja
+      // throw eksplisit daripada diam-diam mengirim perintah yang salah format.
+      // (Token PLN PRABAYAR sudah didukung lewat buildTokenPlnBody di atas.)
       buildPascaCekBody(productCode, target, pin, refId) {
         throw new Error("Cek tagihan pascabayar belum didukung untuk provider portalpulsa (Token PLN butuh field idpelanggan terpisah).");
       },
@@ -823,9 +912,21 @@ export async function placePpobOrder(env, { productCode, target, paidMethod = "t
   // pascabayar (listrik, PDAM, BPJS) pakai R#{ID}A (suffix "A") — CATATAN:
   // asumsi berdasarkan pola kategori, BELUM dikonfirmasi CS OkeConnect,
   // wajib dites dulu dengan transaksi kecil.
-  const body = isPostpaid(product)
-    ? cfg.buildPascaBayarBody(productCode, target, cfg.pin, refId)
-    : cfg.buildPrabayarBody(productCode, target, cfg.pin, refId);
+  // Token PLN portalpulsa punya format sendiri ("kode idpel NoHP PIN"): dicek &
+  // dirakit SEBELUM menyimpan/mengirim apa pun, jadi kalau No. HP belum ada,
+  // errornya jelas dan tidak ada perintah salah format yang terkirim.
+  let body;
+  let pln;
+  let targetTersimpan = target;
+  if (isPostpaid(product)) {
+    body = cfg.buildPascaBayarBody(productCode, target, cfg.pin, refId);
+  } else if (cfg.provider === "portalpulsa" && isTokenPlnPortalpulsa(productCode, (pln = await getPengaturanTokenPln(env)))) {
+    const { idpel, hp } = tentukanTargetTokenPln(target, pln);
+    body = cfg.buildTokenPlnBody(productCode, idpel, hp, cfg.pin);
+    targetTersimpan = idpel; // struk/laporan menampilkan ID pelanggan sebagai tujuan
+  } else {
+    body = cfg.buildPrabayarBody(productCode, target, cfg.pin, refId);
+  }
 
   // telegramChatId diisi kalau order ini dibuat dari Mini App (chat karyawan
   // sendiri) — supaya kalau balasan provider telat dan baru selesai lewat
@@ -835,7 +936,7 @@ export async function placePpobOrder(env, { productCode, target, paidMethod = "t
     `INSERT INTO ppob_orders (ref_id, telegram_chat_id, product_code, target, cost_price, sell_price, wallet_id, status, paid_method, contact_id, batch_id, provider, request_body)
      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`
   )
-    .bind(refId, String(telegramChatId || ""), productCode, target, product.cost_price, product.sell_price, wallet ? wallet.id : null, paidMethod, contactId, batchId, cfg.provider, body)
+    .bind(refId, String(telegramChatId || ""), productCode, targetTersimpan, product.cost_price, product.sell_price, wallet ? wallet.id : null, paidMethod, contactId, batchId, cfg.provider, body)
     .run();
 
   let status = "pending";

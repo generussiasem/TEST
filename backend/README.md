@@ -281,3 +281,7 @@ Admin mengatur di **Pengaturan → Harga Jual Standar**: **persentase laba dari 
 - Harga yang diketik kasir di **kotak konfirmasi transaksi** hanya berlaku untuk transaksi itu (laporan & struk); harga produk tidak berubah. Produk yang tidak ikut persentase tetap menyimpan harga terakhir sebagai isian awal.
 - Penerapan pertama bisa menulis ribuan baris; kalau kena batas Worker, sisanya dilanjutkan sinkron berikutnya.
 - Migrasi wajib sebelum deploy: `migrations/2026-11-07-add-products-manually-disabled.sql`. (Kolom `products.price_locked` dari versi sebelumnya, kalau sudah terlanjur dibuat, tidak dipakai lagi dan boleh dibiarkan.)
+
+## Token PLN portalpulsa
+
+Formatnya beda dari produk portalpulsa lain: `kode idpelanggan NoHP PIN` (mis. `PLN100 04341314134 085313000066 <PIN>`). Produk dikenali dari **awalan kode** (default `PLN`, diatur admin di **Pengaturan → Token PLN Portalpulsa**). Kasir cukup mengetik ID pelanggan — **No. HP bawaan** (nomor toko, juga diatur di Pengaturan) dipakai otomatis — atau `IDPEL NOHP` (dipisah spasi) untuk nomor lain. Kalau No. HP tidak ada sama sekali, order ditolak dengan pesan jelas sebelum apa pun dikirim ke provider. Struk dan laporan menampilkan ID pelanggan sebagai tujuan. Tidak ada migrasi baru (pengaturan disimpan di `app_state`).

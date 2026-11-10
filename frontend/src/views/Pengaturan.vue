@@ -6,6 +6,26 @@ import { isAdmin } from "../store.js";
 const settings = ref({ store_name: "", address: "", logo_url: "", cetak_struk_url: "" });
 // Harga jual standar = HPP + persentase laba (dibulatkan ke atas). Hanya admin.
 // Alur simpan: pratinjau (berapa produk berubah) -> konfirmasi -> simpan & terapkan.
+// Token PLN portalpulsa: awalan kode produk + No. HP bawaan. Hanya admin.
+const plnForm = ref({ prefixes: "PLN", defaultHp: "" });
+const plnMsg = ref("");
+async function loadPln() {
+  try {
+    const r = await api.get("/api/token-pln-info");
+    plnForm.value = { prefixes: (r.prefixes || []).join(", "), defaultHp: r.defaultHp || "" };
+  } catch (_) {}
+}
+async function simpanPln() {
+  plnMsg.value = "";
+  error.value = "";
+  try {
+    const r = await api.put("/api/pengaturan-token-pln", { prefixes: plnForm.value.prefixes, defaultHp: plnForm.value.defaultHp });
+    plnForm.value = { prefixes: r.prefixes.join(", "), defaultHp: r.defaultHp || "" };
+    plnMsg.value = "Tersimpan.";
+  } catch (err) {
+    error.value = err.message;
+  }
+}
 const hargaForm = ref({ percent: "", rounding: 1000, kecuali: "" });
 const hargaMsg = ref("");
 const hargaPratinjau = ref(null); // { total, jumlah, naik, turun, contoh, body } menunggu konfirmasi
@@ -225,7 +245,10 @@ onMounted(() => {
   load();
   loadDepositHistory();
   loadDepositOkeWallet();
-  if (isAdmin()) loadHarga();
+  if (isAdmin()) {
+    loadHarga();
+    loadPln();
+  }
 });
 </script>
 
@@ -329,6 +352,26 @@ onMounted(() => {
           <button class="btn ghost" type="button" :disabled="hargaBusy" style="margin-left: 8px" @click="konfirmasiHarga(false)">Simpan saja (terapkan saat sinkron)</button>
           <button class="btn ghost" type="button" :disabled="hargaBusy" style="margin-left: 8px" @click="hargaPratinjau = null">Batal</button>
         </div>
+      </div>
+
+      <div v-if="isAdmin()" class="card">
+        <h3 style="margin-bottom: 12px">Token PLN Portalpulsa</h3>
+        <p class="muted" style="font-size: 13px; margin-bottom: 12px">
+          Perintah token PLN portalpulsa formatnya beda: <b>kode idpelanggan NoHP PIN</b>. Produk dikenali dari awalan kodenya.
+          Kasir cukup mengetik ID pelanggan (No. HP bawaan dipakai otomatis), atau <b>IDPEL NOHP</b> untuk nomor lain.
+        </p>
+        <div v-if="plnMsg" class="ok-box">{{ plnMsg }}</div>
+        <form @submit.prevent="simpanPln">
+          <div class="field">
+            <label>Awalan kode produk token PLN (pisahkan dengan koma)</label>
+            <input v-model="plnForm.prefixes" placeholder="PLN" />
+          </div>
+          <div class="field">
+            <label>No. HP bawaan (nomor toko)</label>
+            <input v-model="plnForm.defaultHp" inputmode="numeric" placeholder="mis. 085313000066 (kosong = wajib diketik tiap order)" />
+          </div>
+          <button class="btn" type="submit">Simpan</button>
+        </form>
       </div>
 
       <div class="card">

@@ -555,7 +555,24 @@ function bagikanWA() {
   window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
 }
 
-onMounted(load);
+// Token PLN portalpulsa: format perintahnya beda ("kode idpel NoHP PIN"), jadi form
+// menampilkan petunjuk No. HP kalau kode yang diketik berawalan salah satu awalan
+// yang diatur admin (Pengaturan).
+const tokenPlnInfo = ref({ prefixes: [], defaultHp: "" });
+const tokenPlnAktif = computed(() => {
+  if (formMode.value !== "portalpulsa") return false;
+  const kode = String(formProductCode.value || "").trim().toUpperCase();
+  return !!kode && tokenPlnInfo.value.prefixes.some((a) => kode.startsWith(a));
+});
+async function loadTokenPlnInfo() {
+  try {
+    tokenPlnInfo.value = await api.get("/api/token-pln-info");
+  } catch (_) {}
+}
+onMounted(() => {
+  loadTokenPlnInfo();
+  load();
+});
 </script>
 
 <template>
@@ -626,7 +643,12 @@ onMounted(load);
           <div class="muted" style="font-size: 12px; margin: -8px 0 14px">Kode portalpulsa tidak ikut katalog — diketik manual, modal & harga jual diisi nanti saat konfirmasi.</div>
         </template>
 
-        <div class="field"><label>Nomor HP / ID Pelanggan tujuan</label><input v-model="formTarget" placeholder="mis. 081234567890" /></div>
+        <div class="field"><label>Nomor HP / ID Pelanggan tujuan</label><input v-model="formTarget" :placeholder="tokenPlnAktif ? 'ID pelanggan, atau ID pelanggan + spasi + No. HP' : 'mis. 081234567890'" /></div>
+        <div v-if="tokenPlnAktif" class="muted" style="font-size: 12px; margin: -8px 0 14px">
+          Token PLN portalpulsa butuh ID pelanggan <b>dan</b> No. HP.
+          <template v-if="tokenPlnInfo.defaultHp">Cukup ketik ID pelanggan — No. HP bawaan <b>{{ tokenPlnInfo.defaultHp }}</b> dipakai otomatis; untuk nomor lain ketik <b>IDPEL NOHP</b>.</template>
+          <template v-else>Ketik <b>IDPEL NOHP</b> (dipisah spasi), atau minta admin mengisi No. HP bawaan di Pengaturan.</template>
+        </div>
         <div class="field">
           <label>Metode Bayar</label>
           <div style="display: flex; gap: 8px">

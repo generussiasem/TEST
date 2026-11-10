@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { sendJabberCommand, listenJabberMessages, setJabberReplyHook } from "./jabber.js";
 import { sendTelegramMessage } from "./telegram.js";
-import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, extractTokenCode, syncPpobPrices, getPengaturanHarga, setPengaturanHarga, normalisasiPengaturanHarga, pratinjauHargaStandar, terapkanHargaStandarSemua, tentukanHargaEditManual, getProviderConfig, finalizePpobOrder, checkDistributorBalance, cekSaldoOtomatisDepositPending, batalkanDepositOtomatis, getDompetDepositOkeconnect, setDompetDepositOkeconnect, parseTagihanListrikDetail, parsePortalpulsaDetail, assertCfgComplete, kirimDepositPortalpulsa, parseDepositSusulan, selesaikanDepositSusulan, tandaiDepositKadaluwarsa, formatBarisDeposit } from "./ppob.js";
+import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, extractTokenCode, syncPpobPrices, getPengaturanTokenPln, setPengaturanTokenPln, getPengaturanHarga, setPengaturanHarga, normalisasiPengaturanHarga, pratinjauHargaStandar, terapkanHargaStandarSemua, tentukanHargaEditManual, getProviderConfig, finalizePpobOrder, checkDistributorBalance, cekSaldoOtomatisDepositPending, batalkanDepositOtomatis, getDompetDepositOkeconnect, setDompetDepositOkeconnect, parseTagihanListrikDetail, parsePortalpulsaDetail, assertCfgComplete, kirimDepositPortalpulsa, parseDepositSusulan, selesaikanDepositSusulan, tandaiDepositKadaluwarsa, formatBarisDeposit } from "./ppob.js";
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
 import { getEmployeeByChatId, handleLinkCommand, sendMainMenu, handleAdminCallback, handleAdminSessionMessage } from "./bot-admin.js";
 import { hitungAsetBersih, catatSnapshotModalHarian } from "./modal.js";
@@ -435,6 +435,19 @@ app.put("/api/deposit-okeconnect-wallet", requireAdmin, async (c) => {
   try {
     await setDompetDepositOkeconnect(c.env, walletId);
     return c.json({ ok: true });
+  } catch (err) {
+    return c.json({ ok: false, error: err.message }, 400);
+  }
+});
+
+// Token PLN portalpulsa: awalan kode produk + No. HP bawaan. Dibaca semua pengguna
+// (hint di form order), diubah hanya admin.
+app.get("/api/token-pln-info", async (c) => {
+  return c.json(await getPengaturanTokenPln(c.env));
+});
+app.put("/api/pengaturan-token-pln", requireAdmin, async (c) => {
+  try {
+    return c.json({ ok: true, ...(await setPengaturanTokenPln(c.env, await c.req.json())) });
   } catch (err) {
     return c.json({ ok: false, error: err.message }, 400);
   }
