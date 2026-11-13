@@ -3,6 +3,28 @@ import { getOpenShiftId } from "./debt.js";
 import { rencanaPakaiTitipan, stmtsPakaiTitipan } from "./debt.js";
 
 // ---------------------------------------------------------------------------
+// KATALOG PAKET (situs luar yang ditanam lewat iframe di menu "Katalog Paket").
+// Alamatnya diatur admin; hanya http/https yang diterima (menolak javascript:,
+// data:, dsb. karena nilainya dipakai sebagai src iframe & href tautan).
+export const KATALOG_PAKET_URL_DEFAULT = "https://kodebayar.web.id/";
+
+/** Kembalikan URL yang sudah dinormalisasi, atau null kalau kosong (= pakai default). Melempar error kalau tidak valid. */
+export function normalisasiUrlKatalog(input) {
+  const teks = String(input ?? "").trim();
+  if (!teks) return null;
+  let u;
+  try {
+    u = new URL(teks);
+  } catch {
+    throw new Error('Alamat tidak valid. Tulis lengkap dengan "https://", mis. https://kodebayar.web.id/');
+  }
+  if (u.protocol !== "https:" && u.protocol !== "http:") {
+    throw new Error("Alamat harus diawali http:// atau https://.");
+  }
+  return u.href;
+}
+
+// ---------------------------------------------------------------------------
 // TOKEN PLN PORTALPULSA — formatnya BEDA dari produk lain:
 //   kode<spasi>idpelanggan<spasi>NoHP<spasi>PIN     mis. "PLN100 04341314134 085313000066 ****"
 // (produk portalpulsa lain: "kode<spasi>tujuan<spasi>PIN"). Produk dikenali dari

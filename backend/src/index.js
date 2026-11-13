@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { sendJabberCommand, listenJabberMessages, setJabberReplyHook } from "./jabber.js";
 import { sendTelegramMessage } from "./telegram.js";
-import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, extractTokenCode, syncPpobPrices, getPengaturanTokenPln, setPengaturanTokenPln, getPengaturanHarga, setPengaturanHarga, normalisasiPengaturanHarga, pratinjauHargaStandar, terapkanHargaStandarSemua, tentukanHargaEditManual, getProviderConfig, finalizePpobOrder, checkDistributorBalance, cekSaldoOtomatisDepositPending, batalkanDepositOtomatis, getDompetDepositOkeconnect, setDompetDepositOkeconnect, parseTagihanListrikDetail, parsePortalpulsaDetail, assertCfgComplete, kirimDepositPortalpulsa, parseDepositSusulan, selesaikanDepositSusulan, tandaiDepositKadaluwarsa, formatBarisDeposit } from "./ppob.js";
+import { placePpobOrder, recordPpobSale, cekTagihan, detectPpobStatus, cocokkanBalasanCek, extractTokenCode, syncPpobPrices, getPengaturanTokenPln, setPengaturanTokenPln, getPengaturanHarga, setPengaturanHarga, normalisasiPengaturanHarga, normalisasiUrlKatalog, KATALOG_PAKET_URL_DEFAULT, pratinjauHargaStandar, terapkanHargaStandarSemua, tentukanHargaEditManual, getProviderConfig, finalizePpobOrder, checkDistributorBalance, cekSaldoOtomatisDepositPending, batalkanDepositOtomatis, getDompetDepositOkeconnect, setDompetDepositOkeconnect, parseTagihanListrikDetail, parsePortalpulsaDetail, assertCfgComplete, kirimDepositPortalpulsa, parseDepositSusulan, selesaikanDepositSusulan, tandaiDepositKadaluwarsa, formatBarisDeposit } from "./ppob.js";
 import { hashPassword, verifyPassword, createToken, requireAuth, requireAdmin } from "./auth.js";
 import { getEmployeeByChatId, handleLinkCommand, sendMainMenu, handleAdminCallback, handleAdminSessionMessage } from "./bot-admin.js";
 import { hitungAsetBersih, catatSnapshotModalHarian } from "./modal.js";
@@ -435,6 +435,32 @@ app.put("/api/deposit-okeconnect-wallet", requireAdmin, async (c) => {
   try {
     await setDompetDepositOkeconnect(c.env, walletId);
     return c.json({ ok: true });
+  } catch (err) {
+    return c.json({ ok: false, error: err.message }, 400);
+  }
+});
+
+// Alamat situs yang ditanam di menu "Katalog Paket". Dibaca semua pengguna, diubah
+// hanya admin. Kosong = alamat bawaan.
+app.get("/api/katalog-paket-url", async (c) => {
+  const row = await c.env.DB.prepare("SELECT value FROM app_state WHERE key = 'katalog_paket_url'").first();
+  return c.json({ url: row?.value || KATALOG_PAKET_URL_DEFAULT, bawaan: !row?.value, urlBawaan: KATALOG_PAKET_URL_DEFAULT });
+});
+app.put("/api/katalog-paket-url", requireAdmin, async (c) => {
+  try {
+    const { url } = await c.req.json();
+    const baru = normalisasiUrlKatalog(url);
+    if (baru === null) {
+      await c.env.DB.prepare("DELETE FROM app_state WHERE key = 'katalog_paket_url'").run();
+    } else {
+      await c.env.DB.prepare(
+        `INSERT INTO app_state (key, value, updated_at) VALUES ('katalog_paket_url', ?, datetime('now'))
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`
+      )
+        .bind(baru)
+        .run();
+    }
+    return c.json({ ok: true, url: baru || KATALOG_PAKET_URL_DEFAULT, bawaan: baru === null });
   } catch (err) {
     return c.json({ ok: false, error: err.message }, 400);
   }

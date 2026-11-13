@@ -34,6 +34,7 @@ const navItems = computed(() => {
     { to: "/", label: "Ringkasan", exact: true },
     { to: "/kasir", label: "Kasir" },
     { to: "/katalog", label: "Katalog PPOB" },
+    { to: "/katalog-paket", label: "Katalog Paket" },
     { to: "/ppob", label: "Pulsa & PPOB" },
     { to: "/tagihan", label: "Cek & Bayar Tagihan" },
     { to: "/cetak-struk-eksternal", label: "Cetak Struk Tagihan" },
@@ -49,6 +50,7 @@ const navItems = computed(() => {
   if (isAdmin()) {
     items.push({ to: "/karyawan", label: "Karyawan" });
     items.push({ to: "/pengaturan", label: "Pengaturan Toko" });
+    items.push({ to: "/deposit-portalpulsa", label: "Deposit Portalpulsa" });
   }
   return items;
 });

@@ -6,6 +6,28 @@ import { isAdmin } from "../store.js";
 const settings = ref({ store_name: "", address: "", logo_url: "", cetak_struk_url: "" });
 // Harga jual standar = HPP + persentase laba (dibulatkan ke atas). Hanya admin.
 // Alur simpan: pratinjau (berapa produk berubah) -> konfirmasi -> simpan & terapkan.
+// Alamat situs yang ditanam di menu "Katalog Paket". Hanya admin yang mengubah.
+const katalogUrl = ref("");
+const katalogBawaan = ref("");
+const katalogMsg = ref("");
+async function loadKatalogUrl() {
+  try {
+    const r = await api.get("/api/katalog-paket-url");
+    katalogUrl.value = r.bawaan ? "" : r.url;
+    katalogBawaan.value = r.urlBawaan;
+  } catch (_) {}
+}
+async function simpanKatalogUrl() {
+  katalogMsg.value = "";
+  error.value = "";
+  try {
+    const r = await api.put("/api/katalog-paket-url", { url: katalogUrl.value });
+    katalogUrl.value = r.bawaan ? "" : r.url;
+    katalogMsg.value = r.bawaan ? "Memakai alamat bawaan." : "Tersimpan.";
+  } catch (err) {
+    error.value = err.message;
+  }
+}
 // Token PLN portalpulsa: awalan kode produk + No. HP bawaan. Hanya admin.
 const plnForm = ref({ prefixes: "PLN", defaultHp: "" });
 const plnMsg = ref("");
@@ -122,21 +144,9 @@ const editingWallet = ref(null);
 const modal = ref(null);
 const modalAwalForm = ref(0);
 const modalMsg = ref("");
-const depositForm = ref({ bank: "", nominal: null, walletId: "" });
-const depositMsg = ref("");
-const depositError = ref("");
-const depositLoading = ref(false);
-const depositHistory = ref([]);
 
 function rupiah(n) {
   return "Rp" + Number(n || 0).toLocaleString("id-ID");
-}
-
-// SUKSES -> hijau, PENDING -> kuning, EXPIRED/GAGAL -> merah (kelas .badge di style.css)
-function badgeDeposit(label) {
-  if (label === "SUKSES") return "sukses";
-  if (label === "PENDING") return "pending";
-  return "gagal";
 }
 
 async function load() {
@@ -156,38 +166,6 @@ async function simpanModalAwal() {
     await load();
   } catch (err) {
     error.value = err.message;
-  }
-}
-
-async function loadDepositHistory() {
-  try {
-    const res = await api.get("/api/admin/portalpulsa/deposits");
-    depositHistory.value = res.deposits;
-  } catch {
-    // diam-diam gagal — bukan bagian kritis halaman
-  }
-}
-
-async function kirimDepositPortalpulsa() {
-  depositError.value = "";
-  depositMsg.value = "";
-  if (!depositForm.value.bank || !depositForm.value.nominal) {
-    depositError.value = "Bank dan nominal wajib diisi.";
-    return;
-  }
-  if (!depositForm.value.walletId) {
-    depositError.value = "Pilih dulu dompet sumber uang transfer (mis. Kas/Bank).";
-    return;
-  }
-  depositLoading.value = true;
-  try {
-    const res = await api.post("/api/admin/portalpulsa/deposit", depositForm.value);
-    depositMsg.value = res.reply;
-    await loadDepositHistory();
-  } catch (err) {
-    depositError.value = err.message;
-  } finally {
-    depositLoading.value = false;
   }
 }
 
@@ -243,11 +221,11 @@ async function hapusWallet(w) {
 
 onMounted(() => {
   load();
-  loadDepositHistory();
   loadDepositOkeWallet();
   if (isAdmin()) {
     loadHarga();
     loadPln();
+    loadKatalogUrl();
   }
 });
 </script>
@@ -257,7 +235,7 @@ onMounted(() => {
     <div class="page-head">
       <div>
         <h1>Pengaturan Toko</h1>
-        <p>Identitas toko dan daftar akun/dompet kas</p>
+        <p>Identitas toko dan daftar akun/dompet kas · Deposit saldo portalpulsa ada di menu <RouterLink to="/deposit-portalpulsa">Deposit Portalpulsa</RouterLink></p>
       </div>
     </div>
 
@@ -355,6 +333,22 @@ onMounted(() => {
       </div>
 
       <div v-if="isAdmin()" class="card">
+        <h3 style="margin-bottom: 12px">Katalog Paket (situs luar)</h3>
+        <p class="muted" style="font-size: 13px; margin-bottom: 12px">
+          Alamat situs yang ditampilkan di menu <b>Katalog Paket</b>. Situs itu milik pihak lain, jadi kalau memblokir tampilan tertanam,
+          karyawan memakai tombol "Buka di tab baru". Kosongkan untuk memakai alamat bawaan.
+        </p>
+        <div v-if="katalogMsg" class="ok-box">{{ katalogMsg }}</div>
+        <form @submit.prevent="simpanKatalogUrl">
+          <div class="field">
+            <label>Alamat situs katalog paket</label>
+            <input v-model="katalogUrl" :placeholder="katalogBawaan || 'https://...'" />
+          </div>
+          <button class="btn" type="submit">Simpan</button>
+        </form>
+      </div>
+
+      <div v-if="isAdmin()" class="card">
         <h3 style="margin-bottom: 12px">Token PLN Portalpulsa</h3>
         <p class="muted" style="font-size: 13px; margin-bottom: 12px">
           Perintah token PLN portalpulsa formatnya beda: <b>kode idpelanggan NoHP PIN</b>. Produk dikenali dari awalan kodenya.
@@ -394,57 +388,6 @@ onMounted(() => {
           </div>
           <button class="btn" type="submit">Simpan</button>
         </form>
-      </div>
-
-      <div class="card">
-        <h3 style="margin-bottom: 12px">Deposit Saldo portalpulsa</h3>
-        <p class="muted" style="font-size: 13px; margin-bottom: 12px">
-          Kirim perintah Deposit langsung ke portalpulsa (PIN otomatis dari secret PORTALPULSA_PIN).
-          Balasannya berupa <b>instruksi transfer manual</b> (nominal + kode unik, bank, no rekening) —
-          bukan topup otomatis, tetap transfer manual sesuai instruksi setelah dikirim.
-        </p>
-        <div v-if="depositError" class="error-box">{{ depositError }}</div>
-        <form @submit.prevent="kirimDepositPortalpulsa">
-          <div class="field"><label>Bank</label><input v-model="depositForm.bank" placeholder="mis. BCA" required /></div>
-          <div class="field"><label>Nominal (Rp)</label><input v-model.number="depositForm.nominal" type="number" min="1" required /></div>
-          <div class="field">
-            <label>Dompet sumber (uang beneran keluar dari sini)</label>
-            <select v-model.number="depositForm.walletId" required>
-              <option value="" disabled>Pilih dompet...</option>
-              <option v-for="w in wallets.filter((w) => w.type !== 'distributor_ppob')" :key="w.id" :value="w.id">
-                {{ w.name }} ({{ rupiah(w.balance) }})
-              </option>
-            </select>
-          </div>
-          <p class="muted" style="font-size: 12px; margin: -4px 0 8px">
-            Nominal ini otomatis dicatat sebagai <b>Mutasi</b> dari dompet sumber ke dompet Saldo Distributor portalpulsa (bukan biaya — tidak memengaruhi Laba Rugi).
-          </p>
-          <button class="btn" type="submit" :disabled="depositLoading">{{ depositLoading ? "Mengirim..." : "Kirim Deposit" }}</button>
-        </form>
-        <div v-if="depositMsg" class="ok-box" style="white-space: pre-wrap; margin-top: 12px">{{ depositMsg }}</div>
-
-        <div v-if="depositHistory.length" style="margin-top: 16px">
-          <h4 style="font-size: 14px; margin-bottom: 8px">Riwayat Deposit</h4>
-          <!-- Satu kartu per deposit, gaya riwayat deposit di aplikasi portalpulsa:
-               Bank / Nominal (yang benar-benar ditransfer, termasuk kode unik) / Status / Update. -->
-          <div
-            v-for="d in depositHistory"
-            :key="d.id"
-            style="border: 1px solid #d9d9d9; border-radius: 4px; padding: 4px 12px; margin-bottom: 10px; font-size: 14px"
-          >
-            <div class="dep-row"><b>Bank</b><span>{{ d.bank }}</span></div>
-            <div class="dep-row"><b>Nominal</b><span class="num">{{ rupiah(d.nominal_tampil) }}</span></div>
-            <div class="dep-row">
-              <b>Status</b>
-              <span class="badge" :class="badgeDeposit(d.status_label)">{{ d.status_label }}</span>
-            </div>
-            <div class="dep-row"><b>Update</b><span class="num">{{ d.waktu_update }}</span></div>
-            <details style="padding: 4px 0 8px">
-              <summary class="muted" style="font-size: 12px; cursor: pointer">Balasan provider · oleh {{ d.employee_name || "?" }}</summary>
-              <div class="muted" style="white-space: pre-wrap; margin-top: 4px; font-size: 12px">{{ d.raw_reply }}</div>
-            </details>
-          </div>
-        </div>
       </div>
 
       <div class="card">
@@ -518,8 +461,3 @@ onMounted(() => {
     </div>
   </div>
 </template>
-
-<style scoped>
-.dep-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #ececec; }
-.dep-row b { font-weight: 600; }
-</style>

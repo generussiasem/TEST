@@ -285,3 +285,11 @@ Admin mengatur di **Pengaturan → Harga Jual Standar**: **persentase laba dari 
 ## Token PLN portalpulsa
 
 Formatnya beda dari produk portalpulsa lain: `kode idpelanggan NoHP PIN` (mis. `PLN100 04341314134 085313000066 <PIN>`). Produk dikenali dari **awalan kode** (default `PLN`, diatur admin di **Pengaturan → Token PLN Portalpulsa**). Kasir cukup mengetik ID pelanggan — **No. HP bawaan** (nomor toko, juga diatur di Pengaturan) dipakai otomatis — atau `IDPEL NOHP` (dipisah spasi) untuk nomor lain. Kalau No. HP tidak ada sama sekali, order ditolak dengan pesan jelas sebelum apa pun dikirim ke provider. Struk dan laporan menampilkan ID pelanggan sebagai tujuan. Tidak ada migrasi baru (pengaturan disimpan di `app_state`).
+
+## Menu Deposit Portalpulsa
+
+Deposit saldo portalpulsa punya menu sendiri (**Deposit Portalpulsa**, khusus admin, di bawah Pengaturan Toko di sidebar; rute `/deposit-portalpulsa`) — dulu berupa kartu di halaman Pengaturan Toko. Isinya: saldo distributor + tombol Cek Saldo (yang juga mengonfirmasi deposit otomatis kalau saldo naik persis sebesar nominal transfer), form Kirim Deposit, dan Riwayat Deposit yang menyegarkan diri tiap menit. Tidak ada perubahan backend/migrasi.
+
+## Menu Katalog Paket (situs luar)
+
+Menu **Katalog Paket** (semua karyawan, rute `/katalog-paket`) menanam situs paket pihak lain lewat iframe, dengan tombol "Buka di tab baru" sebagai cadangan kalau situsnya memblokir tampilan tertanam. Alamat diatur admin di **Pengaturan → Katalog Paket (situs luar)** (disimpan di `app_state`, kosong = bawaan `https://kodebayar.web.id/`; hanya http/https yang diterima). Iframe memakai `sandbox` tanpa `allow-top-navigation`, jadi situs luar tidak bisa mengalihkan halaman aplikasi. Tidak ada migrasi.
